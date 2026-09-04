@@ -136,6 +136,8 @@ class Eye:
                     free = float(row.get("available") or 0)
         except Exception:
             free = 0.0
+        if self.settings.mode == "paper" and free <= 0:
+            free = self.settings.paper_starting_usdt
         self.bars = bars
         self.free_usdt = free
 

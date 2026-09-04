@@ -32,6 +32,7 @@ class Settings:
     openrouter_base_url: str
     qty_scale: int
     paper_slippage_bps: float
+    paper_starting_usdt: float
     ws_url: str
     stale_ms: int
 
@@ -57,6 +58,7 @@ class Settings:
             ).rstrip("/"),
             qty_scale=_i("QTY_SCALE", 5),
             paper_slippage_bps=_f("PAPER_SLIPPAGE_BPS", 5.0),
+            paper_starting_usdt=_f("PAPER_STARTING_USDT", 450.0),
             ws_url=os.getenv("KCEX_WS_URL", "").strip(),
             stale_ms=_i("STALE_MS", 30000),
         )
