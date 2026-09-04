@@ -40,8 +40,6 @@ def decide(
         return GateResult(False, "action", intent.action)
     if intent.action == "HOLD":
         return GateResult(False, "hold", "HOLD")
-    if day_pnl_usdt <= -abs(settings.max_day_loss_usdt):
-        return GateResult(False, "day_loss", intent.action)
 
     if intent.action == "SELL":
         if snap.bot_qty <= 0:
@@ -55,6 +53,8 @@ def decide(
             stop_price=None,
         )
 
+    if day_pnl_usdt <= -abs(settings.max_day_loss_usdt):
+        return GateResult(False, "day_loss", "BUY")
     if snap.bot_qty > 0:
         return GateResult(False, "already_long", "BUY")
     if snap.atr is None or snap.atr <= 0 or snap.last <= 0:

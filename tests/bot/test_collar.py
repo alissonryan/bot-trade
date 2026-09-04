@@ -120,6 +120,18 @@ def test_day_loss_halts():
     assert r.rule == "day_loss"
 
 
+def test_day_loss_still_allows_sell():
+    r = decide(
+        TradeIntent("SELL", 0.7, "exit", "trend"),
+        _snap(bot_qty=0.00025, bot_avg_entry=80_000, last=81_000),
+        _settings(),
+        session_ok=True,
+        day_pnl_usdt=-20.0,
+    )
+    assert r.ok is True
+    assert r.action == "SELL"
+
+
 def test_missing_atr_rejects_buy():
     r = decide(
         TradeIntent("BUY", 0.8, "go", "trend"),
