@@ -1,9 +1,11 @@
 import json
 from pathlib import Path
-
-from kcex.ws import DealEvent, DepthEvent, TickerEvent, parse_frame, subscribe_message
+import sys
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from kcex.ws import DealEvent, DepthEvent, TickerEvent, parse_frame, subscribe_message
 
 
 def test_parse_miniticker():
