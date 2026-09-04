@@ -1,0 +1,7 @@
+.env
+.venv/
+.kcex-profile/
+__pycache__/
+*.pyc
+.DS_Store
+.tmp-*
