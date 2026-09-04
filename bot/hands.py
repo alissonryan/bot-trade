@@ -57,6 +57,68 @@ class LiveHands:
         self.store = store
         self.client = client
         self.position = Position()
+        self.entry_order_id: str | None = None
+        self.stop_order_id: str | None = None
+
+    def cancel_if_ours(self, order_id: str) -> bool:
+        if not self.store.is_bot_order(order_id):
+            return False
+        self.client.cancel_order(order_id)
+        return True
 
     def execute(self, gate: GateResult, snap: Snapshot) -> Position:
-        raise NotImplementedError
+        if self.settings.mode != "live":
+            raise RuntimeError("LiveHands requires MODE=live")
+        if gate.action == "BUY" and gate.qty and gate.stop_price:
+            market = self.client.place_market(
+                currency="BTC",
+                market="USDT",
+                side="BUY",
+                price=str(snap.last),
+                quantity=gate.qty,
+            )
+            entry_id = str(market.get("data") or market)
+            self.store.remember_order(entry_id)
+            self.entry_order_id = entry_id
+            try:
+                trig = self.client.place_trigger(
+                    currency="BTC",
+                    market="USDT",
+                    side="SELL",
+                    trigger_price=gate.stop_price,
+                    trigger_type="LE",
+                    quantity=gate.qty,
+                    amount="0",
+                    market_order=True,
+                )
+            except Exception:
+                self.client.place_market(
+                    currency="BTC",
+                    market="USDT",
+                    side="SELL",
+                    price=str(snap.last),
+                    quantity=gate.qty,
+                )
+                self.position = Position()
+                return self.position
+            stop_id = str(trig.get("data") or trig)
+            self.store.remember_order(stop_id)
+            self.stop_order_id = stop_id
+            self.position = Position(
+                qty=float(gate.qty),
+                entry=snap.last,
+                stop_price=float(gate.stop_price),
+            )
+        elif gate.action == "SELL" and gate.qty:
+            if self.stop_order_id:
+                self.cancel_if_ours(self.stop_order_id)
+            self.client.place_market(
+                currency="BTC",
+                market="USDT",
+                side="SELL",
+                price=str(snap.last),
+                quantity=gate.qty,
+            )
+            self.position = Position()
+            self.stop_order_id = None
+        return self.position
