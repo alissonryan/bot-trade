@@ -43,3 +43,15 @@ python -m kcex.cli open-orders
 ```
 
 Mapa das APIs: [docs/kcex-spot-api.md](docs/kcex-spot-api.md)
+
+## Bot (paper)
+
+```bash
+# .env: OPENROUTER_API_KEY, LLM_MODEL=google/gemini-2.5-flash
+# MODE=paper
+PYTHONPATH=. python -m bot run
+```
+
+Live: `MODE=live` after `python -m kcex.cli login`. Max 20 USDT, BTC/USDT only, ATR stop on the exchange. Existing manual stops are never cancelled.
+
+WebSocket: set `KCEX_WS_URL` from `docs/kcex-spot-api.md`. Without it the eye polls REST.

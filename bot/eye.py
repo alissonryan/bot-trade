@@ -65,6 +65,14 @@ class Eye:
             float(ask) if ask is not None else None,
         )
 
+    def connect_ws(self) -> None:
+        # No live KCEX_WS_URL confirmed yet; do not invent one. REST stays primary.
+        if not self.settings.ws_url:
+            return
+        raise NotImplementedError(
+            "KCEX_WS_URL is set but live WS connect is not wired yet"
+        )
+
     def snapshot(self) -> Snapshot:
         spread = self.ask - self.bid if self.ask and self.bid else 0.0
         return Snapshot(
