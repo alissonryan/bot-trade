@@ -52,9 +52,17 @@ def _encode_ws_text_frame(payload: str) -> bytes:
     return _encode_ws_frame(0x1, payload.encode("utf-8"))
 
 
-def _read_client_frame(conn: socket.socket) -> tuple[int, bytes] | None:
-    """Read one client (masked) WS frame. Returns (opcode, payload) or None on close/error."""
-    header = conn.recv(2)
+def _read_client_frame(rfile: Any) -> tuple[int, bytes] | None:
+    """Read one client (masked) WS frame from a buffered stream.
+
+    Reads through the same buffered `rfile` used for the HTTP handshake
+    (rather than the raw socket) so frame parsing can never desync from
+    bytes BaseHTTPRequestHandler may already have buffered ahead of the
+    handshake response (e.g. a client that pipelines its first frame
+    immediately after the upgrade request). `rfile.read(n)` blocks until
+    exactly `n` bytes are read or EOF, so no accumulation loop is needed.
+    """
+    header = rfile.read(2)
     if len(header) < 2:
         return None
     b0, b1 = header[0], header[1]
@@ -62,28 +70,23 @@ def _read_client_frame(conn: socket.socket) -> tuple[int, bytes] | None:
     masked = bool(b1 & 0x80)
     length = b1 & 0x7F
     if length == 126:
-        ext = conn.recv(2)
+        ext = rfile.read(2)
         if len(ext) < 2:
             return None
         length = struct.unpack(">H", ext)[0]
     elif length == 127:
-        ext = conn.recv(8)
+        ext = rfile.read(8)
         if len(ext) < 8:
             return None
         length = struct.unpack(">Q", ext)[0]
     mask_key = b""
     if masked:
-        mask_key = conn.recv(4)
+        mask_key = rfile.read(4)
         if len(mask_key) < 4:
             return None
-    payload = b""
-    remaining = length
-    while remaining > 0:
-        chunk = conn.recv(remaining)
-        if not chunk:
-            return None
-        payload += chunk
-        remaining -= len(chunk)
+    payload = rfile.read(length) if length else b""
+    if len(payload) < length:
+        return None
     if masked and mask_key:
         payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
     return opcode, payload
@@ -155,7 +158,7 @@ class _Handler(BaseHTTPRequestHandler):
             conn.settimeout(1.0)
             while not server.stopped:
                 try:
-                    frame = _read_client_frame(conn)
+                    frame = _read_client_frame(self.rfile)
                 except socket.timeout:
                     continue
                 except OSError:
@@ -164,15 +167,10 @@ class _Handler(BaseHTTPRequestHandler):
                     break
                 opcode, payload = frame
                 if opcode == 0x8:  # close
-                    try:
-                        conn.sendall(_encode_ws_frame(0x8, payload[:2]))
-                    except OSError:
-                        pass
+                    server.send_frame(conn, _encode_ws_frame(0x8, payload[:2]))
                     break
                 if opcode == 0x9:  # ping -> pong
-                    try:
-                        conn.sendall(_encode_ws_frame(0xA, payload))
-                    except OSError:
+                    if not server.send_frame(conn, _encode_ws_frame(0xA, payload)):
                         break
                 # data frames (0x0/0x1/0x2) and pong (0xA) are ignored: this
                 # is a one-way tick stream, we don't accept client input.
@@ -192,6 +190,7 @@ class ChartServer:
         self.port: int | None = None
         self.clients: list[socket.socket] = []
         self._clients_lock = threading.Lock()
+        self._write_locks: dict[socket.socket, threading.Lock] = {}
         self.stopped = False
         self._broadcast_thread: threading.Thread | None = None
 
@@ -221,6 +220,7 @@ class ChartServer:
         with self._clients_lock:
             clients = list(self.clients)
             self.clients.clear()
+            self._write_locks.clear()
         for conn in clients:
             try:
                 conn.close()
@@ -233,11 +233,34 @@ class ChartServer:
     def add_client(self, conn: socket.socket) -> None:
         with self._clients_lock:
             self.clients.append(conn)
+            self._write_locks[conn] = threading.Lock()
 
     def remove_client(self, conn: socket.socket) -> None:
         with self._clients_lock:
             if conn in self.clients:
                 self.clients.remove(conn)
+            self._write_locks.pop(conn, None)
+
+    def send_frame(self, conn: socket.socket, frame: bytes) -> bool:
+        """Write one WS frame to a client, serialized per-connection.
+
+        The broadcast thread and this connection's own handler thread (for
+        ping/close replies) both write to the same socket; without a
+        per-connection lock, two threads could interleave partial `send()`
+        calls and corrupt the frame stream for that client. Returns False
+        (and does not raise) if the write lock is gone (client already
+        removed) or the write fails.
+        """
+        with self._clients_lock:
+            lock = self._write_locks.get(conn)
+        if lock is None:
+            return False
+        with lock:
+            try:
+                conn.sendall(frame)
+                return True
+            except OSError:
+                return False
 
     def _broadcast_loop(self) -> None:
         while not self.stopped:
@@ -248,14 +271,10 @@ class ChartServer:
             frame = _encode_ws_text_frame(payload)
             with self._clients_lock:
                 targets = list(self.clients)
-            dead = []
-            for conn in targets:
-                try:
-                    conn.sendall(frame)
-                except OSError:
-                    dead.append(conn)
+            dead = [conn for conn in targets if not self.send_frame(conn, frame)]
             if dead:
                 with self._clients_lock:
                     for conn in dead:
                         if conn in self.clients:
                             self.clients.remove(conn)
+                        self._write_locks.pop(conn, None)
