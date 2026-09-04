@@ -16,15 +16,15 @@ Owner currently trades manually and wants the bot to replace that loop. First li
 | --- | --- |
 | [README.md](README.md) | How to run |
 | [docs/superpowers/specs/2026-09-04-kcex-llm-spot-bot-design.md](docs/superpowers/specs/2026-09-04-kcex-llm-spot-bot-design.md) | Product decisions (some defaults drifted — see below) |
-| [docs/kcex-spot-api.md](docs/kcex-spot-api.md) | Reverse-engineered REST and **WS gaps** |
+| [docs/kcex-spot-api.md](docs/kcex-spot-api.md) | Reverse-engineered REST and the **confirmed public WS** |
 | [docs/superpowers/plans/2026-09-04-kcex-llm-spot-bot.md](docs/superpowers/plans/2026-09-04-kcex-llm-spot-bot.md) | Implementation plan (**already executed**, 11 tasks) |
 
-Spec vs code: the spec still says “15 min cycle” and “WS primary”. **Ops and `.env.example` use 5 minutes.** **v1 eye is REST poll.** Follow this file + code, not the stale spec lines.
+Spec vs code: the spec still says “15 min cycle”. **Ops and `.env.example` use 5 minutes.** **v1 eye is public WS + REST fallback** (WS primary, confirmed and wired — see below). Follow this file + code, not the stale spec lines.
 
 ## Architecture (do not collapse)
 
 ```
-Eye (REST poll 1s, optional WS later) → Snapshot
+Eye (public WS primary, REST poll fallback) → Snapshot
 Brain (OpenRouter, 1 model) → TradeIntent JSON
 Collar (pure rules) → GateResult
 Hands: PaperHands (SQLite ledger) | LiveHands (KCEX REST)
@@ -36,7 +36,10 @@ Store: data/bot.db audit + fills + bot order ids + position
 | `kcex/` | Venue client + Chrome login. **Do not replace with CCXT.** |
 | `kcex/client.py` | Reverse-engineered REST |
 | `kcex/login.py` | Playwright session capture → `KCEX_TOKEN` |
-| `bot/eye.py` | REST poll (`poll_quotes` every loop; `poll_heavy` when LLM due). `apply_frame` exists for future WS. |
+| `bot/eye.py` | Public WS (via `Hub`) primary, REST fallback (`poll_quotes` every loop; `poll_heavy` for kline/balances when LLM due) |
+| `bot/hub.py` | In-process holder of the latest WS tick (`last`/`bid`/`ask`/`ts_ms`/`ws_ok`), shared by `Eye` and `ChartServer` |
+| `kcex/ws.py` | Public WS client: parses `miniTicker`/`deals`/`depth` frames, ping loop, `DEFAULT_WS_URL` |
+| `bot/chart_server.py` | Loopback-only local HTTP+WS chart server (`--chart`) — REST kline + live WS ticks, read-only |
 | `bot/brain.py` | OpenRouter. Output `{action, confidence, reason, regime}` only |
 | `bot/collar.py` | Risk gate: size, ATR stop, one position, day-loss |
 | `bot/hands.py` | `PaperHands` / `LiveHands` |
@@ -86,10 +89,12 @@ After that, every private REST call is `Authorization: WEB…` plus the same val
 
 ## Eye (market data)
 
-- v1 production path: **REST poll**. `poll_quotes()` (ticker+depth) every loop second; `poll_heavy()` (kline+balances) when the LLM is due.
-- `KCEX_WS_URL` is **unset**. `Eye.connect_ws` is a no-op without it. **Do not invent a `wss://` host.** Capture from a logged-in Chrome session, then document in `docs/kcex-spot-api.md`.
-- `GET /uc/user_api/ws_token` exists (short-lived, sockets only). REST trading does not use it.
-- KuCoin/OKX/LLM-Auto-Trader prefer WS; we poll until KCEX WS is mapped.
+- v1 production path: **public WS + REST fallback**. `KCEX_WS_URL` defaults (when unset) to the confirmed `wss://wbs.kcex.com/ws?platform=web` (`kcex.ws.DEFAULT_WS_URL`, also reachable at `wbs.kcex.io`). `Eye.start_ws_thread()` spawns one daemon thread owning the process's single `PublicSpotWs` connection, feeding ticker/deal/depth events into the shared `bot/hub.py::Hub`, reconnecting with a 2s backoff on error.
+- `Eye.poll_quotes()` calls `sync_hub()` first and only falls back to REST ticker+depth when WS is down or **stale** (no fresh frame within `STALE_MS`, default 30000ms — this covers both a hard socket error and a WS thread that silently stops producing frames). `poll_heavy()` (kline+balances) is unchanged and always REST.
+- **Do not invent any *other* `wss://` host.** This one was captured from Chrome and confirmed working; if you need a different endpoint, capture it from a logged-in Chrome session first, then document in `docs/kcex-spot-api.md`.
+- `KCEX_WS_URL=-` forces REST-only (empties `ws_url`, `start_ws_thread` no-ops). Chart candles are still REST kline — no kline-over-WS.
+- `GET /uc/user_api/ws_token` exists (short-lived, private/authenticated socket use case). **Not used** by the public WS — the public channels need no auth at all.
+- `python -m bot run --chart` starts a **loopback-only** local chart server (`bot/chart_server.py`) at `http://127.0.0.1:8765/` (host/port from `CHART_HOST`/`CHART_PORT`) — a read-only price/candlestick view (REST `/kline` seed + WS `/ws` live ticks re-encoded as our own JSON, never the raw KCEX frame). No buy/sell controls. It never opens a second KCEX WS connection — it only reads the shared `Hub`. **Do not bind it off loopback** (`require_loopback` hard-rejects anything but `127.0.0.1`/`localhost`/`::1`); if the port is already bound, `--chart` prints the error and exits 1 rather than falling back to another port.
 
 ## Commands
 
@@ -137,6 +142,6 @@ Use this to resume. Update this section when ops change.
 - Paper loop was started with `PYTHONPATH=. .venv/bin/python -m bot run`. Check if still running before starting another.
 - Next human-facing work (not started unless asked):
   1. Keep paper running / inspect `data/bot.db` for BUY vs HOLD.
-  2. Capture KCEX WS URL from Chrome (do not invent).
+  2. ~~Capture KCEX WS URL from Chrome~~ — **done**: public WS (`wss://wbs.kcex.com/ws?platform=web`) is confirmed, wired, and now the v1 default. See [Eye (market data)](#eye-market-data) above and `docs/kcex-spot-api.md`. `python -m bot run --chart` gives a local read-only chart at `http://127.0.0.1:8765/`.
   3. `python -m kcex.cli login` then a **tiny** live probe (20 USDT) — only if the owner explicitly asks.
   4. Do **not** cancel/modify the user’s existing 0.00064 BTC stop at 75722.

@@ -10,9 +10,10 @@ Para agentes (Claude Code, Cursor, Codex, Grok): leia [AGENTS.md](AGENTS.md) e [
 
 | | |
 | --- | --- |
-| Paper | Roda. Ticker/book REST ~1s. LLM a cada **5 min** (ou se o preço andar ~0,4%). |
+| Paper | Roda. Preço via **WebSocket público da KCEX** (fallback REST se cair/atrasar). LLM a cada **5 min** (ou se o preço andar ~0,4%). |
 | Live | **Ainda não.** Precisa `python -m kcex.cli login` e `MODE=live`. |
-| WebSocket KCEX | **Não mapeado.** Não inventar URL. |
+| WebSocket KCEX | **Mapeado e em uso**: `wss://wbs.kcex.com/ws?platform=web` (default). Não inventar **outra** URL sem capturar do Chrome. |
+| Gráfico local | `python -m bot run --chart` → `http://127.0.0.1:8765/` (candles, só leitura, sem botão de compra/venda). |
 | Coleira | 20 USDT por ordem, ~5% do caixa, 1 posição do bot, stop ATR na exchange (live). |
 | Conta humana | Há um stop **manual** (0.00064 BTC @ 75722). O bot **não cancela** ids que não gravou. |
 | Git | `main` após o plano de 11 tarefas. Testes: `pytest tests`. |
@@ -23,7 +24,7 @@ APIs: [docs/kcex-spot-api.md](docs/kcex-spot-api.md)
 ## Como funciona
 
 ```text
-KCEX REST (preço real)
+KCEX WebSocket público (preço real, fallback REST se ficar down/atrasado)
         ↓
 LLM (OpenRouter) → BUY | SELL | HOLD
         ↓
@@ -69,14 +70,18 @@ Nunca commite `.env`.
 | `PAPER_STARTING_USDT` | `450` | Caixa virtual se o saldo KCEX falhar/zerar |
 | `LLM_DAILY_BUDGET_USD` | `2` | Para novas chamadas OpenRouter (UTC) |
 | `KCEX_TOKEN` | vazio | Sessão web; obrigatório só no live |
-| `KCEX_WS_URL` | vazio | Deixe vazio até capturar no Chrome |
+| `KCEX_WS_URL` | vazio = default confirmado (`wss://wbs.kcex.com/ws?platform=web`) | `-` força só REST (sem WS) |
+| `CHART_HOST` / `CHART_PORT` | `127.0.0.1` / `8765` | Onde `--chart` sobe o gráfico local (loopback só) |
 
 ## Paper
 
 ```bash
 PYTHONPATH=. python -m bot run           # loop
 PYTHONPATH=. python -m bot run --once    # um ciclo
+PYTHONPATH=. python -m bot run --chart   # loop + gráfico local (http://127.0.0.1:8765/)
 ```
+
+`--chart` sobe um servidor HTTP+WS **só em loopback** (`127.0.0.1`/`localhost`/`::1` — recusa qualquer outro host) com um gráfico de candles somente leitura (`chart/index.html`): candles vêm de REST (`/kline`, mesmo padrão do `poll_heavy`), o preço ao vivo vem do `Hub` compartilhado via WebSocket próprio (`/ws`, nosso JSON, nunca o frame cru da KCEX). Não abre uma segunda conexão com a KCEX e não tem nenhum controle de compra/venda. Se a porta já estiver em uso, falha na hora (sem porta alternativa).
 
 Log:
 
@@ -123,8 +128,9 @@ Nenhuma ordem live nos testes.
 
 | Path | Função |
 | --- | --- |
-| `bot/` | Olho, cérebro, coleira, mãos, loop |
-| `kcex/` | Cliente REST + login Playwright |
+| `bot/` | Olho (WS + REST fallback), cérebro, coleira, mãos, loop, servidor do gráfico |
+| `kcex/` | Cliente REST + WS público + login Playwright |
+| `chart/index.html` | Página do gráfico local (`--chart`), só leitura |
 | `tests/` | Pytest; mocks, sem live |
 | `docs/kcex-spot-api.md` | Endpoints capturados |
 | `data/bot.db` | Audit paper/live (gitignored) |
@@ -134,5 +140,5 @@ Nenhuma ordem live nos testes.
 ## Próxima sessão
 
 1. Ver o paper (`audit` no SQLite): HOLD vs BUY.
-2. Mapear WebSocket da KCEX no Chrome (não inventar `wss://`).
+2. ~~Mapear WebSocket da KCEX no Chrome~~ — **feito**: `wss://wbs.kcex.com/ws?platform=web` confirmado e em uso por default. Não inventar **outra** URL `wss://` sem capturar do Chrome.
 3. Só então login live e um probe de 20 USDT — se o dono pedir.
