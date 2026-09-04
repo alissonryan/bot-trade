@@ -128,11 +128,14 @@ class Eye:
                     v=float(data.get("v", [0] * len(data["t"]))[i] if data.get("v") else 0),
                 )
             )
-        bals = self.client.balances("USDT")
         free = 0.0
-        for row in bals.get("data") or []:
-            if row.get("currency") == "USDT":
-                free = float(row.get("available") or 0)
+        try:
+            bals = self.client.balances("USDT")
+            for row in bals.get("data") or []:
+                if row.get("currency") == "USDT":
+                    free = float(row.get("available") or 0)
+        except Exception:
+            free = 0.0
         self.bars = bars
         self.free_usdt = free
 
