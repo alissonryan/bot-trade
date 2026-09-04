@@ -89,6 +89,40 @@ class Eye:
         # regardless of whether KCEX_WS_URL is configured. REST stays primary.
         return
 
+    def start_ws_thread(self) -> None:
+        """Start the (single) background WS thread for this process, if configured.
+
+        No-ops when `settings.ws_url` is empty (REST-only). Otherwise spawns
+        exactly one daemon thread that owns the one-and-only KCEX public WS
+        connection for this process: it feeds parsed events into the shared
+        `Hub` via `apply_event`, and reconnects with a short backoff on any
+        error so the loop never dies quietly.
+        """
+        if not self.settings.ws_url:
+            return
+        import threading
+
+        from kcex.ws import PublicSpotWs, default_connect
+
+        def on_event(ev: Any) -> None:
+            self.apply_event(ev)
+
+        def on_error(exc: Exception) -> None:
+            self.hub.mark_down()
+            self.ws_ok = False
+
+        def loop() -> None:
+            while True:
+                try:
+                    ws = PublicSpotWs(self.settings.ws_url, self.settings.symbol, default_connect)
+                    ws.pump(on_event=on_event, on_error=on_error)
+                except Exception:
+                    self.hub.mark_down()
+                    self.ws_ok = False
+                time.sleep(2)
+
+        threading.Thread(target=loop, daemon=True).start()
+
     def snapshot(self) -> Snapshot:
         spread = self.ask - self.bid if self.ask and self.bid else 0.0
         return Snapshot(

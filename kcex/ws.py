@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from typing import Any
 
 
 DEFAULT_WS_URL = "wss://wbs.kcex.com/ws?platform=web"
+PING_INTERVAL_S = 15.0
 
 
 @dataclass(frozen=True)
@@ -123,8 +125,13 @@ class PublicSpotWs:
     def pump(self, *, on_event, on_error, max_messages: int | None = None) -> None:
         sock = self._connect(self.url)
         sock.send(json.dumps(subscribe_message(self.symbol)))
+        last_ping = time.monotonic()
         n = 0
         while max_messages is None or n < max_messages:
+            now = time.monotonic()
+            if now - last_ping >= PING_INTERVAL_S:
+                sock.send(json.dumps(ping_message()))
+                last_ping = now
             try:
                 raw = sock.recv()
             except Exception as exc:

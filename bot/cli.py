@@ -16,12 +16,17 @@ from kcex.client import KcexClient
 from kcex.login import require_live_token
 
 
-def main(argv: list[str] | None = None) -> int:
-    load_dotenv()
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("cmd", choices=["run"])
     parser.add_argument("--once", action="store_true")
-    args = parser.parse_args(argv)
+    parser.add_argument("--chart", action="store_true", default=False)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    load_dotenv()
+    args = build_parser().parse_args(argv)
     settings = Settings.from_env()
     token = ""
     if settings.mode == "live":
@@ -29,6 +34,23 @@ def main(argv: list[str] | None = None) -> int:
     client = KcexClient(token=token or None)
     store = Store(Path("data/bot.db"))
     eye = Eye(client, settings)
+    eye.start_ws_thread()
+    chart = None
+    if args.chart:
+        from bot.chart_server import ChartServer
+
+        try:
+            chart = ChartServer(
+                hub=eye.hub,
+                client=client,
+                host=settings.chart_host,
+                port=settings.chart_port,
+            )
+            chart.start()
+        except (ValueError, OSError) as exc:
+            print(f"chart server failed to start: {exc}")
+            return 1
+        print(f"chart http://{settings.chart_host}:{settings.chart_port}/")
     if settings.mode == "live":
         hands: PaperHands | LiveHands = LiveHands(settings, store, client)
     else:
