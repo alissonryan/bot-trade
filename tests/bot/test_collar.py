@@ -166,6 +166,31 @@ def test_stale_still_allows_sell():
     assert r.action == "SELL"
 
 
+def test_zero_last_rejects_buy():
+    r = decide(
+        TradeIntent("BUY", 0.8, "go", "trend"),
+        _snap(last=0.0),
+        _settings(),
+        session_ok=True,
+        day_pnl_usdt=0.0,
+    )
+    assert r.ok is False
+    assert r.rule == "atr"
+
+
+def test_zero_last_rejects_sell():
+    """A zero/invalid `last` must block SELL just as it blocks BUY."""
+    r = decide(
+        TradeIntent("SELL", 0.7, "exit", "trend"),
+        _snap(last=0.0, bot_qty=0.00025, bot_avg_entry=80_000),
+        _settings(),
+        session_ok=True,
+        day_pnl_usdt=0.0,
+    )
+    assert r.ok is False
+    assert r.rule == "no_price"
+
+
 def test_sell_long_closes_without_new_stop():
     r = decide(
         TradeIntent("SELL", 0.7, "exit", "trend"),

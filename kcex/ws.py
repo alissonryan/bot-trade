@@ -129,32 +129,43 @@ class PublicSpotWs:
 
     def pump(self, *, on_event, on_error, max_messages: int | None = None) -> None:
         sock = self._connect(self.url)
-        sock.send(json.dumps(subscribe_message(self.symbol)))
-        last_ping = time.monotonic()
-        n = 0
-        while max_messages is None or n < max_messages:
-            now = time.monotonic()
-            if now - last_ping >= PING_INTERVAL_S:
-                sock.send(json.dumps(ping_message()))
-                last_ping = now
+        # Every exit path closes the socket: without this, each reconnect cycle
+        # in Eye.start_ws_thread() leaks a connection object (and, for a real
+        # websockets.sync connection, a background thread) in a process meant
+        # to run for days.
+        try:
+            sock.send(json.dumps(subscribe_message(self.symbol)))
+            last_ping = time.monotonic()
+            n = 0
+            while max_messages is None or n < max_messages:
+                now = time.monotonic()
+                if now - last_ping >= PING_INTERVAL_S:
+                    sock.send(json.dumps(ping_message()))
+                    last_ping = now
+                try:
+                    raw = sock.recv(timeout=RECV_TIMEOUT_S)
+                except TimeoutError:
+                    # No message within RECV_TIMEOUT_S: not a connection failure,
+                    # just a quiet stretch. Loop back so the ping-interval check
+                    # above keeps running on schedule instead of being starved
+                    # by a recv() that would otherwise block indefinitely.
+                    continue
+                except Exception as exc:
+                    on_error(exc)
+                    return
+                n += 1
+                try:
+                    event = parse_text(raw) if isinstance(raw, str) else None
+                except Exception:
+                    continue
+                if event is not None:
+                    on_event(event)
+        finally:
+            # Closing must never mask the original exit reason.
             try:
-                raw = sock.recv(timeout=RECV_TIMEOUT_S)
-            except TimeoutError:
-                # No message within RECV_TIMEOUT_S: not a connection failure,
-                # just a quiet stretch. Loop back so the ping-interval check
-                # above keeps running on schedule instead of being starved
-                # by a recv() that would otherwise block indefinitely.
-                continue
-            except Exception as exc:
-                on_error(exc)
-                return
-            n += 1
-            try:
-                event = parse_text(raw) if isinstance(raw, str) else None
+                sock.close()
             except Exception:
-                continue
-            if event is not None:
-                on_event(event)
+                pass
 
 
 def default_connect(url: str):

@@ -45,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
                 client=client,
                 host=settings.chart_host,
                 port=settings.chart_port,
+                symbol=settings.symbol,
             )
             chart.start()
         except (ValueError, OSError) as exc:

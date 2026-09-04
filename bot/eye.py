@@ -32,6 +32,10 @@ class Eye:
         self.free_usdt = 0.0
         self.ws_ok = False
         self.last_update_ms = 0
+        # Tracked separately from last_update_ms: the depth (bid/ask) channel
+        # can die while the ticker channel stays healthy, and vice versa.
+        self.depth_update_ms = 0
+        self._depth_rest_failed = False
         self.last_intent_action: str | None = None
         self.last_bot_pnl_usdt = 0.0
 
@@ -40,14 +44,27 @@ class Eye:
             return True
         return (int(time.time() * 1000) - self.last_update_ms) > self.settings.stale_ms
 
+    def _depth_stale(self) -> bool:
+        """True when bid/ask have not been refreshed recently enough.
+
+        Independent of `_stale()` (which only tracks `last`). Reuses the same
+        `stale_ms` threshold rather than introducing another env var.
+        """
+        if self.depth_update_ms == 0:
+            return True
+        return (int(time.time() * 1000) - self.depth_update_ms) > self.settings.stale_ms
+
     def apply_ws_price(self, last: float, bid: float | None = None, ask: float | None = None) -> None:
         self.last = last
+        now_ms = int(time.time() * 1000)
         if bid is not None:
             self.bid = bid
         if ask is not None:
             self.ask = ask
+        if bid is not None or ask is not None:
+            self.depth_update_ms = now_ms
         self.ws_ok = True
-        self.last_update_ms = int(time.time() * 1000)
+        self.last_update_ms = now_ms
 
     def apply_frame(self, msg: dict) -> None:
         last = msg.get("last") or msg.get("c") or msg.get("p")
@@ -70,13 +87,18 @@ class Eye:
 
     def sync_hub(self) -> None:
         """Pull the shared Hub's latest snapshot into this Eye's own fields."""
-        if not self.hub.ws_ok:
+        # A hub that is "up" but has never seen a real price (last == 0.0) must
+        # never be copied in: a zero `last` would look fresh to poll_quotes(),
+        # silence REST forever, and reach the collar / stop-out logic.
+        if not self.hub.ws_ok or self.hub.last <= 0:
             return
         self.last = self.hub.last
         if self.hub.bid:
             self.bid = self.hub.bid
         if self.hub.ask:
             self.ask = self.hub.ask
+        if self.hub.depth_ts_ms and self.hub.depth_ts_ms > self.depth_update_ms:
+            self.depth_update_ms = self.hub.depth_ts_ms
         self.ws_ok = True
         self.last_update_ms = self.hub.ts_ms or int(time.time() * 1000)
 
@@ -104,21 +126,34 @@ class Eye:
 
         from kcex.ws import PublicSpotWs, default_connect
 
+        # Printed state is transition-based so a sustained outage logs once,
+        # not every 2s reconnect attempt. Starts True so the first failure is
+        # always reported, even if it happens on the very first connect.
+        state = {"healthy": True}
+
+        def _mark_down(exc: Exception | None) -> None:
+            self.hub.mark_down()
+            self.ws_ok = False
+            if state["healthy"]:
+                state["healthy"] = False
+                print(f"ws caiu: {exc}. usando REST ate reconectar")
+
         def on_event(ev: Any) -> None:
+            if not state["healthy"]:
+                state["healthy"] = True
+                print("ws reconectado")
             self.apply_event(ev)
 
         def on_error(exc: Exception) -> None:
-            self.hub.mark_down()
-            self.ws_ok = False
+            _mark_down(exc)
 
         def loop() -> None:
             while True:
                 try:
                     ws = PublicSpotWs(self.settings.ws_url, self.settings.symbol, default_connect)
                     ws.pump(on_event=on_event, on_error=on_error)
-                except Exception:
-                    self.hub.mark_down()
-                    self.ws_ok = False
+                except Exception as exc:
+                    _mark_down(exc)
                 time.sleep(2)
 
         threading.Thread(target=loop, daemon=True).start()
@@ -142,18 +177,37 @@ class Eye:
             last_bot_pnl_usdt=self.last_bot_pnl_usdt,
         )
 
+    def _poll_depth_rest(self) -> None:
+        depth = self.client.depth(self.settings.symbol)
+        book = depth["data"]["data"]
+        self.bid = float(book["bids"][0]["p"])
+        self.ask = float(book["asks"][0]["p"])
+        self.depth_update_ms = int(time.time() * 1000)
+
     def poll_quotes(self) -> None:
         """Cheap REST tick used every loop when WS is not live (LLM-Auto-Trader style)."""
         self.sync_hub()
         if self.ws_ok and not self._stale():
+            # The ticker/last path is satisfied by WS, so skip the full REST
+            # snapshot -- but depth (bid/ask) rides a separate channel that can
+            # be silently absent, so it gets its own freshness check and its
+            # own cheap REST top-up rather than being silenced along with it.
+            if self._depth_stale():
+                # Best-effort: the ticker path is healthy, so a failed depth
+                # top-up must degrade (stale bid/ask, still visible via
+                # depth_update_ms) rather than kill the unattended loop.
+                try:
+                    self._poll_depth_rest()
+                    self._depth_rest_failed = False
+                except Exception as exc:
+                    if not self._depth_rest_failed:
+                        self._depth_rest_failed = True
+                        print(f"depth REST falhou: {exc}. bid/ask seguem defasados")
             return
         ticker = self.client.ticker(self.settings.symbol)
         last = float(ticker["data"]["c"])
-        depth = self.client.depth(self.settings.symbol)
-        book = depth["data"]["data"]
-        bid = float(book["bids"][0]["p"])
-        ask = float(book["asks"][0]["p"])
-        self.last, self.bid, self.ask = last, bid, ask
+        self.last = last
+        self._poll_depth_rest()
         self.last_update_ms = int(time.time() * 1000)
         self.ws_ok = False
 

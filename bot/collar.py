@@ -40,6 +40,11 @@ def decide(
         return GateResult(False, "hold", "HOLD")
 
     if intent.action == "SELL":
+        # Same invalid-price guard the BUY branch applies via its `atr` rule:
+        # a zero/negative `last` (e.g. a WS feed that went "up" without ever
+        # carrying a price) must never size or price a live order.
+        if snap.last <= 0:
+            return GateResult(False, "no_price", "SELL")
         if snap.bot_qty <= 0:
             return GateResult(False, "flat", "SELL")
         return GateResult(

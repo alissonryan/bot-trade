@@ -12,6 +12,7 @@ class FakeSock:
     def __init__(self, incoming: list[str]):
         self.incoming = list(incoming)
         self.sent: list[str] = []
+        self.closed = False
 
     def send(self, text: str) -> None:
         self.sent.append(text)
@@ -20,6 +21,9 @@ class FakeSock:
         if not self.incoming:
             raise ConnectionError("closed")
         return self.incoming.pop(0)
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class TimeoutThenMessageSock:
@@ -31,6 +35,7 @@ class TimeoutThenMessageSock:
         self.timeouts_left = timeouts_before_message
         self.incoming = list(incoming)
         self.sent: list[str] = []
+        self.closed = False
 
     def send(self, text: str) -> None:
         self.sent.append(text)
@@ -42,6 +47,9 @@ class TimeoutThenMessageSock:
         if not self.incoming:
             raise ConnectionError("closed")
         return self.incoming.pop(0)
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def test_run_once_subscribes_and_yields_ticker():
@@ -58,6 +66,7 @@ def test_run_once_subscribes_and_yields_ticker():
     assert any(isinstance(e, TickerEvent) and e.last == 100.5 for e in events)
     sub = json.loads(sock.sent[0])
     assert sub["method"] == "SUBSCRIPTION"
+    assert sock.closed is True  # normal loop exit still closes the socket
 
 
 def test_bad_json_does_not_raise():
@@ -83,3 +92,36 @@ def test_recv_timeout_is_not_fatal_and_pump_continues():
     assert errors == []
     assert any(isinstance(e, TickerEvent) and e.last == 100.5 for e in events)
     assert sock.timeouts_left == 0
+    assert sock.closed is True
+
+
+def test_recv_exception_calls_on_error_and_closes_socket():
+    """Regression: the recv-failure path must report AND close.
+
+    Previously pump() returned straight out of on_error without closing,
+    leaking one connection (and its background thread) per reconnect cycle.
+    """
+    sock = FakeSock([])  # first recv() raises ConnectionError
+    events = []
+    errors = []
+    ws = PublicSpotWs(url="wss://example.invalid/ws", symbol="BTC_USDT", connect=lambda url: sock)
+    ws.pump(on_event=events.append, on_error=errors.append, max_messages=5)
+    assert events == []
+    assert len(errors) == 1
+    assert isinstance(errors[0], ConnectionError)
+    assert sock.closed is True
+
+
+def test_send_failure_still_closes_socket():
+    class SendBoomSock(FakeSock):
+        def send(self, text: str) -> None:
+            raise ConnectionError("send failed")
+
+    sock = SendBoomSock([])
+    ws = PublicSpotWs(url="wss://example.invalid/ws", symbol="BTC_USDT", connect=lambda url: sock)
+    try:
+        ws.pump(on_event=lambda e: None, on_error=lambda e: None, max_messages=1)
+        assert False, "should have propagated"
+    except ConnectionError:
+        pass
+    assert sock.closed is True

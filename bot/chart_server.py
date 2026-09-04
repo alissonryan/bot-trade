@@ -28,6 +28,21 @@ def require_loopback(host: str) -> str:
     return host
 
 
+_ALLOWED_ORIGIN_PREFIXES = ("http://127.0.0.1:", "http://localhost:", "http://[::1]:")
+
+
+def _origin_is_loopback(origin: str) -> bool:
+    """True when an Origin header points at this loopback-bound server.
+
+    Also accepts the bare host with no port (e.g. "http://localhost") so a
+    default-port loopback page is not rejected.
+    """
+    o = origin.strip()
+    if o in {"http://127.0.0.1", "http://localhost", "http://[::1]"}:
+        return True
+    return o.startswith(_ALLOWED_ORIGIN_PREFIXES)
+
+
 def _ws_accept_key(client_key: str) -> str:
     digest = hashlib.sha1((client_key + WS_GUID).encode("utf-8")).digest()
     return base64.b64encode(digest).decode("ascii")
@@ -123,12 +138,21 @@ class _Handler(BaseHTTPRequestHandler):
         server: ChartServer = self.server.chart
         end = int(time.time() * 1000)
         start = end - 20 * 15 * 60 * 1000
-        data = server.client.kline(
-            server.symbol,
-            interval="Min15",
-            start=start,
-            end=end,
-        )
+        try:
+            data = server.client.kline(
+                server.symbol,
+                interval="Min15",
+                start=start,
+                end=end,
+            )
+        except Exception as exc:  # exchange/network failure -> clean JSON error
+            body = json.dumps({"error": "kline fetch failed", "detail": str(exc)}).encode("utf-8")
+            self.send_response(502)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         body = json.dumps(data).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -137,6 +161,13 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _serve_ws(self) -> None:
+        origin = self.headers.get("Origin")
+        if origin is not None and not _origin_is_loopback(origin):
+            # A browser page on some other site must not be able to subscribe
+            # to (or DNS-rebind onto) this local tick stream. Non-browser
+            # clients send no Origin at all, so absence is allowed.
+            self.send_error(403, "forbidden origin")
+            return
         client_key = self.headers.get("Sec-WebSocket-Key")
         if not client_key:
             self.send_error(400, "missing Sec-WebSocket-Key")
@@ -193,6 +224,7 @@ class ChartServer:
         self._write_locks: dict[socket.socket, threading.Lock] = {}
         self.stopped = False
         self._broadcast_thread: threading.Thread | None = None
+        self._serve_thread: threading.Thread | None = None
 
     def start(self) -> None:
         require_loopback(self.host)
@@ -210,7 +242,17 @@ class ChartServer:
         self._broadcast_thread = threading.Thread(target=self._broadcast_loop, daemon=True)
         self._broadcast_thread.start()
 
+        # start() must leave the server actually answering requests: nobody in
+        # production calls serve_forever(), so accepting connections is our job.
+        self._serve_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        self._serve_thread.start()
+
     def serve_forever(self) -> None:
+        """Blocking alternative for manual/foreground use.
+
+        `start()` already runs the accept loop on its own thread, so this is
+        only useful when driving the server by hand.
+        """
         if self._httpd is None:
             raise RuntimeError("call start() before serve_forever()")
         self._httpd.serve_forever()
@@ -229,6 +271,12 @@ class ChartServer:
         if self._httpd is not None:
             self._httpd.shutdown()
             self._httpd.server_close()
+        if self._serve_thread is not None:
+            self._serve_thread.join(timeout=5.0)
+            self._serve_thread = None
+        if self._broadcast_thread is not None:
+            self._broadcast_thread.join(timeout=5.0)
+            self._broadcast_thread = None
 
     def add_client(self, conn: socket.socket) -> None:
         with self._clients_lock:

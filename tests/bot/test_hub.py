@@ -29,6 +29,28 @@ def test_depth_sets_bid_ask():
     assert hub.ask == 2.0
 
 
+def test_depth_alone_does_not_set_ws_ok():
+    """Regression: a depth-only first frame must not mark the feed healthy.
+
+    DepthEvent carries no `last`, so flipping ws_ok would advertise a fresh
+    price feed while hub.last is still 0.0 -- which would then silence REST
+    and feed a zero price to the stop-out and collar logic.
+    """
+    hub = Hub()
+    hub.apply(DepthEvent(bid=1.0, ask=2.0, symbol="BTC_USDT"))
+    assert hub.ws_ok is False
+    assert hub.last == 0.0
+
+
+def test_depth_stamps_its_own_timestamp():
+    hub = Hub()
+    assert hub.depth_ts_ms == 0
+    hub.apply(TickerEvent(last=5.0, ts_ms=1, symbol="BTC_USDT"))
+    assert hub.depth_ts_ms == 0  # ticker never stamps depth freshness
+    hub.apply(DepthEvent(bid=1.0, ask=2.0, symbol="BTC_USDT"))
+    assert hub.depth_ts_ms > 0
+
+
 def test_ignore_none():
     hub = Hub()
     hub.apply(None)
