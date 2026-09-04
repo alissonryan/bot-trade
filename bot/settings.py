@@ -4,6 +4,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from kcex.ws import DEFAULT_WS_URL
+
 
 def _f(name: str, default: float) -> float:
     return float(os.getenv(name, str(default)))
@@ -35,9 +37,19 @@ class Settings:
     paper_starting_usdt: float
     ws_url: str
     stale_ms: int
+    chart_port: int
+    chart_host: str
 
     @classmethod
     def from_env(cls) -> Settings:
+        raw_ws = os.getenv("KCEX_WS_URL", "").strip()
+        if raw_ws == "-":
+            ws_url = ""
+        elif raw_ws == "":
+            ws_url = DEFAULT_WS_URL
+        else:
+            ws_url = raw_ws
+
         return cls(
             mode=os.getenv("MODE", "paper").strip().lower(),
             symbol=os.getenv("SYMBOL", "BTC_USDT").strip(),
@@ -59,6 +71,8 @@ class Settings:
             qty_scale=_i("QTY_SCALE", 5),
             paper_slippage_bps=_f("PAPER_SLIPPAGE_BPS", 5.0),
             paper_starting_usdt=_f("PAPER_STARTING_USDT", 450.0),
-            ws_url=os.getenv("KCEX_WS_URL", "").strip(),
+            ws_url=ws_url,
             stale_ms=_i("STALE_MS", 30000),
+            chart_port=_i("CHART_PORT", 8765),
+            chart_host=os.getenv("CHART_HOST", "127.0.0.1").strip() or "127.0.0.1",
         )

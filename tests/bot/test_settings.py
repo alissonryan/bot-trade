@@ -27,3 +27,23 @@ def test_defaults(monkeypatch):
     assert s.max_stop_pct == 0.04
     assert s.llm_daily_budget_usd == 2.0
     assert s.qty_scale == 5
+
+
+def test_ws_url_default_is_captured_public(monkeypatch):
+    monkeypatch.delenv("KCEX_WS_URL", raising=False)
+    s = Settings.from_env()
+    assert s.ws_url == "wss://wbs.kcex.com/ws?platform=web"
+
+
+def test_ws_url_dash_disables(monkeypatch):
+    monkeypatch.setenv("KCEX_WS_URL", "-")
+    s = Settings.from_env()
+    assert s.ws_url == ""
+
+
+def test_chart_bind_defaults(monkeypatch):
+    monkeypatch.delenv("CHART_PORT", raising=False)
+    monkeypatch.delenv("CHART_HOST", raising=False)
+    s = Settings.from_env()
+    assert s.chart_port == 8765
+    assert s.chart_host == "127.0.0.1"
