@@ -78,7 +78,7 @@ class Eye:
         if self.hub.ask:
             self.ask = self.hub.ask
         self.ws_ok = True
-        self.last_update_ms = int(time.time() * 1000)
+        self.last_update_ms = self.hub.ts_ms or int(time.time() * 1000)
 
     def apply_event(self, event) -> None:
         self.hub.apply(event)

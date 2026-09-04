@@ -1,5 +1,6 @@
 from pathlib import Path
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -47,7 +48,7 @@ def test_poll_quotes_skipped_when_ws_fresh():
     client = FakeKcex()
     hub = Hub()
     eye = Eye(client, Settings.from_env(), hub=hub)
-    hub.apply(TickerEvent(last=111.0, ts_ms=1, symbol="BTC_USDT"))
+    hub.apply(TickerEvent(last=111.0, ts_ms=int(time.time() * 1000), symbol="BTC_USDT"))
     eye.sync_hub()
     eye.poll_quotes()
     assert eye.last == 111.0  # REST ticker 80000 not applied
