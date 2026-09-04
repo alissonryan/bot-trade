@@ -16,7 +16,29 @@ class FakeSock:
     def send(self, text: str) -> None:
         self.sent.append(text)
 
-    def recv(self) -> str:
+    def recv(self, timeout: float | None = None) -> str:
+        if not self.incoming:
+            raise ConnectionError("closed")
+        return self.incoming.pop(0)
+
+
+class TimeoutThenMessageSock:
+    """Simulates a real websockets.sync connection: recv(timeout=...) raises
+    the builtin TimeoutError on quiet stretches (not a connection failure),
+    then eventually returns a queued message."""
+
+    def __init__(self, timeouts_before_message: int, incoming: list[str]):
+        self.timeouts_left = timeouts_before_message
+        self.incoming = list(incoming)
+        self.sent: list[str] = []
+
+    def send(self, text: str) -> None:
+        self.sent.append(text)
+
+    def recv(self, timeout: float | None = None) -> str:
+        if self.timeouts_left > 0:
+            self.timeouts_left -= 1
+            raise TimeoutError("timed out")
         if not self.incoming:
             raise ConnectionError("closed")
         return self.incoming.pop(0)
@@ -44,3 +66,20 @@ def test_bad_json_does_not_raise():
     ws = PublicSpotWs(url="wss://example.invalid/ws", symbol="BTC_USDT", connect=lambda url: sock)
     ws.pump(on_event=events.append, on_error=lambda e: None, max_messages=2)
     assert events == []
+
+
+def test_recv_timeout_is_not_fatal_and_pump_continues():
+    frame = {
+        "c": "spot@public.miniTicker@BTC_USDT@UTC+0",
+        "s": "BTC_USDT",
+        "t": 1,
+        "d": {"p": "100.5", "s": "BTC_USDT"},
+    }
+    sock = TimeoutThenMessageSock(timeouts_before_message=3, incoming=[json.dumps(frame)])
+    events = []
+    errors = []
+    ws = PublicSpotWs(url="wss://example.invalid/ws", symbol="BTC_USDT", connect=lambda url: sock)
+    ws.pump(on_event=events.append, on_error=errors.append, max_messages=1)
+    assert errors == []
+    assert any(isinstance(e, TickerEvent) and e.last == 100.5 for e in events)
+    assert sock.timeouts_left == 0

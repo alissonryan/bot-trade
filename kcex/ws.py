@@ -8,6 +8,11 @@ from typing import Any
 
 DEFAULT_WS_URL = "wss://wbs.kcex.com/ws?platform=web"
 PING_INTERVAL_S = 15.0
+# Must be shorter than PING_INTERVAL_S so the pump loop wakes up on a
+# schedule to check the ping timer even when the socket stays quiet
+# (websockets.sync.client's recv(timeout=...) raises the builtin
+# TimeoutError, not a websockets-specific exception, when it elapses).
+RECV_TIMEOUT_S = 5.0
 
 
 @dataclass(frozen=True)
@@ -133,7 +138,13 @@ class PublicSpotWs:
                 sock.send(json.dumps(ping_message()))
                 last_ping = now
             try:
-                raw = sock.recv()
+                raw = sock.recv(timeout=RECV_TIMEOUT_S)
+            except TimeoutError:
+                # No message within RECV_TIMEOUT_S: not a connection failure,
+                # just a quiet stretch. Loop back so the ping-interval check
+                # above keeps running on schedule instead of being starved
+                # by a recv() that would otherwise block indefinitely.
+                continue
             except Exception as exc:
                 on_error(exc)
                 return
