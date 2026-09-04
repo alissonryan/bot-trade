@@ -46,6 +46,25 @@ class Eye:
         self.ws_ok = True
         self.last_update_ms = int(time.time() * 1000)
 
+    def apply_frame(self, msg: dict) -> None:
+        last = msg.get("last") or msg.get("c") or msg.get("p")
+        if last is None and isinstance(msg.get("data"), dict):
+            last = msg["data"].get("last") or msg["data"].get("c")
+        if last is None:
+            return
+        bid = msg.get("bid")
+        ask = msg.get("ask")
+        data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
+        if bid is None:
+            bid = data.get("bid")
+        if ask is None:
+            ask = data.get("ask")
+        self.apply_ws_price(
+            float(last),
+            float(bid) if bid is not None else None,
+            float(ask) if ask is not None else None,
+        )
+
     def snapshot(self) -> Snapshot:
         spread = self.ask - self.bid if self.ask and self.bid else 0.0
         return Snapshot(

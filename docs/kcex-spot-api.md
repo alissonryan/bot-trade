@@ -142,6 +142,18 @@ Trigger body (stop-market example already live on the account):
 
 Success codes: `0` or `200`. Place response `data` is the new order id.
 
+## WebSocket
+
+- Auth: `GET /uc/user_api/ws_token` returns a short-lived `wsToken` for socket auth (separate from the REST `KCEX_TOKEN` session).
+- Live WebSocket URL was **not confirmed** in this task (no frames captured from DevTools / no invented production `wss://` URL). Set `KCEX_WS_URL` when a live URL is captured.
+- Canonical ticker frame shape used by the bot is in `tests/fixtures/kcex_ws_frames.jsonl`:
+
+```json
+{"ch":"ticker","symbol":"BTC_USDT","last":"80000.1","bid":"80000.0","ask":"80000.2"}
+```
+
+- `Eye.apply_frame` maps that shape (and common nested/`c`/`p` aliases) into `apply_ws_price`. Without `KCEX_WS_URL`, the eye falls back to REST via `snapshot_rest`.
+
 ## Snapshot of this account (read-only)
 
 - Spot USDT available: `450.6362432`
