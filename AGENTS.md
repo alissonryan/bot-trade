@@ -63,14 +63,26 @@ Store: data/bot.db audit + fills + bot order ids + position
 - No Geetest solver, no disabling 2FA, no silent password login
 - No live orders in tests / CI. Mock `KcexClient` for live hands.
 
-## Auth
+## Auth (already built — do not re-reverse-engineer login)
 
-- Login: `PYTHONPATH=. python -m kcex.cli login` (Playwright Chrome profile `.kcex-profile/`). Human does captcha + Google Authenticator. Token `WEB…` written to `.env` as `KCEX_TOKEN`. ~7 days if “stay logged in” was checked.
-- `GET /uc/user_api/user_info` **requires** the `authorization` header. Cookie alone → 401. Login/validation does **not** rotate the token.
-- Paper: OpenRouter key required for decisions. KCEX login **optional**. If balances fail or are zero, paper uses `PAPER_STARTING_USDT` (default **450**).
-- Live: `require_live_token()`. On 401 the loop **halts** (`SessionDead`). Tell the human to re-run login.
-- Optional `KCEX_EMAIL` / `KCEX_PASSWORD` only prefill the form.
-- Never commit `.env`. Never print tokens or API keys.
+Login is **integrated**. The next session does **not** need to reopen Chrome DevTools to “figure out how login works.” HTTP details live in [docs/kcex-spot-api.md](docs/kcex-spot-api.md) (headers, Geetest, 2FA only at human login, token shape). To **use** a session:
+
+```bash
+PYTHONPATH=. python -m kcex.cli login
+```
+
+What that command already does (`kcex/login.py` + `kcex/session.py`):
+
+1. Opens a persistent Chrome profile at `.kcex-profile/` (Playwright, headed).
+2. Optionally prefills `KCEX_EMAIL` / `KCEX_PASSWORD`. **Captcha (Geetest) and Google Authenticator stay human.**
+3. Watches cookies for `Authorization=WEB…`, checks `user_info`, writes `KCEX_TOKEN` into `.env`. No manual copy-paste.
+4. If the profile is still logged in, capture is instant. Token lasts ~**7 days** (“stay logged in”). It is **not** a JWT and does **not** refresh silently.
+
+After that, every private REST call is `Authorization: WEB…` plus the same value as cookie. Cookie alone → 401. `login/validation` does **not** rotate the token.
+
+- Paper: KCEX login **optional**. If balances fail or are zero, paper uses `PAPER_STARTING_USDT` (default **450**).
+- Live: `require_live_token()`. On 401 the loop **halts** (`SessionDead`). Tell the human to re-run `python -m kcex.cli login`.
+- Do **not** solve Geetest, scrape the login form, or invent a new token flow. Never commit `.env` / `.kcex-profile/`. Never print the full token.
 
 ## Eye (market data)
 

@@ -12,7 +12,8 @@ Python bot: OpenRouter LLM decides **BTC/USDT spot on KCEX**; a **code collar** 
 - Keep LLM output as `{action, confidence, reason, regime}` only. Size and stop live in `bot/collar.py`.
 - Never `cancel_order` unless `store.is_bot_order(id)`. Protect the user’s existing stop (0.00064 BTC @ 75722).
 - Default paper. Live is an explicit `MODE=live` **plus** `python -m kcex.cli login`. Do not flip live unless the human asks.
-- On live 401: halt (`SessionDead`) and tell them to re-login. Do not retry forever.
+- **Do not re-implement login.** `python -m kcex.cli login` already opens Chrome, waits for captcha+2FA, and writes `KCEX_TOKEN` to `.env`. HTTP internals: `docs/kcex-spot-api.md`.
+- On live 401: halt (`SessionDead`) and tell them to re-run that same command. Do not retry forever.
 - Add tests under `tests/bot/` for collar / hands / cycle changes. TDD for risk.
 - Follow [docs/kcex-spot-api.md](docs/kcex-spot-api.md) for endpoints. If a path was not captured, say so — do not guess.
 

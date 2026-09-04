@@ -25,7 +25,7 @@ Login flow observed:
 4. `POST /uc/user_api/login/validation` (empty body, session already in cookie) → `{ id, account, token, authLevel }`
 5. `GET /uc/user_api/user_info`
 
-Do **not** automate Geetest. Export `KCEX_TOKEN` after a manual login.
+Do **not** automate Geetest. Do **not** copy the token by hand. Run `python -m kcex.cli login` — it waits for the human (captcha + Google Authenticator) and writes `KCEX_TOKEN` to `.env`.
 
 ## Session lifetime
 
@@ -41,10 +41,10 @@ Evidence from the live session:
 
 Practical model:
 
-1. You log in once in the browser (password + captcha + Google Authenticator).
-2. Copy `authorization` into `.env` as `KCEX_TOKEN`.
+1. Human runs `python -m kcex.cli login` (password + captcha + Google Authenticator in the bot’s Chrome).
+2. CLI writes `authorization` into `.env` as `KCEX_TOKEN`.
 3. The bot reuses that token on every request. No reconnect per call.
-4. When the server returns `401` / `success: false` on `user_info`, the 7-day session is dead. Log in again, paste the new token. Logout on the site, password change, or security reset will also kill it.
+4. When the server returns `401` / `success: false` on `user_info`, the 7-day session is dead. Run `login` again. Logout on the site, password change, or security reset will also kill it.
 
 There is no silent refresh we can call without 2FA. The CLI command `python -m kcex.cli login` is the OAuth-style stand-in: it opens a persistent Chrome profile, you complete captcha + authenticator once, it writes `KCEX_TOKEN` to `.env`. After ~7 days the same command opens the window again. If the profile is still logged in, capture is instant.
 

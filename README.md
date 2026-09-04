@@ -100,14 +100,16 @@ Primeira ordem real pode falhar por `needDolos` / `content-sign` (anti-bot da KC
 
 ## Login / sessão (KCEX)
 
+O login **já está no projeto**. Não precisa reabrir o DevTools nem colar token na mão.
+
 ```bash
-PYTHONPATH=. python -m kcex.cli login
+PYTHONPATH=. python -m kcex.cli login    # Chrome do bot; você faz captcha + 2FA; grava KCEX_TOKEN
 PYTHONPATH=. python -m kcex.cli auth
 PYTHONPATH=. python -m kcex.cli ticker BTC_USDT
 PYTHONPATH=. python -m kcex.cli balances
 ```
 
-Opcional: `KCEX_EMAIL` e `KCEX_PASSWORD` só preenchem o form. Captcha e 2FA continuam manuais.
+Opcional: `KCEX_EMAIL` e `KCEX_PASSWORD` só preenchem o form. Captcha e 2FA continuam manuais. Como a API trata o token: [docs/kcex-spot-api.md](docs/kcex-spot-api.md).
 
 ## Testes
 
