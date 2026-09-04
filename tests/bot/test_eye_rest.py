@@ -5,7 +5,9 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from bot.eye import Eye
+from bot.hub import Hub
 from bot.settings import Settings
+from kcex.ws import TickerEvent
 
 
 class FakeKcex:
@@ -39,3 +41,20 @@ def test_rest_snapshot_not_stale():
     assert snap.atr is not None
     assert snap.stale is False
     assert snap.ws_ok is False
+
+
+def test_poll_quotes_skipped_when_ws_fresh():
+    client = FakeKcex()
+    hub = Hub()
+    eye = Eye(client, Settings.from_env(), hub=hub)
+    hub.apply(TickerEvent(last=111.0, ts_ms=1, symbol="BTC_USDT"))
+    eye.sync_hub()
+    eye.poll_quotes()
+    assert eye.last == 111.0  # REST ticker 80000 not applied
+
+
+def test_poll_quotes_runs_when_ws_down():
+    eye = Eye(FakeKcex(), Settings.from_env(), hub=Hub())
+    eye.poll_quotes()
+    assert eye.last == 80000.0
+    assert eye.ws_ok is False

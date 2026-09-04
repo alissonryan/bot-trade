@@ -4,6 +4,7 @@ import time
 from typing import Any
 
 from bot.atr import atr
+from bot.hub import Hub
 from bot.settings import Settings
 from bot.types import Bar, Snapshot
 from kcex.client import KcexClient
@@ -17,11 +18,13 @@ class Eye:
         *,
         bot_qty: float = 0.0,
         bot_avg_entry: float | None = None,
+        hub: Hub | None = None,
     ):
         self.client = client
         self.settings = settings
         self.bot_qty = bot_qty
         self.bot_avg_entry = bot_avg_entry
+        self.hub = hub or Hub()
         self.last = 0.0
         self.bid = 0.0
         self.ask = 0.0
@@ -65,13 +68,26 @@ class Eye:
             float(ask) if ask is not None else None,
         )
 
-    def connect_ws(self) -> None:
-        # No live KCEX_WS_URL confirmed yet; do not invent one. REST stays primary.
-        if not self.settings.ws_url:
+    def sync_hub(self) -> None:
+        """Pull the shared Hub's latest snapshot into this Eye's own fields."""
+        if not self.hub.ws_ok:
             return
-        raise NotImplementedError(
-            "KCEX_WS_URL is set but live WS connect is not wired yet"
-        )
+        self.last = self.hub.last
+        if self.hub.bid:
+            self.bid = self.hub.bid
+        if self.hub.ask:
+            self.ask = self.hub.ask
+        self.ws_ok = True
+        self.last_update_ms = int(time.time() * 1000)
+
+    def apply_event(self, event) -> None:
+        self.hub.apply(event)
+        self.sync_hub()
+
+    def connect_ws(self) -> None:
+        # Full socket loop wiring lands in Task 8; this stays a safe no-op
+        # regardless of whether KCEX_WS_URL is configured. REST stays primary.
+        return
 
     def snapshot(self) -> Snapshot:
         spread = self.ask - self.bid if self.ask and self.bid else 0.0
@@ -94,6 +110,7 @@ class Eye:
 
     def poll_quotes(self) -> None:
         """Cheap REST tick used every loop when WS is not live (LLM-Auto-Trader style)."""
+        self.sync_hub()
         if self.ws_ok and not self._stale():
             return
         ticker = self.client.ticker(self.settings.symbol)
