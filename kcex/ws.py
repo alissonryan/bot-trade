@@ -112,3 +112,33 @@ def parse_text(text: str) -> TickerEvent | DealEvent | DepthEvent | None:
     if not isinstance(msg, dict):
         return None
     return parse_frame(msg)
+
+
+class PublicSpotWs:
+    def __init__(self, url: str, symbol: str, connect):
+        self.url = url
+        self.symbol = symbol
+        self._connect = connect
+
+    def pump(self, *, on_event, on_error, max_messages: int | None = None) -> None:
+        sock = self._connect(self.url)
+        sock.send(json.dumps(subscribe_message(self.symbol)))
+        n = 0
+        while max_messages is None or n < max_messages:
+            try:
+                raw = sock.recv()
+            except Exception as exc:
+                on_error(exc)
+                return
+            n += 1
+            try:
+                event = parse_text(raw) if isinstance(raw, str) else None
+            except Exception:
+                continue
+            if event is not None:
+                on_event(event)
+
+
+def default_connect(url: str):
+    from websockets.sync.client import connect
+    return connect(url, open_timeout=10)
