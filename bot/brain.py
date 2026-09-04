@@ -40,7 +40,9 @@ class Budget:
             self.spent_usd = 0.0
 
 
-def parse_intent(text: str) -> TradeIntent | None:
+def parse_intent(text: str | None) -> TradeIntent | None:
+    if not isinstance(text, str) or not text.strip():
+        return None
     raw = text.strip()
     m = FENCE.search(raw)
     if m:
