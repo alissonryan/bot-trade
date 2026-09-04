@@ -7,7 +7,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from bot.brain import Budget
-from bot.cycle import run_once, utc_day
+from bot.cycle import SessionDead, run_once, utc_day
 from bot.eye import Eye
 from bot.hands import LiveHands, PaperHands
 from bot.settings import Settings
@@ -41,16 +41,21 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(f"rest snapshot failed: {exc}")
     while True:
-        last_llm_ms, last_px, gate = run_once(
-            settings=settings,
-            eye=eye,
-            store=store,
-            client=client,
-            hands=hands,
-            budget=budget,
-            last_llm_ms=last_llm_ms,
-            last_px=last_px,
-        )
+        budget.roll_day(utc_day())
+        try:
+            last_llm_ms, last_px, gate = run_once(
+                settings=settings,
+                eye=eye,
+                store=store,
+                client=client,
+                hands=hands,
+                budget=budget,
+                last_llm_ms=last_llm_ms,
+                last_px=last_px,
+            )
+        except SessionDead as exc:
+            print(f"sessao morta: {exc}. Rode: python -m kcex.cli login")
+            return 1
         if gate is not None:
             print(gate)
         if args.once:

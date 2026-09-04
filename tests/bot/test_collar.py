@@ -154,6 +154,18 @@ def test_stale_market_rejects():
     assert r.rule == "stale"
 
 
+def test_stale_still_allows_sell():
+    r = decide(
+        TradeIntent("SELL", 0.7, "exit", "trend"),
+        _snap(stale=True, bot_qty=0.00025, bot_avg_entry=80_000, last=81_000),
+        _settings(),
+        session_ok=True,
+        day_pnl_usdt=0.0,
+    )
+    assert r.ok is True
+    assert r.action == "SELL"
+
+
 def test_sell_long_closes_without_new_stop():
     r = decide(
         TradeIntent("SELL", 0.7, "exit", "trend"),

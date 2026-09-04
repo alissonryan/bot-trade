@@ -33,6 +33,16 @@ class Store:
                 pnl REAL
             )"""
         )
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS position (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                qty REAL,
+                entry REAL,
+                stop_price REAL,
+                entry_order_id TEXT,
+                stop_order_id TEXT
+            )"""
+        )
         self._conn.commit()
 
     def append_audit(
@@ -78,3 +88,39 @@ class Store:
             "SELECT COALESCE(SUM(pnl),0) FROM fills WHERE day=?", (day,)
         ).fetchone()
         return float(row[0])
+
+    def save_position(
+        self,
+        *,
+        qty: float,
+        entry: float,
+        stop_price: float | None,
+        entry_order_id: str | None,
+        stop_order_id: str | None,
+    ) -> None:
+        self._conn.execute("DELETE FROM position")
+        if qty > 0:
+            self._conn.execute(
+                """INSERT INTO position(id, qty, entry, stop_price, entry_order_id, stop_order_id)
+                   VALUES (1,?,?,?,?,?)""",
+                (qty, entry, stop_price, entry_order_id, stop_order_id),
+            )
+        self._conn.commit()
+
+    def load_position(self) -> dict | None:
+        row = self._conn.execute(
+            "SELECT qty, entry, stop_price, entry_order_id, stop_order_id FROM position WHERE id=1"
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "qty": float(row[0]),
+            "entry": float(row[1]),
+            "stop_price": float(row[2]) if row[2] is not None else None,
+            "entry_order_id": row[3],
+            "stop_order_id": row[4],
+        }
+
+    def clear_position(self) -> None:
+        self._conn.execute("DELETE FROM position")
+        self._conn.commit()

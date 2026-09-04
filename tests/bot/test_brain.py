@@ -43,6 +43,39 @@ class FakeResp:
             raise RuntimeError("http")
 
 
+def test_think_charges_budget_on_success():
+    budget = Budget(spent_usd=0.0, cap_usd=2.0, day="2026-09-04")
+
+    def post(*args, **kwargs):
+        class R:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "choices": [
+                        {"message": {"content": '{"action":"HOLD","confidence":0.1,"reason":"wait","regime":"range"}'}}
+                    ]
+                }
+
+            def raise_for_status(self):
+                return None
+
+        return R()
+
+    snap = Snapshot(
+        ts_ms=1, last=1, bid=1, ask=1, spread=0, bars_15m=[], atr=1,
+        free_usdt=1, bot_qty=0, bot_avg_entry=None, ws_ok=True, stale=False,
+    )
+    d = Settings.from_env().__dict__.copy()
+    d["openrouter_api_key"] = "k"
+    d["llm_model"] = "x"
+    s = Settings(**d)
+    out = think(snap, s, budget, http_post=post)
+    assert out is not None
+    assert out.action == "HOLD"
+    assert budget.spent_usd > 0
+
+
 def test_think_returns_none_over_budget():
     budget = Budget(spent_usd=2.0, cap_usd=2.0, day="2026-09-04")
     called = []

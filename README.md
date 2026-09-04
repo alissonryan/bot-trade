@@ -54,4 +54,4 @@ PYTHONPATH=. python -m bot run
 
 Live: `MODE=live` after `python -m kcex.cli login`. Max 20 USDT, BTC/USDT only, ATR stop on the exchange. Existing manual stops are never cancelled.
 
-WebSocket: set `KCEX_WS_URL` from `docs/kcex-spot-api.md`. Without it the eye polls REST.
+Olho v1: REST ticker/book **a cada segundo** (wake 0,4% funciona). WebSocket (`KCEX_WS_URL`) entra quando a URL ao vivo for capturada.

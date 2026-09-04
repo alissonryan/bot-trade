@@ -152,7 +152,9 @@ Success codes: `0` or `200`. Place response `data` is the new order id.
 {"ch":"ticker","symbol":"BTC_USDT","last":"80000.1","bid":"80000.0","ask":"80000.2"}
 ```
 
-- `Eye.apply_frame` maps that shape (and common nested/`c`/`p` aliases) into `apply_ws_price`. Without `KCEX_WS_URL`, the eye falls back to REST via `snapshot_rest`.
+- `Eye.apply_frame` maps that shape (and common nested/`c`/`p` aliases) into `apply_ws_price`.
+- v1 eye (same pattern as LLM-Auto-Trader REST/WS loop): **poll ticker+depth every cycle second** (`poll_quotes`) and kline+balances when the LLM is due (`poll_heavy`). KuCoin/OKX docs prefer WS; KCEX public `wss://` is still unconfirmed so REST poll is the live fallback, not a one-shot snapshot.
+- Without `KCEX_WS_URL`, `connect_ws` is a no-op.
 
 ## Snapshot of this account (read-only)
 

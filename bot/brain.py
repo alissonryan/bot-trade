@@ -31,6 +31,14 @@ class Budget:
     def remaining(self) -> float:
         return self.cap_usd - self.spent_usd
 
+    def spend(self, usd: float) -> None:
+        self.spent_usd += usd
+
+    def roll_day(self, day: str) -> None:
+        if day != self.day:
+            self.day = day
+            self.spent_usd = 0.0
+
 
 def parse_intent(text: str) -> TradeIntent | None:
     raw = text.strip()
@@ -120,4 +128,5 @@ def think(
         text = payload["choices"][0]["message"]["content"]
     except Exception:
         return None
+    budget.spend(0.02)
     return parse_intent(text)

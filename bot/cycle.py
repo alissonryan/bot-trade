@@ -13,6 +13,10 @@ from bot.types import GateResult, TradeIntent
 from kcex.client import KcexClient
 
 
+class SessionDead(RuntimeError):
+    """Live session returned 401 / auth failure. Halt the process."""
+
+
 def due(now_ms: int, last_llm_ms: int, last_px: float, px: float, settings: Settings) -> bool:
     if last_llm_ms == 0:
         return True
@@ -38,26 +42,29 @@ def run_once(
     last_llm_ms: int,
     last_px: float,
 ) -> tuple[int, float, GateResult | None]:
+    eye.poll_quotes()
     snap = eye.snapshot()
-    if snap.last <= 0:
-        snap = eye.snapshot_rest()
     now = int(time.time() * 1000)
     if not due(now, last_llm_ms, last_px, snap.last, settings):
         if isinstance(hands, PaperHands):
             hands.mark(snap)
         return last_llm_ms, last_px, None
+    eye.poll_heavy()
+    eye.bot_qty = hands.position.qty
+    eye.bot_avg_entry = hands.position.entry or None
+    eye.last_bot_pnl_usdt = store.day_pnl(utc_day())
+    snap = eye.snapshot()
     session_ok = True
     if settings.mode == "live":
         try:
             client.user_info()
-        except Exception:
+        except Exception as exc:
             session_ok = False
+            raise SessionDead(str(exc)) from exc
+    budget.roll_day(utc_day())
     intent = think(snap, settings, budget)
     if intent is None:
         intent = TradeIntent("HOLD", 0.0, "no_llm", "unknown")
-    eye.bot_qty = hands.position.qty
-    eye.bot_avg_entry = hands.position.entry or None
-    snap = eye.snapshot()
     gate = decide(
         intent,
         snap,
@@ -71,4 +78,5 @@ def run_once(
         eye.bot_avg_entry = hands.position.entry or None
     store.append_audit(intent, gate, settings.mode, None)
     eye.last_intent_action = intent.action
+    eye.last_bot_pnl_usdt = store.day_pnl(utc_day())
     return now, snap.last, gate

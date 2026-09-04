@@ -92,13 +92,21 @@ class Eye:
             last_bot_pnl_usdt=self.last_bot_pnl_usdt,
         )
 
-    def snapshot_rest(self) -> Snapshot:
+    def poll_quotes(self) -> None:
+        """Cheap REST tick used every loop when WS is not live (LLM-Auto-Trader style)."""
+        if self.ws_ok and not self._stale():
+            return
         ticker = self.client.ticker(self.settings.symbol)
         last = float(ticker["data"]["c"])
         depth = self.client.depth(self.settings.symbol)
         book = depth["data"]["data"]
         bid = float(book["bids"][0]["p"])
         ask = float(book["asks"][0]["p"])
+        self.last, self.bid, self.ask = last, bid, ask
+        self.last_update_ms = int(time.time() * 1000)
+        self.ws_ok = False
+
+    def poll_heavy(self) -> None:
         end = int(time.time() * 1000)
         start = end - 20 * 15 * 60 * 1000
         kl = self.client.kline(
@@ -125,9 +133,10 @@ class Eye:
         for row in bals.get("data") or []:
             if row.get("currency") == "USDT":
                 free = float(row.get("available") or 0)
-        self.last, self.bid, self.ask = last, bid, ask
         self.bars = bars
         self.free_usdt = free
-        self.last_update_ms = int(time.time() * 1000)
-        self.ws_ok = False
+
+    def snapshot_rest(self) -> Snapshot:
+        self.poll_quotes()
+        self.poll_heavy()
         return self.snapshot()

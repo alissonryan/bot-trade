@@ -34,8 +34,6 @@ def decide(
         return GateResult(False, "mode", intent.action)
     if not session_ok:
         return GateResult(False, "session", intent.action)
-    if snap.stale:
-        return GateResult(False, "stale", intent.action)
     if intent.action not in ALLOWED_ACTIONS:
         return GateResult(False, "action", intent.action)
     if intent.action == "HOLD":
@@ -53,6 +51,8 @@ def decide(
             stop_price=None,
         )
 
+    if snap.stale:
+        return GateResult(False, "stale", intent.action)
     if day_pnl_usdt <= -abs(settings.max_day_loss_usdt):
         return GateResult(False, "day_loss", "BUY")
     if snap.bot_qty > 0:
