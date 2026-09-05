@@ -196,8 +196,10 @@ class PaperHands:
                 entry_source="paper",
             )
             self.store.remember_order("paper-entry")
+            self.entry_order_id = "paper-entry"
             if self.position.stop_price:
                 self.store.remember_order("paper-stop")
+                self.stop_order_id = "paper-stop"
             self.store.add_fill(self.today(), 0.0, side="BUY", qty=qty, price=px, fee=0.0, order_id="paper-entry", source="paper")
             self._persist()
         elif gate.action == "SELL" and self.position.qty > 0:
@@ -211,6 +213,8 @@ class PaperHands:
         self.cash += px * qty
         self.store.add_fill(self.today(), pnl, side="SELL", qty=qty, price=px, fee=0.0, order_id=order_id, source=source)
         self.position = Position()
+        self.entry_order_id = None
+        self.stop_order_id = None
         self._persist()
 
     def mark(self, snap: Snapshot) -> Position:
