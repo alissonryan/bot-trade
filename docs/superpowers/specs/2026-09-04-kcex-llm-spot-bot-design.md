@@ -223,3 +223,30 @@ Second LLM, ETH or more pairs, limit/IOC entries, Telegram (nice later), trainin
 - LLM never sets size or stop — matches locked decisions.
 - Existing user stop is excluded by “only cancel bot ledger ids”.
 - WebSocket is the eye, not the brain — matches “best bot” discussion.
+
+## Amendment — 2026-09-04 safety revision
+
+Recorded after a full code read and public probes of the venue. Where this section
+disagrees with the text above, this section wins.
+
+| Topic | Spec said | Now |
+| --- | --- | --- |
+| Cycle | 15 minutes | `CYCLE_MINUTES` (ops 5; code default 15) |
+| Market data | "WebSocket primary, URL to be discovered" | Verified: `wss://wbs.kcex.com/ws`, MEXC v3 protocol (deals + bookTicker). REST is a fallback every `POLL_SECONDS`, never a 1-second poll |
+| Collar rule 8 | day loss = realized + unrealized | implemented (was realized only) |
+| Sizing | `QTY_SCALE` fixed at 5 | scales and minimum read from the venue's symbol rules |
+| Stop | computed on `last` | recomputed on the real fill price |
+| Live entry | market then trigger | market → **persist PENDING** → confirm fill by balance → trigger; unfilled entry is cancelled |
+| Trigger failure | "retry; if still fail, market-sell" | retry 2×, flatten once, else state `UNPROTECTED` + process exit 2 (never a silent flat) |
+| SELL | market sell | cancel stop → confirm cancel → sell; failed sell restores the stop; unconfirmed sell is `CLOSING` until reconcile |
+| Reconciliation | "reconcile via WS fills and REST open-orders" | `reconcile()` on boot and every LLM cycle against balances + open orders |
+| LLM budget | daily USD cap | charged with `usage.cost` from OpenRouter; fallback flat cost only when absent |
+| LLM failures | "skip cycle" | every failure has a name in the audit (`llm_budget`, `llm_timeout`, `llm_http_<n>`, `llm_parse`, ...) |
+| Audit | intent + gate | + snapshot (last/bid/ask/atr), LLM reason/cost, order ids, position state, eye health |
+| Paper | mid/ask + bps, cash implicit | cash is a persisted ledger; stop pays slippage; fills carry prices |
+| Process | none | instance lock, file log, backoff on errors, exit codes 1/2/3/4 |
+| Secrets | `.env` | `.env` written with mode 600; `KCEX_TOKEN_AT` recorded, warning from day 6 |
+
+Still open: the anti-bot signature on order POSTs (no live order has been sent), the
+private deals payload shape (entry price is an estimate until captured), and whether
+market buys need `amount` instead of `quantity`.
