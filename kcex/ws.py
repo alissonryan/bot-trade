@@ -38,13 +38,40 @@ class DepthEvent:
     symbol: str
 
 
+# KCEX (a MEXC white-label) accepts two naming conventions on the same socket,
+# both verified live against wss://wbs.kcex.com/ws: the legacy `spot@public.X@BTC_USDT`
+# form and the v3 `spot@public.X.v3.api@BTCUSDT` form, which takes the symbol with
+# no underscore. We subscribe to a mix, picking the best channel for each job.
+_QUOTES = ("USDT", "USDC", "USD", "BTC", "ETH")
+
+
+def ws_symbol(symbol: str) -> str:
+    """`BTC_USDT` -> `BTCUSDT`, the form the v3 channels expect."""
+    return symbol.replace("_", "").upper()
+
+
+def _unws_symbol(symbol: str) -> str:
+    """Reverse of `ws_symbol`, so events from v3 channels report the same symbol
+    string as the legacy ones and `Hub.symbol` does not flip between the two."""
+    if "_" in symbol:
+        return symbol
+    for quote in _QUOTES:
+        if symbol.endswith(quote) and len(symbol) > len(quote):
+            return f"{symbol[: -len(quote)]}_{quote}"
+    return symbol
+
+
 def subscribe_message(symbol: str) -> dict[str, Any]:
     return {
         "method": "SUBSCRIPTION",
         "params": [
             f"spot@public.miniTicker@{symbol}@UTC+0",
             f"spot@public.aggre.deals@{symbol}",
-            f"spot@public.limit.precision.depth@{symbol}@0.01",
+            # Top of book comes from bookTicker rather than the depth ladder:
+            # it is a ~90-byte frame carrying the exact best bid/ask, where
+            # `limit.precision.depth@...@0.01` sends the whole ladder and only
+            # at 0.01 rounding. Verified live: both ack and stream.
+            f"spot@public.bookTicker.v3.api@{ws_symbol(symbol)}",
         ],
         "id": 3,
     }
@@ -73,12 +100,14 @@ def parse_frame(msg: dict[str, Any] | None) -> TickerEvent | DealEvent | DepthEv
     channel = str(msg.get("c") or "")
     data = msg.get("d") if isinstance(msg.get("d"), dict) else {}
     symbol = str(msg.get("s") or data.get("s") or "")
-    if channel.startswith("spot@public.miniTicker@"):
+    # Both the legacy `spot@public.miniTicker@BTC_USDT@UTC+0` and the v3
+    # `spot@public.miniTicker.v3.api@BTCUSDT@UTC+0` form carry last as `d.p`.
+    if channel.startswith("spot@public.miniTicker@") or channel.startswith("spot@public.miniTicker.v3.api@"):
         last = _f(data.get("p"))
         if last is None:
             return None
         ts = int(msg.get("t") or data.get("t") or 0)
-        return TickerEvent(last=last, ts_ms=ts, symbol=symbol)
+        return TickerEvent(last=last, ts_ms=ts, symbol=_unws_symbol(symbol))
     if channel.startswith("spot@public.aggre.deals@"):
         deals = data.get("deals") or []
         if not deals:
@@ -96,6 +125,33 @@ def parse_frame(msg: dict[str, Any] | None) -> TickerEvent | DealEvent | DepthEv
             ts_ms=int(row.get("t") or 0),
             symbol=symbol,
         )
+    if channel.startswith("spot@public.deals.v3.api@"):
+        # v3 deals: qty is `v` (not `q`) and side is `S` (1 buy / 2 sell).
+        deals = data.get("deals") or []
+        if not deals:
+            return None
+        row = deals[0]
+        price = _f(row.get("p"))
+        if price is None:
+            return None
+        return DealEvent(
+            price=price,
+            qty=_f(row.get("v")) or 0.0,
+            side="buy" if int(row.get("S") or 0) == 1 else "sell",
+            ts_ms=int(row.get("t") or msg.get("t") or 0),
+            symbol=_unws_symbol(symbol),
+        )
+    if channel.startswith("spot@public.bookTicker.v3.api@"):
+        bid = _f(data.get("b"))
+        ask = _f(data.get("a"))
+        # A key that is present but unparseable is corruption, not absence:
+        # reject the whole frame rather than half-applying it, since bid/ask
+        # feed the collar's spread check.
+        if ("b" in data and bid is None) or ("a" in data and ask is None):
+            return None
+        if bid is None and ask is None:
+            return None
+        return DepthEvent(bid=bid, ask=ask, symbol=_unws_symbol(symbol))
     if "limit.precision.depth" in channel:
         bid = None
         ask = None

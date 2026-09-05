@@ -4,9 +4,9 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from bot.collar import decide
+from bot.collar import decide, stop_for_entry
 from bot.settings import Settings
-from bot.types import Bar, Snapshot, TradeIntent
+from bot.types import Bar, Snapshot, SymbolRules, TradeIntent
 
 
 def _settings(**kwargs) -> Settings:
@@ -120,6 +120,18 @@ def test_day_loss_halts():
     assert r.rule == "day_loss"
 
 
+def test_day_loss_counts_unrealized():
+    r = decide(
+        TradeIntent("BUY", 0.8, "go", "trend"),
+        _snap(),
+        _settings(),
+        session_ok=True,
+        day_pnl_usdt=-12.0,
+        unrealized_pnl_usdt=-8.5,
+    )
+    assert r.rule == "day_loss"
+
+
 def test_day_loss_still_allows_sell():
     r = decide(
         TradeIntent("SELL", 0.7, "exit", "trend"),
@@ -202,3 +214,63 @@ def test_sell_long_closes_without_new_stop():
     assert r.ok is True
     assert r.qty == "0.00025"
     assert r.stop_price is None
+
+
+def test_low_confidence_blocks_buy_but_not_sell():
+    s = _settings(min_confidence=0.6)
+    buy = decide(TradeIntent("BUY", 0.4, "meh", "range"), _snap(), s, session_ok=True, day_pnl_usdt=0.0)
+    assert buy.rule == "confidence"
+    sell = decide(
+        TradeIntent("SELL", 0.1, "out", "range"),
+        _snap(bot_qty=0.00025, bot_avg_entry=80_000),
+        s,
+        session_ok=True,
+        day_pnl_usdt=0.0,
+    )
+    assert sell.ok is True
+
+
+def test_symbol_rules_parse_observed_payload():
+    payload = {
+        "data": {"ps": 2, "qs": 5, "tfr": "0", "mfr": "0", "la": "600000", "li": "1", "ma": "600000", "mi": "1"},
+        "code": 0,
+    }
+    rules = SymbolRules.from_trade_rules(payload)
+    assert rules.price_scale == 2
+    assert rules.qty_scale == 5
+    assert rules.min_amount == 1.0
+    assert rules.max_amount == 600000.0
+    assert rules.taker_fee == 0.0
+    assert SymbolRules.from_trade_rules(None) == SymbolRules()
+
+
+def test_rules_drive_scales_and_min_notional():
+    rules = SymbolRules(price_scale=1, qty_scale=3, min_amount=125.0)
+    r = decide(
+        TradeIntent("BUY", 0.8, "go", "trend"),
+        _snap(free_usdt=4500, last=80_000, atr=400),
+        _settings(max_order_usdt=100),
+        session_ok=True,
+        day_pnl_usdt=0.0,
+        rules=rules,
+    )
+    assert r.rule == "min_notional"  # 0.001 BTC = 80 USDT after rounding < 125 USDT minimum
+    rules = SymbolRules(price_scale=1, qty_scale=3, min_amount=1.0)
+    r = decide(
+        TradeIntent("BUY", 0.8, "go", "trend"),
+        _snap(free_usdt=4500, last=80_000, atr=400),
+        _settings(max_order_usdt=100),
+        session_ok=True,
+        day_pnl_usdt=0.0,
+        rules=rules,
+    )
+    assert r.ok is True
+    assert r.qty == "0.001"  # 3-decimal quantity scale
+    assert len(r.stop_price.split(".")[1]) == 1  # 1-decimal price scale
+
+
+def test_stop_for_entry_recomputes_on_real_fill():
+    s = _settings()
+    at_last = stop_for_entry(80_000.0, 400.0, s)
+    at_fill = stop_for_entry(80_040.0, 400.0, s)
+    assert float(at_fill) - float(at_last) == 40.0

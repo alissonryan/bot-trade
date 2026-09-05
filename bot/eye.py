@@ -1,13 +1,34 @@
+"""Market data for the bot: socket first, REST fallback, plus the slow REST calls the LLM
+cycle needs (klines, balances, symbol rules).
+
+* ``poll_quotes`` never raises. A REST failure marks the quotes stale and counts the error;
+  the loop keeps running and the collar blocks entries while stale.
+* ``poll_heavy`` may raise in live mode when balances cannot be read: a bot that trades
+  on ``free_usdt = 0`` because a call failed would be lying to itself.
+* The socket feeds a shared :class:`~bot.hub.Hub` rather than this object directly, so the
+  local chart can read the same ticks without opening a second KCEX connection.
+"""
+
 from __future__ import annotations
 
+import logging
+import threading
 import time
 from typing import Any
 
 from bot.atr import atr
 from bot.hub import Hub
 from bot.settings import Settings
-from bot.types import Bar, Snapshot
+from bot.types import Bar, Snapshot, SymbolRules
 from kcex.client import KcexClient
+
+log = logging.getLogger(__name__)
+
+BAR_SECONDS = 15 * 60
+
+
+class EyeError(RuntimeError):
+    """A REST read the bot cannot trade without has failed."""
 
 
 class Eye:
@@ -30,19 +51,33 @@ class Eye:
         self.ask = 0.0
         self.bars: list[Bar] = []
         self.free_usdt = 0.0
+        self.rules: SymbolRules | None = None
         self.ws_ok = False
+        self.ws_frames = 0
+        self.ws_connected = False
+        self.ws_reconnects = 0
+        self._ws_thread_started = False
         self.last_update_ms = 0
         # Tracked separately from last_update_ms: the depth (bid/ask) channel
         # can die while the ticker channel stays healthy, and vice versa.
         self.depth_update_ms = 0
         self._depth_rest_failed = False
+        self.last_rest_ms = 0
+        self.rest_errors = 0
+        self.last_rest_error: str | None = None
         self.last_intent_action: str | None = None
         self.last_bot_pnl_usdt = 0.0
+
+    # -- time / state -----------------------------------------------------------
+
+    @staticmethod
+    def _now_ms() -> int:
+        return int(time.time() * 1000)
 
     def _stale(self) -> bool:
         if self.last_update_ms == 0:
             return True
-        return (int(time.time() * 1000) - self.last_update_ms) > self.settings.stale_ms
+        return (self._now_ms() - self.last_update_ms) > self.settings.stale_ms
 
     def _depth_stale(self) -> bool:
         """True when bid/ask have not been refreshed recently enough.
@@ -52,11 +87,14 @@ class Eye:
         """
         if self.depth_update_ms == 0:
             return True
-        return (int(time.time() * 1000) - self.depth_update_ms) > self.settings.stale_ms
+        return (self._now_ms() - self.depth_update_ms) > self.settings.stale_ms
+
+    # -- socket -----------------------------------------------------------------
 
     def apply_ws_price(self, last: float, bid: float | None = None, ask: float | None = None) -> None:
-        self.last = last
-        now_ms = int(time.time() * 1000)
+        now_ms = self._now_ms()
+        if last:
+            self.last = last
         if bid is not None:
             self.bid = bid
         if ask is not None:
@@ -64,26 +102,26 @@ class Eye:
         if bid is not None or ask is not None:
             self.depth_update_ms = now_ms
         self.ws_ok = True
+        self.ws_frames += 1
         self.last_update_ms = now_ms
 
-    def apply_frame(self, msg: dict) -> None:
+    def apply_frame(self, msg: dict) -> bool:
+        """Permissive `{ch, last, bid, ask}`-and-aliases parsing kept for the
+        synthetic fixture shape; the live socket path goes through `apply_event`."""
         last = msg.get("last") or msg.get("c") or msg.get("p")
         if last is None and isinstance(msg.get("data"), dict):
             last = msg["data"].get("last") or msg["data"].get("c")
         if last is None:
-            return
-        bid = msg.get("bid")
-        ask = msg.get("ask")
+            return False
         data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
-        if bid is None:
-            bid = data.get("bid")
-        if ask is None:
-            ask = data.get("ask")
+        bid = msg.get("bid") if msg.get("bid") is not None else data.get("bid")
+        ask = msg.get("ask") if msg.get("ask") is not None else data.get("ask")
         self.apply_ws_price(
             float(last),
             float(bid) if bid is not None else None,
             float(ask) if ask is not None else None,
         )
+        return True
 
     def sync_hub(self) -> None:
         """Pull the shared Hub's latest snapshot into this Eye's own fields."""
@@ -100,16 +138,18 @@ class Eye:
         if self.hub.depth_ts_ms and self.hub.depth_ts_ms > self.depth_update_ms:
             self.depth_update_ms = self.hub.depth_ts_ms
         self.ws_ok = True
-        self.last_update_ms = self.hub.ts_ms or int(time.time() * 1000)
+        self.last_update_ms = self.hub.ts_ms or self._now_ms()
 
     def apply_event(self, event) -> None:
+        if event is None:
+            return
         self.hub.apply(event)
+        self.ws_frames += 1
         self.sync_hub()
 
     def connect_ws(self) -> None:
-        # Full socket loop wiring lands in Task 8; this stays a safe no-op
-        # regardless of whether KCEX_WS_URL is configured. REST stays primary.
-        return
+        """Start the background socket. Kept as the name the CLI/cycle call."""
+        self.start_ws_thread()
 
     def start_ws_thread(self) -> None:
         """Start the (single) background WS thread for this process, if configured.
@@ -120,9 +160,14 @@ class Eye:
         `Hub` via `apply_event`, and reconnects with a short backoff on any
         error so the loop never dies quietly.
         """
-        if not self.settings.ws_url:
+        if not self.settings.ws_enabled or not self.settings.ws_url:
             return
-        import threading
+        # Idempotent: both `main()` and `_loop()` reach for the socket, and this
+        # process must hold exactly one KCEX connection (the chart reads the
+        # same Hub rather than opening its own).
+        if self._ws_thread_started:
+            return
+        self._ws_thread_started = True
 
         from kcex.ws import PublicSpotWs, default_connect
 
@@ -134,34 +179,152 @@ class Eye:
         def _mark_down(exc: Exception | None) -> None:
             self.hub.mark_down()
             self.ws_ok = False
+            self.ws_connected = False
             if state["healthy"]:
                 state["healthy"] = False
+                log.warning("ws down (%s); falling back to REST until it reconnects", exc)
                 print(f"ws caiu: {exc}. usando REST ate reconectar")
 
         def on_event(ev: Any) -> None:
             if not state["healthy"]:
                 state["healthy"] = True
+                self.ws_reconnects += 1
+                log.info("ws reconnected")
                 print("ws reconectado")
+            self.ws_connected = True
             self.apply_event(ev)
-
-        def on_error(exc: Exception) -> None:
-            _mark_down(exc)
 
         def loop() -> None:
             while True:
                 try:
                     ws = PublicSpotWs(self.settings.ws_url, self.settings.symbol, default_connect)
-                    ws.pump(on_event=on_event, on_error=on_error)
-                except Exception as exc:
+                    ws.pump(on_event=on_event, on_error=_mark_down)
+                except Exception as exc:  # noqa: BLE001
                     _mark_down(exc)
                 time.sleep(2)
 
         threading.Thread(target=loop, daemon=True).start()
+        log.info("ws %s started for %s", self.settings.ws_url, self.settings.symbol)
+
+    # -- REST -------------------------------------------------------------------
+
+    def load_rules(self) -> SymbolRules | None:
+        try:
+            self.rules = SymbolRules.from_trade_rules(self.client.symbol_trade_rules(self.settings.symbol))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("symbol rules unavailable, using settings defaults: %s", exc)
+            self.rules = None
+        return self.rules
+
+    def _poll_depth_rest(self) -> None:
+        depth = self.client.depth(self.settings.symbol)
+        book = depth["data"]["data"]
+        bids = book.get("bids") or book.get("bestBids") or []
+        asks = book.get("asks") or book.get("bestAsks") or []
+        if bids:
+            self.bid = float(bids[0]["p"])
+        if asks:
+            self.ask = float(asks[0]["p"])
+        self.depth_update_ms = self._now_ms()
+
+    def poll_quotes(self, *, force: bool = False) -> bool:
+        """Refresh last/bid/ask over REST when the socket is not delivering. Never raises.
+        Returns True when the quotes are fresh."""
+        self.sync_hub()
+        now = self._now_ms()
+        if not force:
+            if self.ws_ok and not self._stale():
+                # The ticker/last path is satisfied by WS, so skip the full REST
+                # snapshot -- but depth (bid/ask) rides a separate channel that can
+                # be silently absent, so it gets its own freshness check and its
+                # own cheap REST top-up rather than being silenced along with it.
+                if self._depth_stale():
+                    # Best-effort: the ticker path is healthy, so a failed depth
+                    # top-up must degrade (stale bid/ask, still visible via
+                    # depth_update_ms) rather than kill the unattended loop.
+                    try:
+                        self._poll_depth_rest()
+                        self._depth_rest_failed = False
+                    except Exception as exc:  # noqa: BLE001
+                        if not self._depth_rest_failed:
+                            self._depth_rest_failed = True
+                            log.warning("depth REST top-up failed: %s", exc)
+                            print(f"depth REST falhou: {exc}. bid/ask seguem defasados")
+                return True
+            if self.last_rest_ms and now - self.last_rest_ms < self.settings.poll_seconds * 1000:
+                return not self._stale()
+        self.last_rest_ms = now
+        try:
+            ticker = self.client.ticker(self.settings.symbol)
+            last = float(ticker["data"]["c"])
+            depth = self.client.depth(self.settings.symbol)
+            book = depth["data"]["data"]
+            bids = book.get("bids") or book.get("bestBids") or []
+            asks = book.get("asks") or book.get("bestAsks") or []
+            bid = float(bids[0]["p"]) if bids else last
+            ask = float(asks[0]["p"]) if asks else last
+        except Exception as exc:  # noqa: BLE001
+            self.rest_errors += 1
+            self.last_rest_error = f"{type(exc).__name__}: {exc}"
+            log.warning("rest quotes failed (%d in a row): %s", self.rest_errors, self.last_rest_error)
+            return False
+        self.last, self.bid, self.ask = last, bid, ask
+        self.last_update_ms = self._now_ms()
+        self.depth_update_ms = self.last_update_ms
+        self.ws_ok = False
+        self.rest_errors = 0
+        self.last_rest_error = None
+        return True
+
+    def poll_heavy(self) -> None:
+        """Klines and balances for the LLM cycle. Raises EyeError in live mode when the
+        balance cannot be read."""
+        end = self._now_ms()
+        start = end - 21 * BAR_SECONDS * 1000
+        kl = self.client.kline(
+            self.settings.symbol,
+            interval="Min15",
+            start=start,
+            end=end,
+        )
+        data = kl["data"]
+        volumes = data.get("v") or []
+        bars = []
+        for i, t in enumerate(data["t"]):
+            bars.append(
+                Bar(
+                    t=int(t),
+                    o=float(data["o"][i]),
+                    h=float(data["h"][i]),
+                    l=float(data["l"][i]),
+                    c=float(data["c"][i]),
+                    v=float(volumes[i]) if i < len(volumes) else 0.0,
+                )
+            )
+        # The last kline is the bar still forming; ATR must only see closed bars.
+        now_s = end // 1000
+        if bars and bars[-1].t + BAR_SECONDS > now_s:
+            bars.pop()
+        self.bars = bars
+
+        free = 0.0
+        try:
+            bals = self.client.balances("USDT")
+            for row in bals.get("data") or []:
+                if row.get("currency") == "USDT":
+                    free = float(row.get("available") or 0)
+        except Exception as exc:  # noqa: BLE001
+            if self.settings.mode == "live":
+                raise EyeError(f"balances unavailable: {exc}") from exc
+            free = 0.0
+        if self.settings.mode == "paper" and free <= 0:
+            free = self.settings.paper_starting_usdt
+        self.free_usdt = free
 
     def snapshot(self) -> Snapshot:
         spread = self.ask - self.bid if self.ask and self.bid else 0.0
         return Snapshot(
-            ts_ms=int(time.time() * 1000),
+            ts_ms=self._now_ms(),
             last=self.last,
             bid=self.bid,
             ask=self.ask,
@@ -177,76 +340,19 @@ class Eye:
             last_bot_pnl_usdt=self.last_bot_pnl_usdt,
         )
 
-    def _poll_depth_rest(self) -> None:
-        depth = self.client.depth(self.settings.symbol)
-        book = depth["data"]["data"]
-        self.bid = float(book["bids"][0]["p"])
-        self.ask = float(book["asks"][0]["p"])
-        self.depth_update_ms = int(time.time() * 1000)
-
-    def poll_quotes(self) -> None:
-        """Cheap REST tick used every loop when WS is not live (LLM-Auto-Trader style)."""
-        self.sync_hub()
-        if self.ws_ok and not self._stale():
-            # The ticker/last path is satisfied by WS, so skip the full REST
-            # snapshot -- but depth (bid/ask) rides a separate channel that can
-            # be silently absent, so it gets its own freshness check and its
-            # own cheap REST top-up rather than being silenced along with it.
-            if self._depth_stale():
-                # Best-effort: the ticker path is healthy, so a failed depth
-                # top-up must degrade (stale bid/ask, still visible via
-                # depth_update_ms) rather than kill the unattended loop.
-                try:
-                    self._poll_depth_rest()
-                    self._depth_rest_failed = False
-                except Exception as exc:
-                    if not self._depth_rest_failed:
-                        self._depth_rest_failed = True
-                        print(f"depth REST falhou: {exc}. bid/ask seguem defasados")
-            return
-        ticker = self.client.ticker(self.settings.symbol)
-        last = float(ticker["data"]["c"])
-        self.last = last
-        self._poll_depth_rest()
-        self.last_update_ms = int(time.time() * 1000)
-        self.ws_ok = False
-
-    def poll_heavy(self) -> None:
-        end = int(time.time() * 1000)
-        start = end - 20 * 15 * 60 * 1000
-        kl = self.client.kline(
-            self.settings.symbol,
-            interval="Min15",
-            start=start,
-            end=end,
-        )
-        data = kl["data"]
-        bars = []
-        for i, t in enumerate(data["t"]):
-            bars.append(
-                Bar(
-                    t=int(t),
-                    o=float(data["o"][i]),
-                    h=float(data["h"][i]),
-                    l=float(data["l"][i]),
-                    c=float(data["c"][i]),
-                    v=float(data.get("v", [0] * len(data["t"]))[i] if data.get("v") else 0),
-                )
-            )
-        free = 0.0
-        try:
-            bals = self.client.balances("USDT")
-            for row in bals.get("data") or []:
-                if row.get("currency") == "USDT":
-                    free = float(row.get("available") or 0)
-        except Exception:
-            free = 0.0
-        if self.settings.mode == "paper" and free <= 0:
-            free = self.settings.paper_starting_usdt
-        self.bars = bars
-        self.free_usdt = free
-
     def snapshot_rest(self) -> Snapshot:
-        self.poll_quotes()
+        self.poll_quotes(force=True)
         self.poll_heavy()
         return self.snapshot()
+
+    def health(self) -> dict[str, Any]:
+        return {
+            "ws_ok": self.ws_ok,
+            "ws_frames": self.ws_frames,
+            "ws_connected": self.ws_connected,
+            "ws_reconnects": self.ws_reconnects,
+            "rest_errors": self.rest_errors,
+            "stale": self._stale(),
+            "depth_stale": self._depth_stale(),
+            "last_update_ms": self.last_update_ms,
+        }
