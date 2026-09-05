@@ -107,25 +107,34 @@ def run_once(
         exec_error = f"{type(exc).__name__}: {exc}"
         raise
     finally:
-        eye.bot_qty = hands.position.qty
-        eye.bot_avg_entry = hands.position.entry or None
-        extra: dict[str, Any] = {
-            "exec_error": exec_error,
-            "position_state": hands.position.state,
-            "stop_order_id": getattr(hands, "stop_order_id", None),
-        }
-        health = getattr(eye, "health", None)
-        if callable(health):
-            extra["eye"] = health()
-        store.append_audit(
-            intent,
-            gate,
-            settings.mode,
-            order_id=getattr(hands, "entry_order_id", None) if gate.ok else None,
-            snapshot=snap.compact(),
-            llm=result.as_audit(),
-            extra=extra,
-        )
-        eye.last_intent_action = intent.action
-        eye.last_bot_pnl_usdt = store.day_pnl(day)
+        # Bookkeeping must never replace the exception on its way out. A raise in
+        # here while UnprotectedPosition is in flight would downgrade the halt to
+        # the loop's generic "back off and keep trading" branch -- exactly the
+        # failure invariant 3 exists to catch.
+        try:
+            eye.bot_qty = hands.position.qty
+            eye.bot_avg_entry = hands.position.entry or None
+            extra: dict[str, Any] = {
+                "exec_error": exec_error,
+                "position_state": hands.position.state,
+                "stop_order_id": getattr(hands, "stop_order_id", None),
+            }
+            health = getattr(eye, "health", None)
+            if callable(health):
+                extra["eye"] = health()
+            store.append_audit(
+                intent,
+                gate,
+                settings.mode,
+                order_id=getattr(hands, "entry_order_id", None) if gate.ok else None,
+                snapshot=snap.compact(),
+                llm=result.as_audit(),
+                extra=extra,
+            )
+            eye.last_intent_action = intent.action
+            eye.last_bot_pnl_usdt = store.day_pnl(day)
+        except Exception as audit_exc:  # noqa: BLE001
+            log.error("audit bookkeeping failed: %s", audit_exc)
+            if exec_error is None:
+                raise
     return now, snap.last, gate

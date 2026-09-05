@@ -63,3 +63,37 @@ def test_paper_refuses_buy_without_cash(tmp_path):
     pos = hands.execute(GateResult(True, "ok_buy", "BUY", qty="0.00025", notional=20, stop_price="79200.00"), _snap())
     assert pos.qty == 0.0
     assert hands.cash == 5.0
+
+
+def test_paper_stop_does_not_fire_on_a_missing_bid(tmp_path):
+    """Finding 7: snap.bid is 0.0 until a bookTicker frame arrives, and a deals-only
+    frame already marks the feed healthy -- so poll_quotes skips REST and mark()
+    saw `0.0 <= stop_price`. It then closed at min(0.0, stop) * (1 - slip) == 0.0,
+    booking pnl = -entry*qty and crediting nothing back to the persisted ledger."""
+    store = Store(tmp_path / "x.db")
+    hands = PaperHands(_settings(paper_starting_usdt=450.0), store)
+    hands.execute(
+        GateResult(True, "ok_buy", "BUY", qty="0.00025", notional=20, stop_price="79200.00"),
+        _snap(),
+    )
+    cash_after_buy = hands.cash
+    assert hands.position.qty > 0
+
+    # price feed is alive on `last` but bid has never been seen
+    hands.mark(_snap(last=80000.0, bid=0.0, ask=0.0))
+
+    assert hands.position.qty > 0, "stop fired on a bid that was never quoted"
+    assert hands.cash == cash_after_buy
+
+
+def test_paper_stop_still_fires_on_a_real_bid(tmp_path):
+    """The control: a genuine bid at or below the stop must still close."""
+    store = Store(tmp_path / "x.db")
+    hands = PaperHands(_settings(paper_starting_usdt=450.0), store)
+    hands.execute(
+        GateResult(True, "ok_buy", "BUY", qty="0.00025", notional=20, stop_price="79200.00"),
+        _snap(),
+    )
+    hands.mark(_snap(last=79100.0, bid=79100.0, ask=79102.0))
+    assert hands.position.qty == 0.0
+    assert hands.cash > 0

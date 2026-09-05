@@ -274,3 +274,39 @@ def test_stop_for_entry_recomputes_on_real_fill():
     at_last = stop_for_entry(80_000.0, 400.0, s)
     at_fill = stop_for_entry(80_040.0, 400.0, s)
     assert float(at_fill) - float(at_last) == 40.0
+
+
+def test_unrealized_day_loss_cannot_change_a_buy_outcome():
+    """Finding 9, pinned as behaviour rather than fixed.
+
+    `unrealized_pnl_usdt` is non-zero only while a position is open (see
+    cycle.unrealized_pnl), and an open position is exactly what `already_long`
+    rejects. So the term only ever changes the rejection *label*, never whether
+    the BUY happens. This test exists so nobody assumes the unrealized day-loss
+    halt does more than it does; making it bite means forcing an exit, which is
+    a product decision.
+    """
+    from bot.cycle import unrealized_pnl
+    from bot.hands import Position
+
+    buy = TradeIntent("BUY", 0.9, "go", "trend")
+    s = _settings(max_day_loss_usdt=20.0)
+
+    class _Hands:
+        def __init__(self, pos):
+            self.position = pos
+
+    # Flat: the caller can only ever supply 0.0, however far under water the last
+    # trade went -- so the term cannot contribute to a BUY that is otherwise ok.
+    assert unrealized_pnl(_Hands(Position()), 100_000.0) == 0.0
+    flat = decide(buy, _snap(bot_qty=0.0), s, session_ok=True, day_pnl_usdt=0.0, unrealized_pnl_usdt=0.0)
+    assert flat.ok is True
+
+    # Holding: the term is non-zero exactly here, and here the BUY is already
+    # rejected. Only the label differs.
+    open_pos = Position(qty=0.0002, entry=350_000.0)
+    assert unrealized_pnl(_Hands(open_pos), 100_000.0) < 0
+    held = decide(buy, _snap(bot_qty=0.0002), s, session_ok=True, day_pnl_usdt=0.0, unrealized_pnl_usdt=-50.0)
+    without = decide(buy, _snap(bot_qty=0.0002), s, session_ok=True, day_pnl_usdt=0.0, unrealized_pnl_usdt=0.0)
+    assert held.ok is False and without.ok is False
+    assert held.rule == "day_loss" and without.rule == "already_long"

@@ -39,6 +39,10 @@ REASON_TIMEOUT = "llm_timeout"
 REASON_NETWORK = "llm_network"
 REASON_BAD_RESPONSE = "llm_bad_response"
 REASON_EMPTY = "llm_empty"
+# The completion hit max_tokens before producing any content. Separated from
+# REASON_EMPTY because it is a configuration problem with a specific fix, and
+# because it degrades to a forced HOLD that otherwise looks like a real decision.
+REASON_TRUNCATED = "llm_truncated"
 REASON_PARSE = "llm_parse"
 
 
@@ -83,6 +87,40 @@ class ThinkResult:
         }
 
 
+def _first_json_object(raw: str) -> str | None:
+    """The first brace-balanced ``{...}`` in ``raw``, ignoring braces inside strings.
+
+    Models append things after the object (observed live: a valid object followed
+    by a stray ``"}``). Slicing to the *last* ``}`` swallows that garbage and the
+    whole decision is dropped as unparseable, which degrades to a forced HOLD.
+    """
+    start = raw.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return raw[start : i + 1]
+    return None
+
+
 def parse_intent(text: str | None) -> TradeIntent | None:
     if not isinstance(text, str) or not text.strip():
         return None
@@ -93,12 +131,11 @@ def parse_intent(text: str | None) -> TradeIntent | None:
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start < 0 or end <= start:
+        sliced = _first_json_object(raw)
+        if sliced is None:
             return None
         try:
-            data = json.loads(raw[start : end + 1])
+            data = json.loads(sliced)
         except json.JSONDecodeError:
             return None
     if not isinstance(data, dict):
@@ -212,6 +249,22 @@ def think_result(
     cost, source = _cost_from(payload, settings)
     budget.spend(cost)
     if not isinstance(text, str) or not text.strip():
+        finish = None
+        try:
+            finish = payload["choices"][0].get("finish_reason")
+        except Exception:  # noqa: BLE001
+            pass
+        if finish == "length":
+            # A reasoning model spends max_tokens on its reasoning before any
+            # content, so every cycle would degrade to a forced HOLD while still
+            # being charged. Say so loudly instead of looking like a decision.
+            log.error(
+                "llm returned no content and stopped at max_tokens=%d; raise LLM_MAX_TOKENS "
+                "or pick a non-reasoning model (every cycle is a forced HOLD and still costs)",
+                settings.llm_max_tokens,
+            )
+            return ThinkResult(None, REASON_TRUNCATED, cost, source, status, model)
+        log.warning("llm returned an empty completion")
         return ThinkResult(None, REASON_EMPTY, cost, source, status, model)
     intent = parse_intent(text)
     if intent is None:

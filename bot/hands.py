@@ -37,10 +37,22 @@ from kcex.client import KcexClient
 log = logging.getLogger(__name__)
 
 PAPER_CASH_KEY = "paper_cash"
+# BTC on the account that is not the bot's. Seeded the first time reconcile()
+# runs flat; an increase while flat means an entry filled without being recorded.
+FOREIGN_BTC_KEY = "foreign_btc"
 
 
 class UnprotectedPosition(RuntimeError):
     """The exchange holds a bot position without a resident stop and it could not be fixed."""
+
+
+class PositionStuck(RuntimeError):
+    """The position is protected but the bot cannot exit it on its own.
+
+    Raised when the resident stop is not an id the bot recorded, so
+    ``cancel_if_ours`` will never cancel it: without this the SELL path aborts
+    silently and repeats that abort on every later cycle, forever.
+    """
 
 
 @dataclass
@@ -219,9 +231,17 @@ class PaperHands:
 
     def mark(self, snap: Snapshot) -> Position:
         if self.position.qty > 0 and self.position.stop_price is not None:
-            if snap.last <= self.position.stop_price or snap.bid <= self.position.stop_price:
+            # Only quotes that actually exist can trigger a stop. bid/last sit at
+            # 0.0 until the matching frame arrives, and a deals-only frame already
+            # marks the feed healthy -- so an unguarded `<=` reads "price fell to
+            # zero", closes at 0.0 and books pnl = -entry*qty against the ledger.
+            hit = (snap.last > 0 and snap.last <= self.position.stop_price) or (
+                snap.bid > 0 and snap.bid <= self.position.stop_price
+            )
+            if hit:
                 slip = self.settings.paper_slippage_bps / 10_000.0
-                px = min(snap.bid, self.position.stop_price) * (1 - slip)
+                reference = min(x for x in (snap.bid, snap.last) if x > 0)
+                px = min(reference, self.position.stop_price) * (1 - slip)
                 self._close(px, source="paper_stop", order_id="paper-stop")
         return self.position
 
@@ -310,20 +330,31 @@ class LiveHands:
                 log.error("stop placement attempt %d failed: %s", attempt + 1, exc)
         return None
 
-    def _watch_balance(self, target: Callable[[float], float], expected: float) -> float:
+    def _watch_balance(self, target: Callable[[float], float], expected: float) -> float | None:
         """Poll BTC total until ``target(total)`` reaches ``expected`` (full) or tries run
-        out (returns the partial amount seen, floored to the quantity scale)."""
+        out (returns the partial amount seen, floored to the quantity scale).
+
+        Returns ``None`` when not one reading succeeded. "The balances endpoint is
+        down" and "nothing filled" are different facts and the caller must not be
+        allowed to confuse them: the first is ignorance, and acting on ignorance
+        here means deleting the row for an order that may hold real BTC.
+        """
         seen = 0.0
+        read_ok = False
         tries = max(1, self.settings.fill_confirm_tries)
         for i in range(tries):
             try:
                 seen = max(0.0, target(btc_total(self.client)))
+                read_ok = True
             except Exception as exc:  # noqa: BLE001
                 log.warning("balance read failed while confirming fill: %s", exc)
-            if seen >= expected - self.tol:
+            if read_ok and seen >= expected - self.tol:
                 return expected
             if i + 1 < tries:
                 self._sleep(self.settings.fill_confirm_wait_s)
+        if not read_ok:
+            log.error("could not read the balance even once while confirming a fill")
+            return None
         return _floor_qty(seen, self.qty_scale) if seen >= self.tol else 0.0
 
     def _fill_price(self, order_id: str, default: float) -> tuple[float, str]:
@@ -376,16 +407,35 @@ class LiveHands:
         self._persist()  # invariant 1: the entry exists on disk before the stop is tried
 
         filled = self._watch_balance(lambda total: total - before, qty_req)
-        if filled <= 0:
-            if entry_id in open_order_ids(self.client):
+        if filled is None or filled <= 0:
+            # The row is only safe to delete when we have *proof* the entry did not
+            # fill: it was still resting on the book and we cancelled it. Anything
+            # else -- a balances outage, or an order that already left the book --
+            # is ambiguous, and deleting the row there is what makes the bot go
+            # "flat" while holding real BTC with no stop. Leave it PENDING and let
+            # reconcile() settle it against the exchange.
+            still_open = False
+            try:
+                still_open = entry_id in open_order_ids(self.client)
+            except Exception as exc:  # noqa: BLE001
+                log.error("could not list open orders after entry %s: %s", entry_id, exc)
+            if still_open:
                 try:
-                    self.cancel_if_ours(entry_id)
+                    cancelled = self.cancel_if_ours(entry_id)
                 except Exception as exc:  # noqa: BLE001
                     log.error("could not cancel unfilled entry %s: %s", entry_id, exc)
                     self._persist("PENDING")
                     raise UnprotectedPosition(f"entry {entry_id} unfilled and uncancelled") from exc
-            log.warning("entry %s not filled; flat", entry_id)
-            self._clear()
+                if cancelled:
+                    log.warning("entry %s not filled; cancelled; flat", entry_id)
+                    self._clear()
+                    return self.position
+            reason = "balance unreadable" if filled is None else "fill unconfirmed"
+            log.error(
+                "entry %s: %s and it is not on the book; keeping the row PENDING for "
+                "reconcile rather than assuming we are flat", entry_id, reason,
+            )
+            self._persist("PENDING")
             return self.position
 
         qty = min(filled, qty_req)
@@ -433,8 +483,11 @@ class LiveHands:
         self.store.remember_order(sell_id)
         base = start if start is not None else (self.position.btc_before or 0.0) + qty
         sold = self._watch_balance(lambda total: base - total, qty)
-        if sold < qty - self.tol:
-            log.error("flatten accepted (%s) but balance did not drop", sell_id)
+        if sold is None or sold < qty - self.tol:
+            # Unconfirmed is not the same as failed, but for an unprotected
+            # position the safe reading is the loud one: report failure so the
+            # caller raises UnprotectedPosition and a human looks at it.
+            log.error("flatten accepted (%s) but the balance drop could not be confirmed", sell_id)
             return False
         price, source = self._fill_price(sell_id, default=snap.bid or snap.last)
         pnl = (price - self.position.entry) * qty
@@ -453,7 +506,15 @@ class LiveHands:
         self._exit_hint = snap.bid or snap.last
 
         if self.stop_order_id:
-            self.cancel_if_ours(self.stop_order_id)  # raises -> nothing sold, still protected
+            # A False return means the id is not in our records, so no cancel was
+            # ever sent. Retrying is pointless -- the confirm loop below would see
+            # the stop still open every time and abort the exit for good.
+            if not self.cancel_if_ours(self.stop_order_id):  # raises -> nothing sold, still protected
+                self._persist("OPEN")
+                raise PositionStuck(
+                    f"stop {self.stop_order_id} guards {qty_s} BTC but is not a recorded bot "
+                    "order, so the bot cannot cancel it and cannot exit. Close it by hand."
+                )
             gone = False
             for i in range(max(1, self.settings.fill_confirm_tries)):
                 if self.stop_order_id not in open_order_ids(self.client):
@@ -475,7 +536,23 @@ class LiveHands:
                 quantity=qty_s,
             )
         except Exception as exc:  # noqa: BLE001
-            log.error("sell failed: %s; restoring stop", exc)
+            # The POST is never retried, so this may be a lost response for an
+            # order that actually executed. Re-read the balance before putting a
+            # stop back: a trigger for BTC we no longer own would sit on top of
+            # the owner's own coins and could freeze and sell them.
+            log.error("sell failed: %s; re-reading the balance before restoring the stop", exc)
+            try:
+                after = btc_total(self.client)
+            except Exception as read_exc:  # noqa: BLE001
+                log.error("balance unreadable after the failed sell: %s", read_exc)
+                after = None
+            if after is not None and start - after >= qty - self.tol:
+                log.warning("the sell had in fact executed; booking it instead of restoring a stop")
+                price, source = self._fill_price("", default=snap.bid or snap.last)
+                pnl = (price - self.position.entry) * qty
+                self.store.add_fill(self.today(), pnl, side="SELL", qty=qty, price=price, fee=0.0, order_id=None, source=f"recovered_{source}")
+                self._clear()
+                return self.position
             stop_id = self._place_stop(qty_s, self.position.stop_price)
             if stop_id:
                 self.stop_order_id = stop_id
@@ -487,7 +564,7 @@ class LiveHands:
         sell_id = self._order_id(resp)
         self.store.remember_order(sell_id)
         sold = self._watch_balance(lambda total: start - total, qty)
-        if sold < qty - self.tol:
+        if sold is None or sold < qty - self.tol:
             log.warning("sell %s accepted but not confirmed by balance; reconcile will settle it", sell_id)
             self._persist("CLOSING")
             return self.position
@@ -499,17 +576,79 @@ class LiveHands:
 
     # -- reconciliation ---------------------------------------------------------
 
+    def _reconcile_flat(self) -> str:
+        """Flat locally -- but the local row is exactly what a lost entry response
+        destroys, so ask the exchange instead of trusting it.
+
+        `foreign_btc` is the BTC on the account that is not ours (the owner holds
+        their own, e.g. a manual 0.00064 stop). It is re-baselined downwards while
+        we are genuinely flat; an *increase* while flat is BTC nobody accounted
+        for, which is what an unrecorded fill looks like.
+        """
+        total = btc_total(self.client)
+        raw = self.store.kv_get(FOREIGN_BTC_KEY)
+        if raw is None:
+            self.store.kv_set(FOREIGN_BTC_KEY, repr(total))
+            return "flat"
+        baseline = float(raw)
+        if total > baseline + self.tol:
+            log.critical(
+                "flat locally but the account gained %.8f BTC (baseline %.8f, now %.8f). "
+                "An entry may have filled without being recorded. Square the account on "
+                "the exchange, then reset %s in the kv table.",
+                total - baseline, baseline, total, FOREIGN_BTC_KEY,
+            )
+            raise UnprotectedPosition(
+                f"{total - baseline:.8f} BTC on the exchange with no local position row"
+            )
+        if total < baseline:
+            self.store.kv_set(FOREIGN_BTC_KEY, repr(total))
+        return "flat"
+
     def reconcile(self) -> str:
         """Bring the local row in line with the exchange. Returns a short verdict."""
         if not self.position.is_open():
-            return "flat"
+            return self._reconcile_flat()
         total = btc_total(self.client)
         ids = open_order_ids(self.client)
         base = self.position.btc_before if self.position.btc_before is not None else 0.0
-        holding = total >= base + self.position.qty - self.tol
-        stop_alive = bool(self.stop_order_id) and self.stop_order_id in ids
         qty = self.position.qty
         qty_s = _fmt_qty(qty, self.qty_scale)
+        stop_alive = bool(self.stop_order_id) and self.stop_order_id in ids
+
+        # `missing` is how much less BTC the account holds than it should with our
+        # position open. Comparing the *whole-account* total against a threshold
+        # (the old `total >= base + qty`) cannot tell our position closing apart
+        # from the owner moving their own coins, and it resolved that ambiguity
+        # the dangerous way: booking a phantom exit while our long and its live
+        # stop stayed on the exchange.
+        missing = (base + qty) - total
+        if missing <= self.tol:
+            holding = True
+        elif abs(missing - qty) <= self.tol:
+            holding = False  # exactly our size left: our stop filled, or a manual sale
+        else:
+            # Some other amount moved. Assume our position is still there (the
+            # asymmetry is deliberate: wrongly believing we are flat orphans a
+            # real position and lets the next BUY stack a second one) and
+            # re-baseline the foreign holding.
+            log.warning(
+                "account moved %.8f BTC, which is not our size %.8f -- treating the "
+                "position as still open and re-baselining", missing, qty,
+            )
+            holding = True
+            self.position.btc_before = max(0.0, total - qty)
+            self._persist()
+
+        if not holding and self.position.state == "PENDING":
+            # The entry never actually filled (see _buy: the row is kept PENDING
+            # whenever the fill could not be confirmed). There was no position, so
+            # there is no exit to book -- inventing a SELL here would write a
+            # fabricated PnL into the ledger.
+            log.warning("pending entry %s never filled; dropping the row", self.entry_order_id)
+            self.store.kv_set(FOREIGN_BTC_KEY, repr(total))
+            self._clear()
+            return "entry_never_filled"
 
         if not holding:
             # Stop hit, manual sale, or a CLOSING sell that settled after we stopped watching.
@@ -520,6 +659,7 @@ class LiveHands:
             pnl = (price - self.position.entry) * qty
             self.store.add_fill(self.today(), pnl, side="SELL", qty=qty, price=price, fee=0.0, order_id=self.stop_order_id, source="reconcile")
             log.warning("position closed on the exchange (state %s); pnl est %.4f", self.position.state, pnl)
+            self.store.kv_set(FOREIGN_BTC_KEY, repr(total))
             self._clear()
             return "closed_on_exchange"
 

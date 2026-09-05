@@ -76,6 +76,14 @@ def decide(
     # BUY from here on.
     if snap.stale:
         return GateResult(False, "stale", "BUY")
+    # NOTE: `unrealized_pnl_usdt` cannot change the outcome as the bot stands.
+    # It is non-zero only while a position is open (cycle.unrealized_pnl returns
+    # 0.0 at qty <= 0), and an open position already fails `already_long` below,
+    # so the term only ever changes which rejection label is reported. It is kept
+    # because it is correct in principle and becomes load-bearing the moment the
+    # bot can hold more than one position or add to one. Making an unrealized
+    # drawdown actually *do* something means forcing an exit, which is a product
+    # decision, not a bug fix -- do not add it here without asking the owner.
     if day_pnl_usdt + unrealized_pnl_usdt <= -abs(settings.max_day_loss_usdt):
         return GateResult(False, "day_loss", "BUY")
     if intent.confidence < settings.min_confidence:

@@ -167,3 +167,51 @@ def test_budget_rolls_over_at_new_day():
     assert b.calls == 7
     b.roll_day("2026-09-05")
     assert b.spent_usd == 0.0 and b.calls == 0
+
+
+def test_truncated_response_is_named_not_silently_a_hold(caplog):
+    """Finding 10: LLM_MAX_TOKENS caps the *whole* completion, and on OpenRouter a
+    reasoning model spends that budget before emitting content. The result was an
+    empty string -> llm_empty -> forced HOLD, indistinguishable from a real HOLD
+    in the audit, while budget.spend() still charged for every call."""
+    import logging
+
+    caplog.set_level(logging.ERROR, logger="bot")
+    budget = Budget(spent_usd=0.0, cap_usd=2.0, day="2026-09-04")
+    payload = {"choices": [{"message": {"content": ""}, "finish_reason": "length"}]}
+
+    res = think_result(_snap(), _settings(), budget, http_post=lambda *a, **k: FakeResp(payload))
+
+    assert res.intent is None
+    assert res.reason == "llm_truncated"
+    assert "max_tokens" in caplog.text
+
+
+def test_empty_content_without_truncation_is_still_llm_empty():
+    """The control: an empty body that was not truncated keeps its own reason."""
+    budget = Budget(spent_usd=0.0, cap_usd=2.0, day="2026-09-04")
+    res = think_result(_snap(), _settings(), budget, http_post=lambda *a, **k: FakeResp(_ok_payload(content=None)))
+    assert res.reason == "llm_empty"
+
+
+def test_parse_intent_survives_trailing_garbage_after_the_object():
+    """Observed live on 2026-09-05 with deepseek-v4-flash: the model emitted a
+    valid object followed by a stray '"}'. The fallback used rfind('}'), which
+    grabbed the *trailing* brace, so the slice was still invalid and a perfectly
+    good decision was thrown away as a forced HOLD."""
+    raw = (
+        ' {"action":"HOLD","confidence":0.6,'
+        '"reason":"price is ranging, ATR is 58, no clear direction","regime":"range"}"}'
+    )
+    intent = parse_intent(raw)
+    assert intent is not None
+    assert intent.action == "HOLD"
+    assert intent.confidence == 0.6
+    assert intent.regime == "range"
+
+
+def test_parse_intent_ignores_braces_inside_strings():
+    raw = '{"action":"BUY","confidence":0.8,"reason":"a } inside text","regime":"trend"} trailing'
+    intent = parse_intent(raw)
+    assert intent is not None and intent.action == "BUY"
+    assert intent.reason == "a } inside text"

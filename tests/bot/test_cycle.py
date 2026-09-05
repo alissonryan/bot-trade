@@ -216,3 +216,31 @@ def test_unrealized_pnl_feeds_the_collar():
     assert unrealized_pnl(hands, 79_000.0) == pytest.approx(-1.0)
     hands.position = Position()
     assert unrealized_pnl(hands, 79_000.0) == 0.0
+
+
+def test_audit_failure_does_not_swallow_the_unprotected_halt(tmp_path):
+    """Finding 8: the audit write lives in a bare `finally`, so an exception there
+    replaces an in-flight UnprotectedPosition. _loop then matches the generic
+    `except Exception` branch, backs off and keeps trading instead of halting
+    with EXIT_UNPROTECTED -- the exact failure the invariant exists to catch."""
+    s = _settings(mode="paper")
+    store = Store(tmp_path / "c.db")
+    eye = FakeEye()
+
+    class BoomHands(PaperHands):
+        def execute(self, gate, snap):
+            raise UnprotectedPosition("no stop")
+
+    def boom_audit(*a, **kw):
+        raise RuntimeError("audit table is locked")
+
+    store.append_audit = boom_audit
+
+    def think(snap, settings, budget):
+        return ThinkResult(TradeIntent("BUY", 0.9, "go", "trend"), "ok")
+
+    with pytest.raises(UnprotectedPosition):
+        run_once(
+            settings=s, eye=eye, store=store, client=NoClient(), hands=BoomHands(s, store),
+            budget=Budget(0, 2, "2026-09-04"), last_llm_ms=0, last_px=0.0, think=think,
+        )

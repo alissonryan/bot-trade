@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from bot.brain import Budget
 from bot.cycle import SessionDead, run_once, utc_day
 from bot.eye import Eye
-from bot.hands import LiveHands, PaperHands, UnprotectedPosition
+from bot.hands import LiveHands, PaperHands, PositionStuck, UnprotectedPosition
 from bot.settings import Settings
 from bot.store import Store
 from kcex.client import KcexClient
@@ -38,6 +38,9 @@ EXIT_SESSION_DEAD = 1
 EXIT_UNPROTECTED = 2
 EXIT_ALREADY_RUNNING = 3
 EXIT_CYCLE_FAILED = 4
+# The position is protected but the bot cannot exit it on its own; retrying would
+# repeat the same impossible exit every cycle.
+EXIT_STUCK = 5
 
 
 class AlreadyRunning(RuntimeError):
@@ -206,6 +209,9 @@ def _loop(once: bool, settings: Settings, client: KcexClient, store: Store, eye:
         except UnprotectedPosition as exc:
             log.critical("UNPROTECTED POSITION: %s. Fix it on the exchange, then restart.", exc)
             return EXIT_UNPROTECTED
+        except PositionStuck as exc:
+            log.critical("STUCK POSITION: %s", exc)
+            return EXIT_STUCK
         except KeyboardInterrupt:
             log.info("stopped by user")
             return EXIT_OK

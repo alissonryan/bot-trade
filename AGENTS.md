@@ -72,13 +72,19 @@ Store: data/bot.db audit (with snapshot) + fills (with prices) + bot order ids +
 ## Live invariants (bot/hands.py) — keep them, test them
 
 1. The position row is persisted as `PENDING` the moment the entry is accepted, **before** the stop is tried.
-2. Fills are confirmed by **BTC balance delta**, not by the order id. Partial fills protect only what was bought; an unfilled entry is cancelled and the bot stays flat.
+2. Fills are confirmed by **BTC balance delta**, not by the order id. Partial fills protect only what was bought.
+   **The row is deleted only on proof the entry did not fill** — it was still resting on the book and we cancelled it. A balances outage, or an entry that already left the book, is *ambiguous*: the row stays `PENDING` and `reconcile()` settles it. `_watch_balance` returns `None` for "not one reading succeeded" precisely so ignorance cannot be mistaken for "nothing filled".
 3. A position never stays quietly unprotected: stop fails → flatten; flatten fails → state `UNPROTECTED`, `UnprotectedPosition` raised, process exits 2.
-4. SELL: cancel the resident stop, confirm the cancel on open orders, then sell; a failed sell puts the stop back; an unconfirmed sell is `CLOSING` until `reconcile()` settles it.
-5. `reconcile()` runs at boot and every LLM cycle: position gone from the exchange → booked as a fill; stop missing → re-placed; unrestorable → `UnprotectedPosition`.
+4. SELL: cancel the resident stop, confirm the cancel on open orders, then sell; an unconfirmed sell is `CLOSING` until `reconcile()` settles it.
+   A **failed** sell re-reads the balance *before* putting the stop back — the POST is never retried, so the sell may in fact have executed, and a stop for BTC we no longer own would sit on the owner's own coins.
+   If the resident stop is not a recorded bot order, `cancel_if_ours` can never cancel it: that raises `PositionStuck` (exit 5) instead of aborting the exit silently on every future cycle.
+5. `reconcile()` runs at boot and every LLM cycle. It never trusts the local row alone:
+   - **Flat locally** → it still queries the exchange. `foreign_btc` (kv) is the BTC that is not ours, seeded on the first flat reconcile and re-baselined downwards while flat. An *increase* while flat is an entry that filled without being recorded → `UnprotectedPosition`.
+   - **Open locally** → the account is judged by how much BTC is *missing* against `btc_before + qty`. Missing ≈ our own size → our exit, booked. Missing = some other amount → the **owner** moved their coins (they hold their own 0.00064 stop): the position is treated as still open and the foreign baseline is re-set. Guessing the other way orphans a real position and lets the next BUY stack a second one.
+   - A `PENDING` row whose entry never filled is dropped **without** booking a fill — inventing a SELL there writes a fabricated PnL into the ledger.
 6. Only bot-created order ids are ever cancelled.
 
-Exit codes: `1` session dead, `2` unprotected position, `3` already running, `4` `--once` cycle failed.
+Exit codes: `1` session dead, `2` unprotected position, `3` already running, `4` `--once` cycle failed, `5` stuck position (protected, but the bot cannot exit it).
 
 ## Auth (already built — do not re-reverse-engineer login)
 
