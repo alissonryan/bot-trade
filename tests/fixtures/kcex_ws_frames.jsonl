@@ -1,1 +1,6 @@
-{"ch":"ticker","symbol":"BTC_USDT","last":"80000.1","bid":"80000.0","ask":"80000.2"}
+{"id":0,"code":0,"msg":"spot@public.deals.v3.api@BTCUSDT"}
+{"c":"spot@public.deals.v3.api@BTCUSDT","d":{"deals":[{"p":"79802.15","v":"0.00437","S":1,"t":1788553416797}],"e":"spot@public.deals.v3.api"},"s":"BTCUSDT","t":1788553416802}
+{"c":"spot@public.bookTicker.v3.api@BTCUSDT","d":{"A":"6.42732","B":"6.35862","a":"79562.02","b":"79562.01"},"s":"BTCUSDT","t":1788569995303}
+{"d":{"s":"BTCUSDT","p":"79583.99","r":"0.0019","tr":"-0.0009","h":"81414.5","l":"78660.01","v":"1383859973.96","q":"17273.48118","lastRT":"-1","MT":"0","NV":"--","t":"1788570010040"},"c":"spot@public.miniTicker.v3.api@BTCUSDT@UTC+0","t":1788570010040,"s":"BTCUSDT"}
+{"d":{"e":"spot@public.kline.v3.api","k":{"t":1788570000,"o":"79562.01","c":"79583.99","h":"79584","l":"79562.01","v":"0.06579","a":"5235.79","T":1788570900,"i":"Min15"}},"c":"spot@public.kline.v3.api@BTCUSDT@Min15","t":1788570013746,"s":"BTCUSDT"}
+{"id":0,"code":0,"msg":"PONG"}
