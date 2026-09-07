@@ -132,11 +132,23 @@ def _extract_list(payload: Any) -> list[Any]:
 
 
 def btc_total(client: KcexClient) -> float:
-    """BTC available + frozen on the account (frozen includes BTC parked in a trigger)."""
+    """BTC available + frozen on the account (frozen includes BTC parked in a trigger).
+
+    A non-finite figure is ignorance, not a quantity. It must never reach the
+    arithmetic that sizes a stop: ``qty - nan`` collapses to zero and would send
+    a 0.00000 trigger while erasing a real position. Callers already treat a
+    raise here as "the balance could not be read", which is the honest reading.
+    """
     total = 0.0
     for row in _extract_list(client.balances("BTC")):
         if isinstance(row, dict) and row.get("currency") == "BTC":
-            total += float(row.get("available") or 0) + float(row.get("frozen") or 0)
+            for key in ("available", "frozen"):
+                value = float(row.get(key) or 0)
+                if not math.isfinite(value):
+                    raise ValueError(f"non-finite BTC {key} in the balance response")
+                total += value
+    if not math.isfinite(total):
+        raise ValueError("non-finite BTC balance total")
     return total
 
 
@@ -821,11 +833,29 @@ class LiveHands:
 
             # Partial fill (or nothing sold, when sold <= tol): protect only
             # what we still actually hold, never the original full size.
+            if not all(math.isfinite(v) for v in (start, after, sold)):
+                # Never let a bad parse do arithmetic: qty - nan collapses to
+                # zero, which would send a 0.00000 trigger and drop a live row.
+                self._persist("UNPROTECTED")
+                raise UnprotectedPosition(
+                    f"sell failed and the balance is not a finite number; the {qty_s} BTC "
+                    "position size cannot be established"
+                ) from exc
             remaining = max(0.0, qty - max(sold, 0.0))
             if sold > self.tol:
+                # Book the BTC that actually left BEFORE shrinking the row.
+                # Without this the ledger silently loses that PnL forever:
+                # day-loss, the post-loss cooldown and the journal would all
+                # stop seeing a loss that really happened.
                 log.warning(
-                    "sell failed but %.8f of %.8f BTC actually sold; protecting only "
-                    "the remaining amount, not the original size", sold, qty,
+                    "sell failed but %.8f of %.8f BTC actually sold; booking the partial "
+                    "and protecting only the remainder", sold, qty,
+                )
+                price, source = self._fill_price("", default=snap.bid or snap.last)
+                self.store.add_fill(
+                    self.today(), (price - self.position.entry) * sold, side="SELL",
+                    qty=sold, price=price, fee=0.0, order_id=None,
+                    source=f"partial_{exit_reason or source}",
                 )
             self.position.qty = remaining
             remaining_s = _fmt_qty(remaining, self.qty_scale)

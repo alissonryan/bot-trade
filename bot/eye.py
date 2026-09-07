@@ -221,11 +221,18 @@ class Eye:
         book = depth["data"]["data"]
         bids = book.get("bids") or book.get("bestBids") or []
         asks = book.get("asks") or book.get("bestAsks") or []
+        fresh = False
         if bids:
             self.bid = float(bids[0]["p"])
+            fresh = True
         if asks:
             self.ask = float(asks[0]["p"])
-        self.depth_update_ms = self._now_ms()
+            fresh = True
+        # An empty book is not a fresh book. Stamping the age here regardless
+        # made the previous quote read as live, so a local take-profit could
+        # sell against a bid the venue was no longer showing.
+        if fresh:
+            self.depth_update_ms = self._now_ms()
 
     def poll_quotes(self, *, force: bool = False) -> bool:
         """Refresh last/bid/ask over REST when the socket is not delivering. Never raises.
