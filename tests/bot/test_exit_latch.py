@@ -92,6 +92,70 @@ def test_time_limit_refuses_before_any_write(tmp_path, monkeypatch):
     assert hands.position.is_open()
 
 
+# --- item 3 (re-review blocker): the barrier itself must be zero-write, even
+# when the resident stop is ABSENT from the book. `test_local_take_profit_
+# refuses_before_any_write` above keeps the stop present in `open_ids`, which
+# is exactly the setup that never reaches `reconcile()`'s stop-restoration
+# write (`_place_stop` -> a real `place_trigger` POST). A stop can be absent
+# from the book because it executed OR because it was cancelled by someone
+# else -- indistinguishable -- and the balance can still read as fully
+# holding (stale, or an owner deposit that happens to offset). `mark()` must
+# not restore a stop as a side effect of evaluating a barrier it is about to
+# refuse anyway.
+
+
+@pytest.mark.parametrize("total", [
+    FOREIGN_BTC + 0.00025,             # stable: reads as still fully holding
+    FOREIGN_BTC + 0.00025 + 0.00003,   # owner deposit on top: still reads as holding
+    FOREIGN_BTC + 0.00010,             # some OTHER amount moved (not our exact size):
+                                       # reconcile's "else" branch -- still treated as
+                                       # holding and re-baselined, never settled as closed
+], ids=["stable_balance", "owner_deposit_on_top", "owner_partial_offset_other_amount_moved"])
+def test_local_take_profit_refuses_before_any_write_with_stop_absent_from_book(tmp_path, total):
+    store = Store(tmp_path / "tp.db", mode="live")
+    _barrier_position(store)  # local row still has stop_order_id="oid-t"
+    client = FakeClient(btc=[total], open_ids=[set()])  # but it is gone from the exchange book
+    hands = _hands(store, client, tp_atr_mult=3)
+    with pytest.raises(TerminalEvidenceUnavailable):
+        hands.mark(_snap(bid=81200, last=81201))
+    assert not [c for c in client.calls if c[0] in ("cancel", "market", "trigger")], (
+        "reconcile's stop-restoration write must not fire while evaluating a "
+        "barrier that is about to be refused"
+    )
+    assert hands.position.is_open()
+    assert store.fills() == []
+
+
+def test_time_limit_refuses_before_any_write_with_stop_absent_from_book(tmp_path, monkeypatch):
+    store = Store(tmp_path / "ttl.db", mode="live")
+    _barrier_position(store)
+    client = FakeClient(btc=[FOREIGN_BTC + 0.00025], open_ids=[set()])
+    hands = _hands(store, client, time_limit_minutes=1)
+    monkeypatch.setattr("bot.hands.time.time", lambda: 1_900_000_000)
+    with pytest.raises(TerminalEvidenceUnavailable):
+        hands.mark(_snap())
+    assert not [c for c in client.calls if c[0] in ("cancel", "market", "trigger")]
+    assert hands.position.is_open()
+    assert store.fills() == []
+
+
+def test_local_take_profit_settles_quietly_when_stop_already_executed_without_restoring(tmp_path):
+    """The other side of the same fix: when the position really has closed on
+    the exchange (our whole quantity is missing, not just the stop id from the
+    open-orders list), the barrier's read-only observation must still detect
+    and book that exit -- it must not manufacture a second local exit, and it
+    must not need any order-side write to notice it."""
+    store = Store(tmp_path / "tp.db", mode="live")
+    _barrier_position(store)
+    client = FakeClient(btc=[FOREIGN_BTC], open_ids=[set()])  # our qty is gone: stop truly fired
+    hands = _hands(store, client, tp_atr_mult=3)
+    result = hands.mark(_snap(bid=81200, last=81201))
+    assert not result.is_open()
+    assert not [c for c in client.calls if c[0] in ("cancel", "market", "trigger")]
+    assert len(store.fills()) == 1
+    assert hands.last_mark_reason == "reconcile"
+
+
 def test_prerequisite_gate_has_no_bypass_setting(tmp_path):
     """Settings is a frozen dataclass with a fixed field set (bot/settings.py)
     -- there is no flag on it (env or otherwise) that could disable this
@@ -412,6 +476,25 @@ def test_foreign_stop_id_still_escalates_via_direct_sell(tmp_path):
         hands._sell(_snap(), exit_reason=None)
 
 
+def test_direct_sell_is_itself_fenced_by_an_exit_latch(tmp_path):
+    """The re-review's concrete refutation of 'ready, fenced infrastructure':
+    inserting an EXIT latch (e.g. `sell_submitting`, simulating a foreign or
+    future writer) and then calling `_sell()` directly used to send a real
+    DELETE (cancel) and market SELL -- `_sell()` had no guard of its own and
+    relied entirely on never being called while a latch exists. `_sell()` is
+    kept as tested infrastructure for invariant 4 (see AGENTS.md/CLAUDE.md),
+    so it must be fenced the same way every other entry point is, not merely
+    unreachable from today's public route."""
+    store = Store(tmp_path / "l.db", mode="live")
+    _open_position(store)
+    store.kv_set(EXIT_LATCH_KEY, _latch(phase="sell_submitting"))
+    client = FakeClient(btc=[FOREIGN_BTC + 0.00025], open_ids=[{"oid-t"}])
+    hands = _hands(store, client)
+    with pytest.raises(ExitLatchBlocked):
+        hands._sell(_snap(), exit_reason=None)
+    assert client.calls == [], "no DELETE/POST may reach the client once a latch is present"
+
+
 # --- item 6: settlement in one local transaction (reconcile closed_on_exchange) --
 
 
@@ -449,3 +532,60 @@ def test_reconcile_settlement_still_commits_once_on_success(tmp_path):
     assert hands.reconcile() == "closed_on_exchange"
     assert store.load_position() is None
     assert len(store.fills()) == 1
+
+
+def test_reconcile_settlement_failure_leaves_no_open_transaction_on_the_same_connection(tmp_path):
+    """The pre-fix bug: `test_reconcile_settlement_is_one_local_transaction_not_two_commits`
+    above proves nothing about the real runtime, because it closes the connection
+    after the failure -- which discards any open transaction whether or not the
+    code rolls back. The CLI's real retry reuses the SAME Store/connection after
+    its backoff. Reproduce exactly that: no close, no reopen, a plain later
+    write on the identical connection is the retry."""
+    store = Store(tmp_path / "l.db", mode="live")
+    _open_position(store)
+    client = FakeClient(btc=[FOREIGN_BTC], open_ids=[set()])  # our qty gone: stop hit
+    hands = _hands(store, client)
+
+    def boom(*a, **kw):
+        raise RuntimeError("disk full mid-settlement")
+
+    store.clear_position = boom
+    with pytest.raises(RuntimeError, match="disk full"):
+        hands.reconcile()
+
+    assert store._conn.in_transaction is False, (
+        "a failed settlement must roll back, not leave an open transaction for "
+        "the next unrelated commit on this connection to sweep up"
+    )
+    # The CLI's retry: same process, same Store, same connection, some later
+    # write happens to commit (e.g. the next audit row or kv write).
+    store.kv_set("anything", "x")
+    assert store.fills() == [], "the orphan fill must not have been committed by an unrelated later write"
+    assert store.day_pnl(hands.today()) == 0.0
+    row = store.load_position()
+    assert row is not None and row["qty"] == pytest.approx(0.00025), "position must not be half-closed"
+
+
+def test_reconcile_settlement_syncs_memory_before_fallible_logging_so_retry_never_duplicates(tmp_path, monkeypatch):
+    """Second failure boundary from the same bug: the settlement's commit can
+    succeed and then an auxiliary step (the operator log line) can still raise
+    before in-memory state is zeroed. If memory is not synced BEFORE that
+    fallible step, a retry on the same Hands object re-reads a stale `qty>0`
+    in-memory position and books the exit a second time."""
+    store = Store(tmp_path / "l.db", mode="live")
+    _open_position(store)
+    client = FakeClient(btc=[FOREIGN_BTC], open_ids=[set()])
+    hands = _hands(store, client)
+
+    def boom_log(*a, **kw):
+        raise RuntimeError("logging exploded mid-settlement")
+
+    monkeypatch.setattr("bot.hands.log.warning", boom_log)
+    with pytest.raises(RuntimeError, match="logging exploded"):
+        hands.reconcile()
+
+    # The commit already happened; in-memory state must already reflect it so a
+    # retry cannot re-settle the same exit.
+    assert not hands.position.is_open(), "in-memory position must already be flat once the commit succeeded"
+    assert len(store.fills()) == 1, "the real fill from the successful commit must be there exactly once"
+    assert store.load_position() is None

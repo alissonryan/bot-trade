@@ -543,5 +543,16 @@ class Store:
     def commit(self) -> None:
         """Public commit for callers that pass ``commit=False`` to add_fill /
         kv_set / clear_position to combine several writes into one local
-        transaction (see LiveHands.reconcile's closed_on_exchange settlement)."""
+        transaction (see LiveHands._settle_closed_on_exchange)."""
         self._conn.commit()
+
+    def rollback(self) -> None:
+        """Discard writes made under commit=False since the last commit.
+
+        Pairs with ``commit()`` for a caller building one local transaction
+        across several store calls: if any of them raises, the caller must
+        roll back rather than leave the connection ``in_transaction`` -- a
+        later, unrelated commit on the SAME connection (e.g. the CLI reusing
+        one Store after its backoff) would otherwise durably apply half of a
+        settlement that was never meant to be observed."""
+        self._conn.rollback()

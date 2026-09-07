@@ -5,8 +5,12 @@ position on the exchange (fix it by hand, then restart), 3 another instance hold
 lock, 4 a --once cycle failed, 5 stuck position (protected, but the bot cannot exit it
 -- the resident stop is not a bot order; square it by hand), 6 terminal evidence
 unavailable (a live discretionary exit -- LLM SELL, local take-profit, time limit --
-was refused before any write; the resident stop still protects the position; capture
-the missing order-history/deals evidence in docs/kcex-spot-api.md, or exit by hand).
+was refused before any write; this attempt changed no orders, but that alone does not
+prove a resident stop is still protecting the position -- capture the missing
+order-history/deals evidence in docs/kcex-spot-api.md, or inspect the exchange and exit
+by hand), 7 exit latch blocked (a durable EXIT-latch record, or a legacy CLOSING row
+with no latch, fences every write path; this is not auto-resumable and no timeout
+resolves it -- a human must inspect the exchange directly).
 """
 
 from __future__ import annotations
@@ -23,7 +27,14 @@ from dotenv import load_dotenv
 from bot.brain import Budget
 from bot.cycle import SessionDead, run_once, utc_day
 from bot.eye import Eye
-from bot.hands import LiveHands, PaperHands, PositionStuck, TerminalEvidenceUnavailable, UnprotectedPosition
+from bot.hands import (
+    ExitLatchBlocked,
+    LiveHands,
+    PaperHands,
+    PositionStuck,
+    TerminalEvidenceUnavailable,
+    UnprotectedPosition,
+)
 from bot.settings import Settings
 from bot.store import Store
 from kcex.client import KcexClient
@@ -69,6 +80,17 @@ EXIT_STUCK = 5
 # hand today. One exit code mapping to one operator action beats one code mapping to
 # two different ones.
 EXIT_TERMINAL_EVIDENCE_UNAVAILABLE = 6
+# A durable EXIT latch is present (a foreign/future writer, or a resumed one of
+# ours), the position is a legacy CLOSING row with no latch, or the latch is
+# corrupt/mismatched/unreadable (bot.hands.ExitLatchBlocked). This is its own
+# code, not a share of EXIT_STUCK (5) or EXIT_TERMINAL_EVIDENCE_UNAVAILABLE (6):
+# 5 is a *foreign* stop this bot can never cancel; 6 is "we have not started an
+# exit and refuse to, the stop is untouched going in"; 7 is "an exit attempt (or
+# a state that looks like one) is already mid-flight or ambiguous, and no
+# transition out of it is safe without a human" -- a materially different
+# remedy (inspect the in-flight state itself, not just the resident stop), so
+# it gets its own code rather than overloading either existing one.
+EXIT_EXIT_LATCH_BLOCKED = 7
 
 
 class AlreadyRunning(RuntimeError):
@@ -208,6 +230,14 @@ def _loop(once: bool, settings: Settings, client: KcexClient, store: Store, eye:
     except UnprotectedPosition as exc:
         log.critical("UNPROTECTED POSITION at boot: %s. Fix it on the exchange, then restart.", exc)
         return EXIT_UNPROTECTED
+    except ExitLatchBlocked as exc:
+        log.critical(
+            "EXIT LATCH BLOCKED at boot: %s. A durable exit record (or a legacy CLOSING "
+            "row, or a guard read failure) is fencing every write path; this is not "
+            "auto-resumable and no timeout resolves it. Inspect the exchange by hand.",
+            exc,
+        )
+        return EXIT_EXIT_LATCH_BLOCKED
     eye.connect_ws()
     try:
         eye.snapshot_rest()
@@ -242,13 +272,24 @@ def _loop(once: bool, settings: Settings, client: KcexClient, store: Store, eye:
             return EXIT_STUCK
         except TerminalEvidenceUnavailable as exc:
             log.critical(
-                "TERMINAL EVIDENCE UNAVAILABLE: %s. The resident stop still protects the "
-                "position; retrying would repeat the same refusal forever. Capture the "
-                "missing order-history/deals evidence (docs/kcex-spot-api.md), or exit by "
-                "hand, then restart.",
+                "TERMINAL EVIDENCE UNAVAILABLE: %s. This attempt changed no orders, but "
+                "that alone does not prove a resident stop is still protecting the "
+                "position -- confirming protection requires inspecting the exchange "
+                "directly. Retrying would repeat the same refusal forever. Capture the "
+                "missing order-history/deals evidence (docs/kcex-spot-api.md), or inspect "
+                "and exit by hand, then restart.",
                 exc,
             )
             return EXIT_TERMINAL_EVIDENCE_UNAVAILABLE
+        except ExitLatchBlocked as exc:
+            log.critical(
+                "EXIT LATCH BLOCKED: %s. A durable exit record (or a legacy CLOSING row, "
+                "or a guard read failure) is fencing every write path; this condition does "
+                "not resolve itself and retrying is a livelock, not resilience. Inspect "
+                "the exchange by hand.",
+                exc,
+            )
+            return EXIT_EXIT_LATCH_BLOCKED
         except KeyboardInterrupt:
             log.info("stopped by user")
             return EXIT_OK

@@ -293,7 +293,7 @@ def test_local_exit_reconcile_error_keeps_reason_for_tick_audit(tmp_path):
     store = Store(tmp_path / "audit.db", mode="live")
     _barrier_position(store)
     hands = _hands(store, FakeClient(btc=[FOREIGN_BTC + .00025]), tp_atr_mult=3)
-    def fail():
+    def fail(*, repair=True):
         raise RuntimeError("balances down")
     hands.reconcile = fail
     with pytest.raises(RuntimeError, match="balances down"):

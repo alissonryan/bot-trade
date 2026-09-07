@@ -50,8 +50,19 @@ STOP_SUBMISSION_KEY = "stop_submission"
 #
 # Durable record of a live discretionary exit (LLM SELL, local take-profit,
 # time limit) in kv, following the same write-ahead shape as STOP_SUBMISSION_KEY
-# and STOP_REPLACE_KEY above. Phases (2026-09 M1 hardening; see the adversarial
-# design review at /private/tmp/claude-501/omp-m1-design-review.md):
+# and STOP_REPLACE_KEY above.
+#
+# HONEST SCOPING, sharpened by the 2026-09 re-review: the eight `EXIT_PHASE_*`
+# names below are FUTURE DESIGN NOTES, not a tested, working resumable state
+# machine. No code path in this process ever WRITES an EXIT latch (see below),
+# so there is no writer and there are no transitions between phases to test --
+# `test_exit_latch_at_every_phase_blocks_every_entry_point` proves only that
+# _guard_exit() blocks unconditionally on ANY non-empty, well-formed latch
+# record, regardless of which of the eight phase strings it names; it is not
+# evidence that a `cancel_submitting -> cancel_pending -> ... -> settled`
+# resumption is implemented, because nothing here ever performs one. Read the
+# list purely as documentation of what a future capture-and-resume design would
+# need to name, not as infrastructure ready to be switched on:
 #
 #   cancel_submitting  - persisted BEFORE the DELETE. A restart never re-sends it.
 #   cancel_pending     - waiting for evidence tied to the exact stop; an ack or
@@ -65,24 +76,24 @@ STOP_SUBMISSION_KEY = "stop_submission"
 #   manual_review      - explicit ambiguous state; blocks writes until a human
 #                        resolves it. A timeout resolves nothing.
 #
-# IMPORTANT / HONEST SCOPING: KCEX's order-history/deals payload shapes that
-# would prove a cancelled stop is truly inactive are not captured (see
-# docs/kcex-spot-api.md and AGENTS.md). Without that evidence there is no safe
-# transition out of `cancel_pending` -- a balance delta cannot tell "stop
-# cancelled" from "stop executed" apart (see the design review's counterexamples:
-# an owner deposit/withdrawal exactly offsetting the bot's own quantity produces
-# the SAME observable delta for two different, incompatible realities). So no
-# code path in this file ever *writes* an EXIT latch today: `execute()`/`mark()`
-# refuse to start a discretionary exit before any write via
-# `TerminalEvidenceUnavailable` (see below), instead of cancelling the stop and
-# then discovering it cannot safely finish. The latch schema, phases and
-# fencing below exist as tested infrastructure for two things: (1) defending
-# against a latch written by a foreign/future process, or reconstructed from a
-# legacy CLOSING row, that this process must never silently resolve; (2) being
-# ready, unchanged, the day order-history/deals evidence is captured and a real
-# `cancel_pending -> ready_to_sell` transition becomes provable. Until then this
-# is fail-closed hardening only, NOT a working autonomous exit -- M1 is
-# explicitly incomplete without that capture.
+# KCEX's order-history/deals payload shapes that would prove a cancelled stop
+# is truly inactive are not captured (see docs/kcex-spot-api.md and AGENTS.md).
+# Without that evidence there is no safe transition out of `cancel_pending` -- a
+# balance delta cannot tell "stop cancelled" from "stop executed" apart (see the
+# design review's counterexamples: an owner deposit/withdrawal exactly
+# offsetting the bot's own quantity produces the SAME observable delta for two
+# different, incompatible realities). So `execute()`/`mark()` refuse to start a
+# discretionary exit before any write via `TerminalEvidenceUnavailable` (see
+# below), instead of cancelling the stop and then discovering it cannot safely
+# finish -- and no writer for this latch exists to reach any phase past the one
+# it might be constructed in by hand. What IS implemented and tested today is
+# narrower than "eight-phase state machine": a minimal guard against any latch
+# record already present -- written by a foreign/future process, or
+# reconstructed from a legacy CLOSING row -- that this process must never
+# silently resolve, regardless of its phase. This is fail-closed hardening
+# only, NOT a working autonomous exit -- M1 is explicitly incomplete without
+# captured terminal evidence, and the phase list above is a plan, not a
+# contract this code currently honours.
 EXIT_LATCH_KEY = "exit_latch"
 EXIT_LATCH_SCHEMA = 1
 EXIT_LATCH_REQUIRED_FIELDS = ("schema", "operation_id", "phase", "entry_id", "stop_id", "qty_original")
@@ -127,9 +138,16 @@ class TerminalEvidenceUnavailable(RuntimeError):
     worse than not starting -- so this refuses before any DELETE is sent.
 
     No settings flag disables this: a switch that turns the guard off is the
-    bug, not the feature. The resident stop is untouched and keeps protecting
-    the position; only the bot-initiated exit is blocked. PaperHands is
-    unaffected -- it places no real orders.
+    bug, not the feature. This refusal itself sends no cancel/place -- zero
+    order-side writes, including any reconcile-driven stop restoration that
+    would otherwise run as a side effect of evaluating the same barrier (see
+    the 2026-09 re-review, LiveHands.mark/reconcile(repair=False)). That is
+    not the same claim as "the resident stop still protects the position": a
+    zero-write attempt proves only that THIS call made no cancel/place, not
+    that a stop is present and working on the exchange right now -- the stop
+    could already be gone (executed or cancelled by something else) before
+    this call ever started. Confirming protection requires inspecting the
+    exchange directly. PaperHands is unaffected -- it places no real orders.
     """
 
 
@@ -545,14 +563,32 @@ class LiveHands:
         if self.store.kv_get(STOP_SUBMISSION_KEY):
             self._halt_stop_submission()
 
+    def _guarded_kv_get(self, key: str) -> str | None:
+        """Read one kv key while guarding, treating a storage failure the same
+        as an unresolved EXIT latch: fatal, human-review-required, never
+        swallowed by the CLI's generic "keep the loop alive" retry branch. A
+        bare RuntimeError from ``kv_get`` here used to propagate untyped, so
+        nothing in ``bot/cli.py`` could tell it apart from an ordinary
+        transient failure -- which is exactly the livelock this closes."""
+        try:
+            return self.store.kv_get(key)
+        except Exception as exc:
+            raise ExitLatchBlocked(
+                f"could not read {key!r} from storage ({exc}); a guard read failure is "
+                "treated the same as an unresolved exit latch -- human review required, "
+                "never reinterpreted as 'no latch present'"
+            ) from exc
+
     def _load_exit_latch(self) -> dict | None:
         """Parse the EXIT latch, or raise if it cannot be trusted.
 
-        A read failure from the store itself (e.g. a corrupt database) is
-        deliberately NOT caught here: it must propagate as its own fatal
-        exception rather than be reinterpreted as "no latch present".
+        A read failure from the store itself (e.g. a corrupt database) is not
+        swallowed or reinterpreted as "no latch present": it is wrapped as its
+        own ExitLatchBlocked (see _guarded_kv_get) so the CLI maps it to the
+        same explicit halt as every other latch failure, instead of falling
+        into the generic retry-forever branch.
         """
-        raw = self.store.kv_get(EXIT_LATCH_KEY)
+        raw = self._guarded_kv_get(EXIT_LATCH_KEY)
         if not raw:
             return None
         try:
@@ -587,8 +623,8 @@ class LiveHands:
         this guard existed is fenced the same way: a stop cancel may still be
         settling on the exchange and a timeout does not prove otherwise.
         """
-        raw_exit = self.store.kv_get(EXIT_LATCH_KEY)
-        if raw_exit and (self.store.kv_get(STOP_SUBMISSION_KEY) or self.store.kv_get(STOP_REPLACE_KEY)):
+        raw_exit = self._guarded_kv_get(EXIT_LATCH_KEY)
+        if raw_exit and (self._guarded_kv_get(STOP_SUBMISSION_KEY) or self._guarded_kv_get(STOP_REPLACE_KEY)):
             raise ExitLatchBlocked(
                 "exit latch coexists with an unfinished stop submission/replacement; "
                 "halting rather than picking one and erasing the other -- human review required"
@@ -771,14 +807,18 @@ class LiveHands:
             # M1: refuse to start a discretionary exit -- see TerminalEvidenceUnavailable
             # and the EXIT_LATCH_KEY comment above. `_sell()` below is kept as tested
             # infrastructure for the day terminal evidence is captured; it is not
-            # reachable from here until then.
+            # reachable from here until then, and it now fences itself with the
+            # same _guard_exit() call every other write path uses (2026-09
+            # re-review: calling it directly used to bypass an EXIT latch).
             raise TerminalEvidenceUnavailable(
                 f"cannot safely start a discretionary SELL of {gate.qty} BTC "
                 f"(rule={gate.rule!r}): KCEX order-history/deals payload shapes that "
                 "would prove the resident stop is truly inactive after a cancel are not "
                 "captured, so cancelling it now and discovering that later would leave "
-                "a real position unprotected. The resident stop is untouched and still "
-                "protects this position. Capture terminal evidence "
+                "a real position unprotected. This attempt changed no orders -- no "
+                "cancel/place was sent -- but that alone does not prove any resident stop "
+                "is still protecting the position; confirming protection requires "
+                "inspecting the exchange directly. Capture terminal evidence "
                 "(docs/kcex-spot-api.md) before this path can run live."
             )
         return self.position
@@ -920,7 +960,20 @@ class LiveHands:
         reason = local_exit_reason(self.position, snap, self.settings, now)
         if reason:
             self.last_mark_reason = reason  # retain trigger context even on a reads outage
-            self.reconcile()  # the resident stop may already have executed
+            # repair=False: read-only w.r.t. the exchange. execute() below
+            # unconditionally refuses a live discretionary SELL right now
+            # (TerminalEvidenceUnavailable), so a refused barrier must make
+            # ZERO order-side writes -- including reconcile's own ordinary
+            # "restore a missing stop" repair, which is a real place_trigger
+            # POST. This still detects and books a position that ALREADY
+            # closed on the exchange (the resident stop firing is the
+            # exchange's own prior action, not a write this call chooses to
+            # make); it only skips restoring a stop it finds missing. The
+            # 2026-09 re-review's exact reproduction: stop absent from the
+            # open-order book (cancelled or executed -- indistinguishable),
+            # balance still reading as fully held -- used to restore a fresh
+            # stop here before ever reaching the refusal below.
+            self.reconcile(repair=False)
             reason = local_exit_reason(self.position, snap, self.settings, now)
             if reason:
                 self.last_mark_reason = reason
@@ -929,6 +982,13 @@ class LiveHands:
         return self.position
 
     def _sell(self, snap: Snapshot, *, exit_reason: str | None = None) -> Position:
+        # Fenced like every other write path, even though execute()/mark() no
+        # longer reach it: a latch present from a foreign/future writer, or a
+        # legacy CLOSING row, must block a direct call too. The 2026-09
+        # re-review found this method sent a real DELETE + market SELL when
+        # called directly with a `sell_submitting` latch present -- proof it
+        # was not actually "ready, fenced infrastructure" as claimed.
+        self._guard_exit()
         if not self.position.is_open():
             return self.position
         qty = self.position.qty
@@ -1095,8 +1155,21 @@ class LiveHands:
             self.store.kv_set(FOREIGN_BTC_KEY, repr(total))
         return "flat"
 
-    def reconcile(self) -> str:
-        """Bring the local row in line with the exchange. Returns a short verdict."""
+    def reconcile(self, *, repair: bool = True) -> str:
+        """Bring the local row in line with the exchange. Returns a short verdict.
+
+        ``repair=False`` (used only by ``mark()``'s barrier gate, above) makes
+        the exact same read-only observation of exchange state and still
+        settles a position that already closed on the exchange -- that is a
+        store write reflecting a fact (the resident stop firing, or a manual
+        sale), not an order this call chooses to place. What it will NOT do is
+        place a fresh stop for one it finds missing (``_place_stop`` is a real
+        ``place_trigger`` POST): it reports ``"stop_missing"`` instead. The
+        ordinary boot/LLM-cycle ``reconcile()`` (the default, ``repair=True``)
+        is unchanged and still restores a missing stop as before -- this
+        parameter only lets a refused discretionary exit make zero order-side
+        writes instead of repairing first and refusing second.
+        """
         self._guard_exit()
         self._guard_stop_submission()
         operation = self.store.kv_get(STOP_REPLACE_KEY)
@@ -1178,34 +1251,15 @@ class LiveHands:
             # fill) -- that is a known, pre-existing, documented residual risk this
             # task does not close; fixing it needs the same captured terminal
             # evidence the review says is missing.
-            price = self.position.stop_price or self.position.entry
-            pnl = (price - self.position.entry) * qty
-            # M1 item 6: settlement in one local transaction. add_fill/kv_set/
-            # clear_position each commit internally by default (Store); commit=False
-            # defers all three writes to the single explicit commit below so a crash
-            # between them can never leave a booked fill with the position row still
-            # open (which would let a later reconcile book the same exit twice) or a
-            # cleared row with no fill (silently losing the PnL). This is still an
-            # AT-MOST-ONCE attempt, not a proof of exactly-once settlement: it does
-            # not cover a crash between SQLite's own fsync and this process observing
-            # the result, and `price` here is `stop_price`/`entry`, an estimate, not a
-            # proven execution price.
-            self.store.add_fill(self.today(), pnl, side="SELL", qty=qty, price=price, fee=0.0,
-                                order_id=self.stop_order_id, source=self.position.exit_reason or "reconcile",
-                                commit=False)
-            self.store.kv_set(FOREIGN_BTC_KEY, repr(total), commit=False)
-            self.store.clear_position(commit=False)
-            self.store.commit()
-            log.warning("position closed on the exchange (state %s); pnl est %.4f", self.position.state, pnl)
-            self.position = Position()
-            self.entry_order_id = None
-            self.stop_order_id = None
-            return "closed_on_exchange"
+            return self._settle_closed_on_exchange(total, qty)
 
         if stop_alive:
             if self.position.state != "OPEN":
                 self._persist("OPEN")
             return "ok"
+
+        if not repair:
+            return "stop_missing"
 
         stop_id = self._place_stop(qty_s, self.position.stop_price)
         if stop_id:
@@ -1215,3 +1269,55 @@ class LiveHands:
             return "stop_restored"
         self._persist("UNPROTECTED")
         raise UnprotectedPosition(f"{qty_s} BTC on the exchange without a stop and none could be placed")
+
+    def _settle_closed_on_exchange(self, total: float, qty: float) -> str:
+        """Book the exit and clear the row as ONE local transaction, with a
+        real rollback -- not merely a hope that a crash discards it.
+
+        M1 item 6 / 2026-09 re-review blocker 1: `add_fill`/`kv_set`/
+        `clear_position` each commit internally by default (Store); commit=False
+        defers all three writes to the single explicit commit below. Two
+        failure boundaries matter, and both are covered:
+
+        1. Any of the three writes, or the commit itself, can raise. Without an
+           explicit rollback the connection is left `in_transaction`, and the
+           *next* commit on the SAME connection -- the CLI reuses one Store
+           after its backoff, it does not reopen -- durably applies the orphan
+           half of this settlement. `except: self.store.rollback(); raise`
+           guarantees no later, unrelated write can ever sweep up a half
+           settlement.
+        2. The commit can succeed and a later, fallible auxiliary step (the
+           operator log line below) can still raise. In-memory state is
+           synchronised with the committed row BEFORE that log call -- not
+           after -- so a retry on the SAME Hands object sees a flat position
+           and cannot book the same exit a second time.
+
+        This is still an AT-MOST-ONCE attempt, not a proof of exactly-once
+        settlement: it does not cover a crash between SQLite's own fsync and
+        this process observing the result, and `price` here is
+        `stop_price`/`entry`, an estimate, not a proven execution price.
+        """
+        price = self.position.stop_price or self.position.entry
+        pnl = (price - self.position.entry) * qty
+        state = self.position.state
+        stop_order_id = self.stop_order_id
+        exit_reason = self.position.exit_reason
+        try:
+            self.store.add_fill(self.today(), pnl, side="SELL", qty=qty, price=price, fee=0.0,
+                                order_id=stop_order_id, source=exit_reason or "reconcile",
+                                commit=False)
+            self.store.kv_set(FOREIGN_BTC_KEY, repr(total), commit=False)
+            self.store.clear_position(commit=False)
+            self.store.commit()
+        except Exception:
+            self.store.rollback()
+            raise
+        # Memory now matches the durably committed row. This MUST happen
+        # before the log call below (or any other fallible auxiliary work):
+        # once committed, a retry on this same object must see a flat
+        # position, never a stale open one.
+        self.position = Position()
+        self.entry_order_id = None
+        self.stop_order_id = None
+        log.warning("position closed on the exchange (state %s); pnl est %.4f", state, pnl)
+        return "closed_on_exchange"
