@@ -148,6 +148,18 @@ class TerminalEvidenceUnavailable(RuntimeError):
     could already be gone (executed or cancelled by something else) before
     this call ever started. Confirming protection requires inspecting the
     exchange directly. PaperHands is unaffected -- it places no real orders.
+
+    HALT CONTRACT (2026-09 third-round re-review): the process that raises
+    this exits immediately (bot/cli.py exit code 6) and does NOT retry,
+    repair, or resume by itself. There is no bounded wait for a "next cycle"
+    to fix this -- ``run_once`` raises this from the barrier tick, which runs
+    BEFORE ``poll_heavy()``/the LLM section, so a raise here ends the process
+    before either ever runs again. If the resident stop genuinely is gone,
+    the position can sit on the exchange with NO protection at all until a
+    human notices and acts; only a human restart after manual inspection
+    resumes anything. The message carries the last observed resident-stop
+    presence/absence when reconcile() actually looked (see
+    ``LiveHands.last_stop_observation``), never invented when it did not.
     """
 
 
@@ -427,6 +439,13 @@ class LiveHands:
         self._reject_paper_provenance()
         self._exit_hint: float | None = None
         self.last_mark_reason: str | None = None
+        # The single most useful fact for a 3am operator reading an exit-6 halt:
+        # was the resident stop actually seen present/absent the last time
+        # reconcile() looked? Set only where reconcile() actually observed it
+        # (see reconcile() below); never inferred, and honestly "unknown" when
+        # no observation was made (e.g. a pending stop replacement blocks the
+        # read-only path from ever inspecting the resident stop at all).
+        self.last_stop_observation: str | None = None
 
     def _require_live_store(self) -> None:
         """The store itself must be a live store, not merely row-clean.
@@ -810,6 +829,7 @@ class LiveHands:
             # reachable from here until then, and it now fences itself with the
             # same _guard_exit() call every other write path uses (2026-09
             # re-review: calling it directly used to bypass an EXIT latch).
+            observation = self.last_stop_observation or "unknown (no reconcile observation available)"
             raise TerminalEvidenceUnavailable(
                 f"cannot safely start a discretionary SELL of {gate.qty} BTC "
                 f"(rule={gate.rule!r}): KCEX order-history/deals payload shapes that "
@@ -818,8 +838,16 @@ class LiveHands:
                 "a real position unprotected. This attempt changed no orders -- no "
                 "cancel/place was sent -- but that alone does not prove any resident stop "
                 "is still protecting the position; confirming protection requires "
-                "inspecting the exchange directly. Capture terminal evidence "
-                "(docs/kcex-spot-api.md) before this path can run live."
+                f"inspecting the exchange directly. Last observed resident-stop state "
+                f"before this refusal: {observation}. HALT CONTRACT: this process exits "
+                "now (exit code 6) and will NOT retry, repair, or resume on its own -- "
+                "no later cycle (not the next LLM cycle, not a reconcile()) runs after "
+                "this process exits, so if the resident stop is in fact gone the position "
+                "may be sitting on the exchange completely UNPROTECTED for as long as it "
+                "takes a human to notice. A human must inspect the exchange directly and "
+                "either restore protection or close the position by hand before the bot "
+                "runs again. Capture terminal evidence (docs/kcex-spot-api.md) to close "
+                "this gap for good."
             )
         return self.position
 
@@ -1169,11 +1197,25 @@ class LiveHands:
         is unchanged and still restores a missing stop as before -- this
         parameter only lets a refused discretionary exit make zero order-side
         writes instead of repairing first and refusing second.
+
+        The SAME rule applies to a pending stop replacement (``STOP_REPLACE_KEY``):
+        the 2026-09 third-round re-review found ``_reconcile_replacement`` itself
+        performs real exchange writes -- a ``place_trigger`` POST once it decides
+        an ambiguous cancel is confirmed, or a ``place_market`` SELL via
+        ``_flatten`` on a rejected replacement -- and ``repair=False`` did not
+        gate that resolver at all, only the ordinary stop-restoration branch
+        below. So under ``repair=False`` a pending replacement is never handed
+        to the resolver, in ANY phase: the operation is left exactly as found
+        (preserving the uncertainty, not resolving it "quickly first") and this
+        reports ``"stop_replacement_pending"`` instead.
         """
         self._guard_exit()
         self._guard_stop_submission()
         operation = self.store.kv_get(STOP_REPLACE_KEY)
         if operation:
+            if not repair:
+                self.last_stop_observation = "unknown (stop replacement pending; not inspected)"
+                return "stop_replacement_pending"
             try:
                 return self._reconcile_replacement(json.loads(operation))
             except Exception as exc:
@@ -1256,8 +1298,10 @@ class LiveHands:
         if stop_alive:
             if self.position.state != "OPEN":
                 self._persist("OPEN")
+            self.last_stop_observation = "present (seen in the open-order book)"
             return "ok"
 
+        self.last_stop_observation = "absent (not found in the open-order book)"
         if not repair:
             return "stop_missing"
 

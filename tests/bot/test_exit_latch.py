@@ -30,7 +30,7 @@ from bot.hands import (
     UnprotectedPosition,
 )
 from bot.store import Store
-from bot.types import GateResult, Snapshot
+from bot.types import Bar, GateResult, Snapshot
 from test_hands_live import FOREIGN_BTC, FakeClient, _barrier_position, _buy_gate, _hands, _live_settings, _open_position, _snap
 
 
@@ -154,6 +154,80 @@ def test_local_take_profit_settles_quietly_when_stop_already_executed_without_re
     assert not [c for c in client.calls if c[0] in ("cancel", "market", "trigger")]
     assert len(store.fills()) == 1
     assert hands.last_mark_reason == "reconcile"
+
+
+# --- 2026-09 third-round re-review: reconcile(repair=False) only gated the
+# ordinary "restore a missing stop" branch. It did NOT gate the pending
+# stop-replacement resolver (`_reconcile_replacement`, driven by
+# STOP_REPLACE_KEY), which can itself perform a real exchange write -- a
+# `place_trigger` POST once it decides an ambiguous cancel is confirmed, or a
+# `place_market` SELL via `_flatten` on a rejected replacement. A refused
+# discretionary exit must make ZERO order-side writes before the refusal, and
+# that must hold for every phase the resolver understands, not just the
+# ordinary stop-missing path already covered above.
+#
+# `Exchange` (from test_stop_replace) is used here instead of `FakeClient`
+# because it hands out a NEW id ("new") distinct from the old one ("old") on
+# `place_trigger` -- exactly what lets the *unfixed* code fully complete a
+# replacement (cancel confirmed -> trigger placed -> new id confirmed
+# resident) and reach the SAME end state the re-review's reproduction
+# describes: a real trigger POST, followed only afterwards by a refusal.
+
+
+def _repl_snap():
+    return Snapshot(
+        ts_ms=1, last=81201, bid=81200, ask=81202, spread=2,
+        bars_15m=[Bar(1, 81201, 81201, 81201, 81201)], atr=400,
+        free_usdt=450, bot_qty=0.00025, bot_avg_entry=80000, ws_ok=True, stale=False,
+    )
+
+
+def _pending_replacement(phase: str) -> str:
+    """The same operation shape `replace_stop`/`_reconcile_replacement` write
+    to STOP_REPLACE_KEY, at each phase the resolver understands."""
+    return json.dumps({
+        "phase": phase,
+        "old_id": "old",
+        "stop_price": 79300.0,
+        "snapshot": {**_repl_snap().__dict__, "bars_15m": []},
+        "entry_id": "entry",
+        "qty": 0.00025,
+    })
+
+
+@pytest.mark.parametrize("phase", ["cancel", "placing", "flattening"])
+def test_pending_stop_replacement_refuses_before_any_write_in_every_phase(tmp_path, phase):
+    from test_stop_replace import Exchange
+
+    store = Store(tmp_path / "repl.db", mode="live")
+    store.remember_order("old")
+    store.save_position(
+        qty=0.00025, entry=80000.0, stop_price=79200.0, entry_order_id="entry",
+        stop_order_id="old", state="OPEN", entry_source="estimated", btc_before=FOREIGN_BTC,
+        take_profit_price=81200.0, opened_ts="2020-01-01T00:00:00+00:00",
+    )
+    store.kv_set(STOP_REPLACE_KEY, _pending_replacement(phase))
+    client = Exchange()
+    # The old stop is already absent from the book (cancel looks confirmed),
+    # and the venue would happily accept and confirm a fresh trigger --
+    # exactly the setup that let the resolver run past the refusal in the
+    # re-review's reproduction.
+    client.ids = set()
+    hands = _hands(store, client, tp_atr_mult=3)
+
+    with pytest.raises((TerminalEvidenceUnavailable, UnprotectedPosition)):
+        hands.mark(_repl_snap())
+
+    assert not [c for c in client.calls if c[0] in ("cancel", "market", "trigger")], (
+        "a refusal that was always going to happen must not place a real order first"
+    )
+    row = store.load_position()
+    assert row["state"] == "OPEN"
+    assert row["qty"] == pytest.approx(0.00025)
+    # The pending operation is preserved, not silently resolved or dropped.
+    preserved = store.kv_get(STOP_REPLACE_KEY)
+    assert preserved
+    assert json.loads(preserved)["phase"] == phase
 
 
 def test_prerequisite_gate_has_no_bypass_setting(tmp_path):

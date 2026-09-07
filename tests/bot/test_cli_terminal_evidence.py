@@ -45,7 +45,13 @@ class FakeClient:
     """Scripted exchange: balances/open_orders never change (the stop is still
     resident, the account is untouched) so a livelocked loop would see the
     exact same condition forever -- and any write (market/trigger/cancel)
-    proves the refusal was bypassed."""
+    proves the refusal was bypassed.
+
+    ``open_ids`` may also be a list of sets, consumed one per call (the last
+    value repeats) -- used below to script the stop vanishing from the book
+    between the boot reconcile and the first barrier tick, without ever
+    letting boot's own (repair=True) reconcile see it missing and try to
+    repair it."""
 
     def __init__(self, *, btc, open_ids):
         self.btc = btc
@@ -61,9 +67,14 @@ class FakeClient:
         return {"data": [{"currency": "BTC", "available": str(self.btc), "frozen": "0", "total": str(self.btc)},
                          {"currency": "USDT", "available": "450", "frozen": "0", "total": "450"}]}
 
+    def _open_ids_now(self):
+        if isinstance(self.open_ids, list):
+            return self.open_ids.pop(0) if len(self.open_ids) > 1 else self.open_ids[0]
+        return self.open_ids
+
     def open_orders(self, **kw):
         self.calls.append(("open_orders",))
-        rows = [{"id": i} for i in self.open_ids]
+        rows = [{"id": i} for i in self._open_ids_now()]
         return {"data": rows, "total": len(rows)}
 
     def place_market(self, **kwargs):
@@ -225,3 +236,58 @@ def test_live_cycle_llm_sell_decision_halts_instead_of_looping(monkeypatch, tmp_
     assert code == cli.EXIT_TERMINAL_EVIDENCE_UNAVAILABLE
     assert not [c for c in client.calls if c[0] in ("cancel", "market", "trigger")]
     assert store.load_position()["state"] == "OPEN"
+
+
+# -- 2026-09 third-round re-review: the operational contract, not the code, was
+# wrong. `run_once`'s barrier tick runs BEFORE `poll_heavy()`/the LLM section,
+# so when the resident stop is genuinely absent and a barrier is crossed, the
+# process exits (code 6) before either ever runs again -- there is no bounded
+# "repaired on the next LLM cycle" as previously documented; there is no next
+# cycle at all. The halt message must say so plainly: this call placed
+# nothing, the position may be sitting on the exchange with NO protection at
+# all, the process will not recover on its own, and a human must inspect the
+# exchange and act. It must also carry the one cheap, honest fact reconcile()
+# actually observed -- the resident stop was NOT found in the open-order book
+# -- rather than silently implying "the stop continues to protect the
+# position" (the false claim the re-review's operator-facing docs made).
+
+def test_live_cycle_stop_missing_halts_and_message_names_the_unprotected_possibility(monkeypatch, tmp_path, caplog):
+    import bot.cli as cli
+    import logging
+
+    store = Store(tmp_path / "missing.db", mode="live")
+    _open_position(store, take_profit_price=81200.0, opened_ts="2020-01-01T00:00:00+00:00")
+    # Sequence: boot's own (repair=True) reconcile still finds the stop
+    # resident -- it must not itself try to repair anything here, since that
+    # would be a real place_trigger POST this test's FakeClient forbids. Only
+    # the FIRST barrier tick's reconcile(repair=False) observes it gone.
+    client = FakeClient(btc=FOREIGN_BTC + 0.00025, open_ids=[{"oid-t"}, set()])
+    settings = _live_settings(tp_atr_mult=3, fill_confirm_tries=1)
+    hands = LiveHands(settings, store, client, sleep=lambda s: None)
+    eye = FakeLiveEye(last=81201, bid=81200, ask=81202)
+
+    def _no_retry(seconds):
+        raise AssertionError(f"loop must not sleep/retry (tried to sleep {seconds}s) -- must halt instead")
+
+    monkeypatch.setattr(cli.time, "sleep", _no_retry)
+    caplog.set_level(logging.CRITICAL, logger="bot")
+
+    code = cli._loop(False, settings, client, store, eye, hands)
+
+    assert code == cli.EXIT_TERMINAL_EVIDENCE_UNAVAILABLE
+    # placed nothing
+    assert not [c for c in client.calls if c[0] in ("cancel", "market", "trigger")]
+    assert store.load_position()["state"] == "OPEN"
+    # no later cycle ran: poll_heavy() belongs to the (never reached) LLM
+    # section that would follow a barrier that did NOT refuse.
+    assert eye.heavy_calls == 0
+
+    message = "\n".join(r.message for r in caplog.records).lower()
+    # names the unprotected possibility, not "the stop continues to protect"
+    assert "unprotected" in message or "no protection" in message
+    # says the halt does not self-resolve
+    assert "will not" in message or "not auto" in message or "does not recover" in message
+    # says a human must act
+    assert "human" in message or "inspect" in message or "by hand" in message
+    # carries the one cheap fact this call actually observed: stop NOT resident
+    assert "absent" in message or "not found" in message or "not observed" in message

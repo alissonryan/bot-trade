@@ -11,6 +11,16 @@ order-history/deals evidence in docs/kcex-spot-api.md, or inspect the exchange a
 by hand), 7 exit latch blocked (a durable EXIT-latch record, or a legacy CLOSING row
 with no latch, fences every write path; this is not auto-resumable and no timeout
 resolves it -- a human must inspect the exchange directly).
+
+HALT CONTRACT for exit code 6 specifically (2026-09 third-round re-review corrected
+this): the barrier tick that can raise ``TerminalEvidenceUnavailable`` runs BEFORE
+``poll_heavy()``/the LLM section of the SAME cycle, and a raise here ends the process
+-- there is no bounded "the next LLM cycle repairs it" recovery, because there is no
+next cycle at all until a human restarts the process. If the resident stop is in fact
+gone (executed or cancelled by something else), the position can sit on the exchange
+with NO protection at all for as long as it takes a human to notice and act. Exit 6
+is not "the stop is fine, just wait" -- it is "we do not know, and nothing will look
+again until you do."
 """
 
 from __future__ import annotations
@@ -78,7 +88,11 @@ EXIT_STUCK = 5
 # moment before or after the read; the fix is either to capture the missing
 # order-history/deals evidence (docs/kcex-spot-api.md) or to exit the position by
 # hand today. One exit code mapping to one operator action beats one code mapping to
-# two different ones.
+# two different ones. IMPORTANT (2026-09 third-round re-review): the barrier that
+# raises this runs BEFORE poll_heavy()/the LLM section in the SAME cycle, so this
+# code means the process HALTS NOW with no next cycle to repair anything -- not "the
+# next LLM cycle will fix it". If the resident stop is genuinely gone the position may
+# be completely unprotected until a human notices; there is no bound on that window.
 EXIT_TERMINAL_EVIDENCE_UNAVAILABLE = 6
 # A durable EXIT latch is present (a foreign/future writer, or a resumed one of
 # ours), the position is a legacy CLOSING row with no latch, or the latch is
@@ -272,12 +286,16 @@ def _loop(once: bool, settings: Settings, client: KcexClient, store: Store, eye:
             return EXIT_STUCK
         except TerminalEvidenceUnavailable as exc:
             log.critical(
-                "TERMINAL EVIDENCE UNAVAILABLE: %s. This attempt changed no orders, but "
-                "that alone does not prove a resident stop is still protecting the "
-                "position -- confirming protection requires inspecting the exchange "
-                "directly. Retrying would repeat the same refusal forever. Capture the "
-                "missing order-history/deals evidence (docs/kcex-spot-api.md), or inspect "
-                "and exit by hand, then restart.",
+                "TERMINAL EVIDENCE UNAVAILABLE: %s. HALT CONTRACT: this call placed "
+                "nothing, but that is NOT proof the resident stop is still there -- if "
+                "it is in fact gone, the position may be sitting on the exchange "
+                "completely UNPROTECTED. This process exits now and will NOT retry, "
+                "repair, or resume by itself: there is no next cycle -- not the next "
+                "LLM cycle, not a reconcile() -- to fix this later. A human must "
+                "inspect the exchange directly and either restore protection or close "
+                "the position by hand before the bot runs again. Capture the missing "
+                "order-history/deals evidence (docs/kcex-spot-api.md) to close this gap "
+                "for good.",
                 exc,
             )
             return EXIT_TERMINAL_EVIDENCE_UNAVAILABLE
