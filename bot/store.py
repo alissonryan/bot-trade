@@ -266,6 +266,7 @@ class Store:
         order_id: str | None = None,
         source: str | None = None,
         known_ms: int | None = None,
+        commit: bool = True,
     ) -> None:
         journal_id = self.kv_get(JOURNAL_ENTRY_KEY)
         self._conn.execute(
@@ -281,7 +282,8 @@ class Store:
                 log.exception("journal_resolution_error; preserving the real fill")
             finally:
                 self._conn.execute("RELEASE journal_settle")
-        self._conn.commit()
+        if commit:
+            self._conn.commit()
 
     # -- decision journal -------------------------------------------------------
 
@@ -501,7 +503,7 @@ class Store:
         self._conn.execute("UPDATE position SET state=? WHERE id=1", (state,))
         self._conn.commit()
 
-    def clear_position(self) -> None:
+    def clear_position(self, *, commit: bool = True) -> None:
         self._conn.execute("DELETE FROM position")
         active = self.kv_get(JOURNAL_ENTRY_KEY)
         if active:
@@ -521,7 +523,8 @@ class Store:
                 log.exception("journal_clear_error; preserving the position clear")
             finally:
                 self._conn.execute("RELEASE journal_clear")
-        self._conn.commit()
+        if commit:
+            self._conn.commit()
 
     # -- key/value --------------------------------------------------------------
 
@@ -529,9 +532,16 @@ class Store:
         row = self._conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
         return row[0] if row else default
 
-    def kv_set(self, key: str, value: str) -> None:
+    def kv_set(self, key: str, value: str, *, commit: bool = True) -> None:
         self._conn.execute(
             "INSERT INTO kv(key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, str(value)),
         )
+        if commit:
+            self._conn.commit()
+
+    def commit(self) -> None:
+        """Public commit for callers that pass ``commit=False`` to add_fill /
+        kv_set / clear_position to combine several writes into one local
+        transaction (see LiveHands.reconcile's closed_on_exchange settlement)."""
         self._conn.commit()

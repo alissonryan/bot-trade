@@ -2,7 +2,11 @@
 
 Exit codes: 0 ok, 1 session dead (re-run ``python -m kcex.cli login``), 2 unprotected
 position on the exchange (fix it by hand, then restart), 3 another instance holds the
-lock, 4 a --once cycle failed.
+lock, 4 a --once cycle failed, 5 stuck position (protected, but the bot cannot exit it
+-- the resident stop is not a bot order; square it by hand), 6 terminal evidence
+unavailable (a live discretionary exit -- LLM SELL, local take-profit, time limit --
+was refused before any write; the resident stop still protects the position; capture
+the missing order-history/deals evidence in docs/kcex-spot-api.md, or exit by hand).
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ from dotenv import load_dotenv
 from bot.brain import Budget
 from bot.cycle import SessionDead, run_once, utc_day
 from bot.eye import Eye
-from bot.hands import LiveHands, PaperHands, PositionStuck, UnprotectedPosition
+from bot.hands import LiveHands, PaperHands, PositionStuck, TerminalEvidenceUnavailable, UnprotectedPosition
 from bot.settings import Settings
 from bot.store import Store
 from kcex.client import KcexClient
@@ -52,6 +56,19 @@ EXIT_CYCLE_FAILED = 4
 # The position is protected but the bot cannot exit it on its own; retrying would
 # repeat the same impossible exit every cycle.
 EXIT_STUCK = 5
+# A live discretionary exit (LLM SELL, local take-profit, time limit) was refused
+# before any write because terminal evidence to prove a cancel is safe is not
+# captured (bot.hands.TerminalEvidenceUnavailable). The condition that triggered it
+# (e.g. a crossed take-profit) does not resolve itself, so retrying is a livelock,
+# not resilience: halt instead. Distinct from EXIT_STUCK (5) on purpose -- the
+# operator's remedy differs. EXIT_STUCK means a *foreign* resident stop can never be
+# cancelled by this bot (square it by hand). This code means the bot cannot yet prove
+# a cancel of *any* stop -- foreign or its own -- succeeded rather than executed a
+# moment before or after the read; the fix is either to capture the missing
+# order-history/deals evidence (docs/kcex-spot-api.md) or to exit the position by
+# hand today. One exit code mapping to one operator action beats one code mapping to
+# two different ones.
+EXIT_TERMINAL_EVIDENCE_UNAVAILABLE = 6
 
 
 class AlreadyRunning(RuntimeError):
@@ -223,6 +240,15 @@ def _loop(once: bool, settings: Settings, client: KcexClient, store: Store, eye:
         except PositionStuck as exc:
             log.critical("STUCK POSITION: %s", exc)
             return EXIT_STUCK
+        except TerminalEvidenceUnavailable as exc:
+            log.critical(
+                "TERMINAL EVIDENCE UNAVAILABLE: %s. The resident stop still protects the "
+                "position; retrying would repeat the same refusal forever. Capture the "
+                "missing order-history/deals evidence (docs/kcex-spot-api.md), or exit by "
+                "hand, then restart.",
+                exc,
+            )
+            return EXIT_TERMINAL_EVIDENCE_UNAVAILABLE
         except KeyboardInterrupt:
             log.info("stopped by user")
             return EXIT_OK

@@ -6,7 +6,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from bot.hands import LiveHands, UnprotectedPosition, avg_fill_from_deals
+from bot.hands import LiveHands, TerminalEvidenceUnavailable, UnprotectedPosition, avg_fill_from_deals
 from bot.settings import Settings
 from bot.store import Store
 from bot.types import Bar, GateResult, Snapshot
@@ -110,12 +110,19 @@ def _barrier_position(store, *, stop_id="oid-t"):
 
 
 def test_live_local_tp_cancels_only_resident_stop_confirms_then_sells(tmp_path):
+    """M1 note: `mark()`/`execute()` now refuse to START a live discretionary
+    exit at all (TerminalEvidenceUnavailable; see test_exit_latch.py) because
+    terminal evidence to tell a cancelled stop from an executed one is not
+    captured. `_sell()`'s own cancel/confirm/sell mechanics below remain
+    correct and are exercised directly (white-box) so this coverage is not
+    lost; it is simply not reachable from the public entry points today."""
     store = Store(tmp_path / "tp.db", mode="live")
     _barrier_position(store)
     full = FOREIGN_BTC + .00025
     client = FakeClient(btc=[full, full, FOREIGN_BTC], open_ids=[{"oid-t", "owner"}, {"owner"}])
     hands = _hands(store, client, tp_atr_mult=3)
-    hands.mark(_snap(bid=81200, last=81201))
+    hands.reconcile()
+    hands._sell(_snap(bid=81200, last=81201), exit_reason="take_profit")
     assert not hands.position.is_open()
     assert store.fills(1)[0]["source"] == "take_profit"
     names = [call[0] for call in client.calls]
@@ -155,13 +162,16 @@ def test_live_time_limit_still_exits_despite_stale_depth_book(tmp_path, monkeypa
     monkeypatch.setattr("bot.hands.time.time", lambda: 1_900_000_000)
     snap = _snap(bid=81200, last=81201)
     snap.depth_stale = True
-    hands.mark(snap)
+    hands.reconcile()
+    hands._sell(snap, exit_reason="time_limit")  # mark() itself now refuses to start; see test_exit_latch.py
     assert not hands.position.is_open()
     assert store.fills(1)[0]["source"] == "time_limit"
 
 
 @pytest.mark.parametrize("foreign", [False, True])
 def test_local_tp_unconfirmed_or_foreign_stop_never_sells(tmp_path, foreign):
+    """`_sell()` called directly (see the M1 note two tests above): mark()/
+    execute() now refuse before this is ever reached in live mode."""
     from bot.hands import PositionStuck
     store = Store(tmp_path / "tp.db", mode="live")
     _barrier_position(store)
@@ -172,10 +182,10 @@ def test_local_tp_unconfirmed_or_foreign_stop_never_sells(tmp_path, foreign):
     hands = _hands(store, client, tp_atr_mult=3)
     if foreign:
         with pytest.raises(PositionStuck):
-            hands.mark(_snap(bid=81200))
+            hands._sell(_snap(bid=81200), exit_reason="take_profit")
         assert not [c for c in client.calls if c[0] == "cancel"]
     else:
-        hands.mark(_snap(bid=81200))
+        hands._sell(_snap(bid=81200), exit_reason="take_profit")
     assert not [c for c in client.calls if c[0] == "market"]
     assert store.load_position()["state"] == "OPEN"
 
@@ -186,22 +196,26 @@ def test_local_tp_failed_sell_and_restore_is_loud(tmp_path):
     client = FakeClient(btc=[FOREIGN_BTC + .00025], open_ids=[{"oid-t"}, set()], sell_fail=True, trigger_fail=2)
     hands = _hands(store, client, tp_atr_mult=3)
     with pytest.raises(UnprotectedPosition):
-        hands.mark(_snap(bid=81200))
+        hands._sell(_snap(bid=81200), exit_reason="take_profit")  # direct call: see M1 note above
     assert store.load_position()["state"] == "UNPROTECTED"
 
 
-def test_local_tp_idle_ticks_make_no_private_calls_and_closing_not_resold(tmp_path):
+def test_local_tp_idle_ticks_make_no_private_calls_and_never_repeats_the_blocked_exit(tmp_path):
+    """The idle-tick half is unchanged (no reason found yet -> no calls at
+    all). The TP-crossed half is now the M1 prerequisite gate: calling mark()
+    over and over once the target is crossed must keep refusing, identically,
+    every time -- never a cancel, never a sell, never any state corruption."""
     store = Store(tmp_path / "tp.db", mode="live")
     _barrier_position(store)
-    client = FakeClient(btc=[FOREIGN_BTC + .00025], open_ids=[{"oid-t"}, set()])
+    client = FakeClient(btc=[FOREIGN_BTC + .00025], open_ids=[{"oid-t"}])  # stop stays alive throughout
     hands = _hands(store, client, tp_atr_mult=3)
     hands.mark(_snap(bid=81199))
     assert client.calls == []
-    hands.mark(_snap(bid=81200))
-    assert store.load_position()["state"] == "CLOSING"
-    hands = _hands(store, client, tp_atr_mult=3)
-    hands.mark(_snap(bid=81200))
-    assert len([c for c in client.calls if c[0] == "market"]) == 1
+    for _ in range(3):
+        with pytest.raises(TerminalEvidenceUnavailable):
+            hands.mark(_snap(bid=81200))
+    assert not [c for c in client.calls if c[0] in ("cancel", "market", "trigger")]
+    assert store.load_position()["state"] == "OPEN"
 
 
 def test_live_time_limit_survives_restart_and_persist(tmp_path, monkeypatch):
@@ -215,7 +229,8 @@ def test_live_time_limit_survives_restart_and_persist(tmp_path, monkeypatch):
     hands = _hands(store, client, time_limit_minutes=60, tp_atr_mult=0)
     assert hands.position.opened_ts == opened
     monkeypatch.setattr("bot.hands.time.time", lambda: 1_900_000_000)
-    hands.mark(_snap())
+    hands.reconcile()
+    hands._sell(_snap(), exit_reason="time_limit")  # mark() itself now refuses to start
     assert not hands.position.is_open()
     assert store.fills(1)[0]["source"] == "time_limit"
 
@@ -246,22 +261,32 @@ def test_local_tp_lost_sell_response_does_not_restore_stop_on_owner_coins(tmp_pa
     full = FOREIGN_BTC + .00025
     client = FakeClient(btc=[full, full, FOREIGN_BTC], open_ids=[{"oid-t"}, set()], sell_fail=True)
     hands = _hands(store, client, tp_atr_mult=3)
-    hands.mark(_snap(bid=81200))
+    hands.reconcile()
+    hands._sell(_snap(bid=81200), exit_reason="take_profit")  # direct call: see M1 note above
     assert not hands.position.is_open()
     assert not [c for c in client.calls if c[0] == "trigger"]
 
 
-def test_time_limit_closing_reason_survives_restart_until_reconcile(tmp_path):
+def test_legacy_closing_row_fails_closed_instead_of_auto_resolving(tmp_path):
+    """M1 item 3: a CLOSING row is what `_sell()`'s own unconfirmed-sell branch
+    used to leave behind before this hardening (see test_exit_latch.py for the
+    same guarantee via `_guard_exit()`). A CLOSING row with no EXIT latch --
+    legacy, or written by any future code path -- must never be silently
+    resolved by `reconcile()`'s balance heuristic any more; it fails closed."""
+    from bot.hands import ExitLatchBlocked
+
     store = Store(tmp_path / "closing.db", mode="live")
     _barrier_position(store)
-    client = FakeClient(btc=[FOREIGN_BTC + .00025], open_ids=[{"oid-t"}, set()])
+    store.save_position(qty=0.00025, entry=80000, stop_price=79200, entry_order_id="oid-m1",
+                        stop_order_id="oid-t", state="CLOSING", entry_source="estimated",
+                        btc_before=FOREIGN_BTC, take_profit_price=81200, exit_reason="take_profit")
+    client = FakeClient(btc=[FOREIGN_BTC], open_ids=[set()])
     hands = _hands(store, client, tp_atr_mult=3)
-    hands.mark(_snap(bid=81200))
-    assert store.load_position()["exit_reason"] == "take_profit"
-    client.btc = [FOREIGN_BTC]
-    hands = _hands(store, client, tp_atr_mult=3)
-    assert hands.reconcile() == "closed_on_exchange"
-    assert store.fills(1)[0]["source"] == "take_profit"
+    with pytest.raises(ExitLatchBlocked):
+        hands.reconcile()
+    assert client.calls == []
+    assert store.fills() == []
+    assert store.load_position()["state"] == "CLOSING"
 
 
 def test_local_exit_reconcile_error_keeps_reason_for_tick_audit(tmp_path):
@@ -356,12 +381,14 @@ def test_live_partial_fill_protects_only_what_was_bought(tmp_path):
 
 
 def test_live_sell_cancels_stop_confirms_then_sells(tmp_path):
+    """M1 note: `execute(SELL)` itself now refuses before any write
+    (TerminalEvidenceUnavailable; see test_exit_latch.py). `_sell()`'s own
+    cancel/confirm/sell mechanics remain correct and are exercised directly."""
     store = Store(tmp_path / "l.db", mode="live")
     _open_position(store)
     client = FakeClient(btc=[FOREIGN_BTC + 0.00025, FOREIGN_BTC], open_ids=[set()])
     hands = _hands(store, client)
-    gate = GateResult(True, "ok_close", "SELL", qty="0.00025")
-    pos = hands.execute(gate, _snap(bid=81000, last=81001, ask=81002))
+    pos = hands._sell(_snap(bid=81000, last=81001, ask=81002), exit_reason=None)
     kinds = [c[0] for c in client.calls]
     assert kinds.index("cancel") < kinds.index("market")
     assert pos.qty == 0.0
@@ -375,7 +402,7 @@ def test_live_sell_failure_restores_stop(tmp_path):
     _open_position(store)
     client = FakeClient(btc=[FOREIGN_BTC + 0.00025], open_ids=[set()], sell_fail=True)
     hands = _hands(store, client)
-    pos = hands.execute(GateResult(True, "ok_close", "SELL", qty="0.00025"), _snap())
+    pos = hands._sell(_snap(), exit_reason=None)  # direct call: execute(SELL) itself now refuses
     assert pos.qty == 0.00025 and pos.state == "OPEN"
     row = store.load_position()
     assert row["stop_order_id"] == "oid-t" and row["state"] == "OPEN"
@@ -392,7 +419,7 @@ def test_live_sell_partial_fill_protects_only_remaining_qty(tmp_path):
     after = FOREIGN_BTC + 0.00015  # 0.0001 actually sold before the response was lost
     client = FakeClient(btc=[start, after], open_ids=[set()], sell_fail=True)
     hands = _hands(store, client)
-    pos = hands.execute(GateResult(True, "ok_close", "SELL", qty="0.00025"), _snap())
+    pos = hands._sell(_snap(), exit_reason=None)  # direct call: execute(SELL) itself now refuses
     assert pos.qty == pytest.approx(0.00015)
     assert pos.state == "OPEN"
     trig = next(c[1] for c in client.calls if c[0] == "trigger")
@@ -424,7 +451,7 @@ def test_live_sell_failure_with_unreadable_balance_halts_without_guessing(tmp_pa
     client = BlindAfterFirstRead(btc=[FOREIGN_BTC + 0.00025], open_ids=[set()], sell_fail=True)
     hands = _hands(store, client)
     with pytest.raises(UnprotectedPosition):
-        hands.execute(GateResult(True, "ok_close", "SELL", qty="0.00025"), _snap())
+        hands._sell(_snap(), exit_reason=None)  # direct call: execute(SELL) itself now refuses
     assert not any(c[0] == "trigger" for c in client.calls)
     row = store.load_position()
     assert row["state"] == "UNPROTECTED"
@@ -435,10 +462,25 @@ def test_live_sell_aborts_when_stop_cancel_unconfirmed(tmp_path):
     _open_position(store)
     client = FakeClient(btc=[FOREIGN_BTC + 0.00025], open_ids=[{"oid-t"}])
     hands = _hands(store, client)
-    pos = hands.execute(GateResult(True, "ok_close", "SELL", qty="0.00025"), _snap())
+    pos = hands._sell(_snap(), exit_reason=None)  # direct call: execute(SELL) itself now refuses
     assert pos.qty == 0.00025
     assert not any(c[0] == "market" for c in client.calls)
     assert store.load_position()["stop_order_id"] == "oid-t"
+
+
+def test_live_sell_via_execute_refuses_before_any_write(tmp_path):
+    """The production entry point (`execute`) for a discretionary SELL --
+    unlike the direct `_sell()` calls above, which remain tested
+    infrastructure -- must refuse before the stop is ever touched. See
+    test_exit_latch.py for the full scenario matrix."""
+    store = Store(tmp_path / "l.db", mode="live")
+    _open_position(store)
+    client = FakeClient(btc=[FOREIGN_BTC + 0.00025], open_ids=[{"oid-t"}])
+    hands = _hands(store, client)
+    with pytest.raises(TerminalEvidenceUnavailable):
+        hands.execute(GateResult(True, "ok_close", "SELL", qty="0.00025"), _snap())
+    assert client.calls == []
+    assert store.load_position()["qty"] == pytest.approx(0.00025)
 
 
 def test_live_persists_position_across_restart(tmp_path):
@@ -698,8 +740,8 @@ def test_sell_escalates_when_the_stop_is_not_ours_to_cancel(tmp_path):
     client = FakeClient(btc=[FOREIGN_BTC + 0.00025], open_ids=[{"oid-t"}])
     hands = LiveHands(_live_settings(), store, client, sleep=lambda s: None)
 
-    with pytest.raises(PositionStuck):
-        hands.execute(GateResult(True, "ok_sell", "SELL", qty="0.00025", notional=20), _snap())
+    with pytest.raises(PositionStuck):  # direct call: execute(SELL) itself now refuses first
+        hands._sell(_snap(), exit_reason=None)
 
 
 def test_sell_failure_rechecks_the_balance_before_restoring_the_stop(tmp_path):
@@ -716,7 +758,7 @@ def test_sell_failure_rechecks_the_balance_before_restoring_the_stop(tmp_path):
     client = FakeClient(btc=[FOREIGN_BTC + 0.00025, FOREIGN_BTC], open_ids=[set()], sell_fail=True)
     hands = LiveHands(_live_settings(), store, client, sleep=lambda s: None)
 
-    hands.execute(GateResult(True, "ok_sell", "SELL", qty="0.00025", notional=20), _snap())
+    hands._sell(_snap(), exit_reason=None)  # direct call: execute(SELL) itself now refuses first
 
     assert not any(c[0] == "trigger" for c in client.calls), "stop restored over the owner's BTC"
     assert hands.position.qty == 0.0
@@ -734,6 +776,6 @@ def test_sell_survives_a_blind_balance_endpoint(tmp_path):
     client = BalanceBlindClient(btc=[FOREIGN_BTC + 0.00025], open_ids=[set()])
     hands = LiveHands(_live_settings(), store, client, sleep=lambda s: None)
 
-    hands.execute(GateResult(True, "ok_sell", "SELL", qty="0.00025", notional=20), _snap())
+    hands._sell(_snap(), exit_reason=None)  # direct call: execute(SELL) itself now refuses first
 
     assert hands.position.state == "CLOSING"

@@ -15,7 +15,7 @@ Para agentes (Claude Code, Cursor, Codex, Grok): leia [AGENTS.md](AGENTS.md) e [
 | WebSocket KCEX | **Mapeado e verificado**: `wss://wbs.kcex.com/ws?platform=web` (default). A KCEX aceita a nomenclatura legada e a MEXC v3 no mesmo socket. Frames reais em `tests/fixtures/kcex_ws_frames.jsonl`. Não inventar **outra** URL sem capturar do Chrome. |
 | Gráfico local | `python -m bot run --chart` → `http://127.0.0.1:8765/` (candles, só leitura, sem botão de compra/venda). |
 | Coleira | 20 USDT por ordem, ~5 % do caixa, 1 posição, stop ATR na exchange (live), halt diário com PnL realizado **+ não realizado**, mínimo e escalas lidos da exchange. |
-| Segurança live | Posição gravada **antes** do stop; fill confirmado por **saldo**; a linha só é apagada com **prova** de que a ordem não encheu (senão fica `PENDING` para o `reconcile`); a venda que falha re-lê o saldo antes de repor o stop; reconciliação com a exchange no boot e a cada ciclo, inclusive quando o bot se acha zerado; posição sem stop irrecuperável vira `UNPROTECTED` e para com exit 2; posição que o bot não consegue sair vira exit 5. |
+| Segurança live | Posição gravada **antes** do stop; fill confirmado por **saldo**; a linha só é apagada com **prova** de que a ordem não encheu (senão fica `PENDING` para o `reconcile`); a venda que falha re-lê o saldo antes de repor o stop; reconciliação com a exchange no boot e a cada ciclo, inclusive quando o bot se acha zerado; posição sem stop irrecuperável vira `UNPROTECTED` e para com exit 2; posição que o bot não consegue sair (stop não é do bot) vira exit 5; saída discricionária ao vivo (LLM SELL, take-profit, limite de tempo) sem evidência terminal capturada é recusada antes de qualquer escrita e para com exit 6, sem tentar de novo. |
 | BTC que não é do bot | O `reconcile` guarda em `foreign_btc` (kv) quanto BTC da conta não é dele. Quando o **seu** stop de 0.00064 dispara, o bot reconhece que o que saiu não é do tamanho dele e mantém a própria posição em vez de lançar uma saída fantasma. |
 | Observabilidade | Cada decisão grava no audit o snapshot (preço, bid, ask, ATR), o motivo do LLM (`ok`, `llm_budget`, `llm_timeout`, …), o custo real da chamada, os ids de ordem e o estado da posição. Log em `data/bot.log`. |
 | Conta humana | Há um stop **manual** (0.00064 BTC @ 75722). O bot **não cancela** ids que não gravou. |
@@ -126,7 +126,7 @@ O que o live faz por ordem:
 4. SELL: cancela o stop, confirma o cancelamento, vende; se a venda falhar, recoloca o stop.
 5. No boot e a cada ciclo do LLM, compara a posição local com saldo e ordens abertas: stop executado vira fill registrado; stop sumido é recolocado.
 
-Códigos de saída: `1` sessão morta (rode `login` de novo), `2` posição sem stop, `3` já existe um bot rodando, `4` ciclo `--once` falhou.
+Códigos de saída: `1` sessão morta (rode `login` de novo), `2` posição sem stop, `3` já existe um bot rodando, `4` ciclo `--once` falhou, `5` posição travada (protegida, mas o bot não consegue sair sozinho — o stop residente não é do bot; resolva à mão), `6` evidência terminal indisponível (`TerminalEvidenceUnavailable`: uma saída discricionária ao vivo — SELL do LLM, take-profit local, limite de tempo — foi recusada antes de qualquer escrita, porque ainda não dá para provar que um cancelamento do stop residente foi seguro; o stop continua intacto e protegendo a posição; capture a evidência de order-history/deals que falta, ou saia à mão).
 
 Primeira ordem real pode falhar por `needDolos` / `content-sign` (anti-bot da KCEX). Teste com o mínimo da exchange.
 

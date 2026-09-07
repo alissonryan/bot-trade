@@ -10,7 +10,7 @@ Python bot: OpenRouter LLM decides **BTC/USDT spot on KCEX**; a **code collar** 
 
 - Keep `kcex/` as the **only** exchange client (no CCXT). GET may retry; **POST/DELETE never retry**.
 - Keep LLM output as `{action, confidence, reason, regime}` only. Size and stop live in `bot/collar.py`.
-- Keep the six live invariants in `bot/hands.py` (persist before stop, confirm by balance, never quietly unprotected, cancel-confirm-sell, reconcile, only own ids). Add a test for any change there.
+- Keep the six live invariants in `bot/hands.py` (persist before stop, confirm by balance, never quietly unprotected, cancel-confirm-sell, reconcile, only own ids). Add a test for any change there. Invariant 5's balance-delta attribution is corroboration, not identification — an offsetting owner deposit/withdrawal or a lagging balance read can fool it; keep it (it is the only autonomous-stop-fill detector) but do not present it as sound (see AGENTS.md § Live invariants, point 5).
 - Never `cancel_order` unless `store.is_bot_order(id)`.
 - Default paper. Live is an explicit `MODE=live` **plus** `python -m kcex.cli login`. Do not flip live unless the human asks.
 - **Do not re-implement login.** `python -m kcex.cli login` already opens Chrome, waits for captcha+2FA, and writes `KCEX_TOKEN` + `KCEX_TOKEN_AT` to `.env`.

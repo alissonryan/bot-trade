@@ -53,7 +53,10 @@ def test_each_stop_caller_halts_on_ambiguity(tmp_path, path):
         if path == "buy":
             hands.execute(_buy_gate(), _snap())
         elif path == "restore_sell":
-            hands.execute(GateResult(True, "ok_close", "SELL", qty="0.00025"), _snap())
+            # M1 note: execute(SELL) itself now refuses before any write; this
+            # exercises _sell()'s own stop-restore-on-failed-sell mechanics
+            # directly (tested infrastructure, see test_exit_latch.py).
+            hands._sell(_snap(), exit_reason=None)
         else:
             hands.reconcile()
     assert sum(c[0] == "trigger" for c in client.calls) == 1
@@ -216,7 +219,7 @@ def test_proven_rejection_in_recovery_never_starts_another_sell(tmp_path, path):
         if path == "reconcile":
             hands.reconcile()
         else:
-            hands.execute(GateResult(True, "ok_close", "SELL", qty="0.00025"), _snap())
+            hands._sell(_snap(), exit_reason=None)  # direct call: execute(SELL) itself now refuses first
     before = list(client.calls)
     store._conn.close()
     with pytest.raises(UnprotectedPosition):

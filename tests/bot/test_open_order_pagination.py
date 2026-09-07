@@ -97,10 +97,13 @@ def live(tmp_path, payloads):
 
 
 def test_sell_never_confirms_absence_of_stop_on_second_page(tmp_path):
-    from bot.types import GateResult
+    """M1 note: `execute(SELL)` itself now refuses before any write
+    (TerminalEvidenceUnavailable; see tests/bot/test_exit_latch.py). `_sell()`'s
+    own pagination-aware cancel-confirm logic remains correct and is
+    exercised directly (white-box) here."""
     from test_hands_live import _snap
     store, client, hands = live(tmp_path, [page(["owner"], 1, 2, 1), page(["oid-t"], 2, 2, 1)])
-    hands.execute(GateResult(True, "ok_sell", "SELL", qty="0.00025"), _snap())
+    hands._sell(_snap(), exit_reason=None)
     assert [c for c in client.calls if c[0] in ("market", "trigger")] == []
     assert [c for c in client.calls if c[0] == "cancel"] == [("cancel", "oid-t")]
     assert store.load_position()["stop_order_id"] == "oid-t"
@@ -130,14 +133,16 @@ def test_incomplete_entry_list_keeps_pending_without_cancel_or_stop(tmp_path):
 @pytest.mark.parametrize("mode", ["sell", "reconcile"])
 @pytest.mark.parametrize("fault", ["limit", "network", "malformed"])
 def test_incomplete_list_blocks_sell_and_reconcile_writes(tmp_path, mode, fault):
-    from bot.types import GateResult
+    """mode="sell" calls `_sell()` directly: `execute(SELL)` itself now refuses
+    before any write (TerminalEvidenceUnavailable), so this exercises the
+    pagination-fault handling `_sell()` still has as tested infrastructure."""
     from test_hands_live import _snap
     payloads = ([page([f"owner-{i}"], i, 51, 1) for i in range(1, 51)] if fault == "limit"
                 else [page(["owner"], 1, 2, 1), RuntimeError("page outage") if fault == "network" else {}])
     store, client, hands = live(tmp_path, payloads)
     with pytest.raises(RuntimeError):
         if mode == "sell":
-            hands.execute(GateResult(True, "ok_sell", "SELL", qty="0.00025"), _snap())
+            hands._sell(_snap(), exit_reason=None)
         else:
             hands.reconcile()
     assert [c for c in client.calls if c[0] in ("market", "trigger")] == []

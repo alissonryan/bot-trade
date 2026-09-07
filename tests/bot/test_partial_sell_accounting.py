@@ -55,7 +55,13 @@ def _open_position(hands, store, qty=0.00025, entry=80_000.0):
 
 
 def test_partial_sell_books_the_btc_that_actually_left(tmp_path):
-    """0.00015 of 0.00025 really sold; the ledger must record that loss."""
+    """0.00015 of 0.00025 really sold; the ledger must record that loss.
+
+    M1 note: `execute(SELL)` itself now refuses before any write
+    (TerminalEvidenceUnavailable; see tests/bot/test_exit_latch.py) because
+    terminal evidence to tell a cancelled stop from an executed one is not
+    captured. `_sell()`'s own partial-fill accounting below remains correct
+    and is exercised directly (white-box) so this coverage is not lost."""
     client = Mock()
     # start 0.00025, then 0.00010 after the partial fill.
     client.balances.side_effect = lambda *_a, **_k: {
@@ -67,7 +73,7 @@ def test_partial_sell_books_the_btc_that_actually_left(tmp_path):
 
     hands, store = _hands(tmp_path, client)
     _open_position(hands, store)
-    hands.execute(GateResult(True, "ok_close", "SELL", qty="0.00025"), _snap())
+    hands._sell(_snap(), exit_reason=None)  # direct call: execute(SELL) itself now refuses first
 
     fills = store.fills(10)
     sells = [f for f in fills if f["side"] == "SELL"]
@@ -92,7 +98,7 @@ def test_a_non_finite_balance_never_sizes_an_order_or_drops_the_position(tmp_pat
     hands, store = _hands(tmp_path, client)
     _open_position(hands, store)
     with pytest.raises(UnprotectedPosition):
-        hands.execute(GateResult(True, "ok_close", "SELL", qty="0.00025"), _snap())
+        hands._sell(_snap(), exit_reason=None)  # direct call: execute(SELL) itself now refuses first
 
     client.place_trigger.assert_not_called()
     row = store.load_position()
@@ -140,7 +146,7 @@ def test_a_one_lot_partial_sell_is_booked_not_swallowed_by_tolerance(tmp_path):
 
     hands, store = _hands(tmp_path, client)
     _open_position(hands, store)
-    hands.execute(GateResult(True, "ok_close", "SELL", qty="0.00025"), _snap())
+    hands._sell(_snap(), exit_reason=None)  # direct call: execute(SELL) itself now refuses first
 
     sells = [f for f in store.fills(10) if f["side"] == "SELL"]
     assert sells, "one lot left the account and nothing was booked"
