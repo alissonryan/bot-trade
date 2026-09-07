@@ -35,6 +35,33 @@
     }
     #status.live { color: #26a69a; }
     #status.down { color: #ef5350; }
+    #intervals {
+      display: flex;
+      gap: 4px;
+    }
+    #intervals button {
+      background: transparent;
+      border: 1px solid #2a2e39;
+      border-radius: 3px;
+      color: #9098a3;
+      cursor: pointer;
+      font: inherit;
+      font-size: 12px;
+      padding: 3px 8px;
+    }
+    #intervals button:hover { border-color: #3d4351; color: #d1d4dc; }
+    #intervals button[aria-pressed="true"] {
+      background: #1e222d;
+      border-color: #3d4351;
+      color: #e6e6e6;
+    }
+    /* The bot decides on Min15 no matter what the chart is showing. Anything
+       else is a viewing lens, and says so rather than implying the strategy
+       moved with it. */
+    #decides-on {
+      font-size: 11px;
+      color: #6b7280;
+    }
     #chart {
       width: 100%;
       height: calc(100vh - 56px);
@@ -45,6 +72,17 @@
   <div id="header">
     <span id="symbol">BTC_USDT</span>
     <span id="last-price">--</span>
+    <span id="intervals">
+      <button type="button" data-interval="Min1" data-seconds="60">1m</button>
+      <button type="button" data-interval="Min5" data-seconds="300">5m</button>
+      <button type="button" data-interval="Min15" data-seconds="900">15m</button>
+      <button type="button" data-interval="Min30" data-seconds="1800">30m</button>
+      <button type="button" data-interval="Min60" data-seconds="3600">1h</button>
+      <button type="button" data-interval="Hour4" data-seconds="14400">4h</button>
+      <button type="button" data-interval="Hour8" data-seconds="28800">8h</button>
+      <button type="button" data-interval="Day1" data-seconds="86400">1D</button>
+    </span>
+    <span id="decides-on"></span>
     <span id="status">connecting…</span>
   </div>
   <div id="chart"></div>
@@ -85,31 +123,77 @@
 
     let currentBar = null;
 
+    // The interval the bot itself trades on. The buttons change what this page
+    // *shows*; they do not and must not change what the bot decides on.
+    const BOT_INTERVAL = "Min15";
+    const buttons = Array.from(document.querySelectorAll("#intervals button"));
+    let interval = BOT_INTERVAL;
+    let intervalSeconds = 15 * 60;
+    // Rising token: a slow reply for an interval the user already left must not
+    // overwrite the bars of the one they are now looking at.
+    let loadToken = 0;
+    // False from the moment an interval is chosen until its bars are actually in
+    // the series. A tick arriving in that gap would be bucketed on the NEW grid
+    // while the series still holds the OLD interval's bars, and the library
+    // rejects a bar older than its last one ("Cannot update oldest data").
+    let seriesReady = false;
+    // Newest bar time in the series, so an out-of-order tick can never rewind it.
+    let newestBarTime = 0;
+
     function barIntervalSeconds() {
-      return 15 * 60; // Min15
+      return intervalSeconds;
     }
 
-    fetch("/kline")
-      .then((r) => r.json())
-      .then((payload) => {
-        const data = payload && payload.data ? payload.data : null;
-        if (!data || !Array.isArray(data.t)) return;
-        const bars = data.t.map((t, i) => ({
-          // KCEX accepts request bounds in ms but returns candle times in seconds.
-          time: Number(t),
-          open: Number(data.o[i]),
-          high: Number(data.h[i]),
-          low: Number(data.l[i]),
-          close: Number(data.c[i]),
-        }));
-        candleSeries.setData(bars);
-        if (bars.length) {
-          currentBar = { ...bars[bars.length - 1] };
-        }
-      })
-      .catch(() => {
-        statusEl.textContent = "kline load failed";
-      });
+    function loadKline() {
+      const token = ++loadToken;
+      const asked = interval;
+      fetch("/kline?interval=" + encodeURIComponent(asked))
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status))))
+        .then((payload) => {
+          if (token !== loadToken) return; // superseded by a later click
+          const data = payload && payload.data ? payload.data : null;
+          if (!data || !Array.isArray(data.t)) return;
+          const bars = data.t.map((t, i) => ({
+            // KCEX accepts request bounds in ms but returns candle times in seconds.
+            time: Number(t),
+            open: Number(data.o[i]),
+            high: Number(data.h[i]),
+            low: Number(data.l[i]),
+            close: Number(data.c[i]),
+          }));
+          candleSeries.setData(bars);
+          // Reset, never carry: a bar from the previous interval has a time on
+          // the old grid, so keeping it would make the next tick either extend
+          // a stale candle or open one at the wrong boundary.
+          currentBar = bars.length ? { ...bars[bars.length - 1] } : null;
+          newestBarTime = bars.length ? bars[bars.length - 1].time : 0;
+          seriesReady = true;
+          chart.timeScale().fitContent();
+        })
+        .catch(() => {
+          if (token !== loadToken) return;
+          statusEl.textContent = "kline load failed";
+        });
+    }
+
+    function selectInterval(name, seconds) {
+      interval = name;
+      intervalSeconds = seconds;
+      currentBar = null;
+      seriesReady = false;
+      buttons.forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.interval === name)));
+      document.getElementById("decides-on").textContent =
+        name === BOT_INTERVAL ? "" : "viewing only — the bot decides on 15m";
+      loadKline();
+    }
+
+    buttons.forEach((b) => {
+      b.addEventListener("click", () =>
+        selectInterval(b.dataset.interval, Number(b.dataset.seconds))
+      );
+    });
+
+    selectInterval(BOT_INTERVAL, 15 * 60);
 
     function wsUrl() {
       const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -137,10 +221,16 @@
         if (typeof msg.last === "number" && msg.last > 0) {
           priceEl.textContent = msg.last.toFixed(2);
 
+          // The price readout is always current; only the candle waits for the
+          // series to match the interval the tick is about to be bucketed on.
+          if (!seriesReady) return;
+
           const tsSec = msg.ts_ms ? Math.floor(msg.ts_ms / 1000) : Math.floor(Date.now() / 1000);
           const barTime = tsSec - (tsSec % barIntervalSeconds());
+          if (barTime < newestBarTime) return; // never rewind the series
 
           if (currentBar === null || barTime > currentBar.time) {
+            newestBarTime = barTime;
             currentBar = {
               time: barTime,
               open: msg.last,

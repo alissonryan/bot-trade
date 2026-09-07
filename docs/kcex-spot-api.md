@@ -75,6 +75,32 @@ Min15 bars; this is observed coverage, not a promise of permanent retention.
 For historical pages, discard a bar only if its closing time is in the future,
 not unconditionally the last element (which can be a completed historical bar).
 
+### `interval` values (captured 2026-09-07, BTC_USDT)
+
+Each name below was requested directly and returned 20 bars at exactly the step
+shown, with every timestamp epoch-aligned (`t % step == 0`):
+
+| `interval` | step | `interval` | step |
+| --- | --- | --- | --- |
+| `Min1` | 60s | `Min60` | 3600s |
+| `Min5` | 300s | `Hour4` | 14400s |
+| `Min15` | 900s | `Hour8` | 28800s |
+| `Min30` | 1800s | `Day1` | 86400s |
+
+Three more answered but are **not** in `bot/chart_server.py::KLINE_INTERVALS`:
+
+- `Hour1` — rejected outright: `interval value is error`. There is no `HourN`
+  hourly bar; the hourly interval is `Min60`.
+- `Week1` — returns data, but its bars land on `t % 604800 == 345600` (weeks
+  start Monday, the epoch was a Thursday), so bucketing a live tick with
+  `t - (t % step)` would place it in the wrong candle.
+- `Month1` — returns data, but the step is a calendar month (observed
+  2419200 / 2592000 / 2678400s), so there is no fixed step to bucket by.
+
+Note the envelope: the response is `{code, msg, timestamp, data:{t,o,c,h,l,v}}`,
+so the arrays are under `data`, not at the top level. Request bounds `start`/
+`end` are **milliseconds** while the returned `t` is in **seconds**.
+
 The live UI polled REST for depth and deals during this initial capture. The public WebSocket was captured separately — see the [WebSocket](#websocket) section below.
 
 ## Account

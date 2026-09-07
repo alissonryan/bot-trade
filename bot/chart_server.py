@@ -10,7 +10,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from bot.chart_encode import encode_tick
 from bot.hub import Hub
@@ -18,6 +18,32 @@ from bot.hub import Hub
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 CHART_DIR = Path(__file__).resolve().parent.parent / "chart"
 BROADCAST_INTERVAL_S = 0.2
+
+# Kline intervals the chart may ask for, mapped to their bar length in seconds.
+# This is a *captured* surface, not a guessed one: each name was probed against
+# GET /spot/api/spot/market/kline for BTC_USDT on 2026-09-07 and returned bars at
+# exactly the step below, with every timestamp epoch-aligned (t % step == 0).
+# The page buckets the live tick with `t - (t % step)`, so epoch alignment is a
+# correctness requirement here, not a detail. Deliberately excluded:
+#   Hour1  - not a KCEX interval; the endpoint answers "interval value is error".
+#            The hourly bar is Min60.
+#   Week1  - accepted, but its bars land at t % 604800 == 345600 (weeks start
+#            Monday, the epoch was a Thursday), so epoch modulo would place the
+#            forming candle in the wrong bucket.
+#   Month1 - accepted, but the step is a calendar month (2419200 / 2592000 /
+#            2678400s), so there is no fixed step to bucket by at all.
+KLINE_INTERVALS: dict[str, int] = {
+    "Min1": 60,
+    "Min5": 300,
+    "Min15": 900,
+    "Min30": 1800,
+    "Min60": 3600,
+    "Hour4": 14400,
+    "Hour8": 28800,
+    "Day1": 86400,
+}
+DEFAULT_KLINE_INTERVAL = "Min15"  # the interval the bot itself decides on
+KLINE_BARS = 20
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
@@ -134,31 +160,38 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _serve_kline(self) -> None:
-        server: ChartServer = self.server.chart
-        end = int(time.time() * 1000)
-        start = end - 20 * 15 * 60 * 1000
-        try:
-            data = server.client.kline(
-                server.symbol,
-                interval="Min15",
-                start=start,
-                end=end,
-            )
-        except Exception as exc:  # exchange/network failure -> clean JSON error
-            body = json.dumps({"error": "kline fetch failed", "detail": str(exc)}).encode("utf-8")
-            self.send_response(502)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        body = json.dumps(data).encode("utf-8")
-        self.send_response(200)
+    def _send_json(self, status: int, payload: Any) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _serve_kline(self) -> None:
+        server: ChartServer = self.server.chart
+        asked = parse_qs(urlsplit(self.path).query).get("interval", [DEFAULT_KLINE_INTERVAL])[0]
+        step_s = KLINE_INTERVALS.get(asked)
+        if step_s is None:
+            # Closed whitelist: an unknown interval is refused here and never
+            # forwarded, so a crafted loopback request cannot make us send an
+            # uncaptured interval string to the exchange.
+            self._send_json(400, {"error": "unsupported interval", "interval": asked,
+                                  "supported": list(KLINE_INTERVALS)})
+            return
+        end = int(time.time() * 1000)
+        start = end - KLINE_BARS * step_s * 1000
+        try:
+            data = server.client.kline(
+                server.symbol,
+                interval=asked,
+                start=start,
+                end=end,
+            )
+        except Exception as exc:  # exchange/network failure -> clean JSON error
+            self._send_json(502, {"error": "kline fetch failed", "detail": str(exc)})
+            return
+        self._send_json(200, data)
 
     def _serve_ws(self) -> None:
         origin = self.headers.get("Origin")
