@@ -73,6 +73,19 @@ def test_position_roundtrip(tmp_path):
     assert store.load_position() is None
 
 
+def test_barrier_metadata_and_entry_age_survive_updates_and_restart(tmp_path, monkeypatch):
+    db = tmp_path / "barriers.db"
+    store = Store(db)
+    kwargs = dict(qty=.00025, entry=80000, stop_price=79200, entry_order_id="entry", stop_order_id="stop")
+    store.save_position(**kwargs, opened_ts="2026-01-01T00:00:00+00:00", take_profit_price=81200)
+    monkeypatch.setattr("bot.store._now_iso", lambda: "2026-01-02T00:00:00+00:00")
+    store.save_position(**kwargs, state="CLOSING", take_profit_price=81200, exit_reason="time_limit")
+    row = Store(db).load_position()
+    assert row["opened_ts"] == "2026-01-01T00:00:00+00:00"
+    assert row["take_profit_price"] == 81200
+    assert row["exit_reason"] == "time_limit"
+
+
 def test_position_state_and_provenance(tmp_path):
     store = Store(tmp_path / "bot.db")
     store.save_position(
@@ -117,5 +130,7 @@ def test_migrates_database_from_previous_schema(tmp_path):
     assert row["qty"] == 0.00025
     assert row["state"] == "OPEN"  # legacy rows were always a protected long
     assert row["btc_before"] is None
+    assert row["take_profit_price"] is None
+    assert row["exit_reason"] is None
     store.add_fill("2026-09-04", 1.0, side="SELL", qty=0.00025, price=81000.0)
     assert store.fills(1)[0]["side"] == "SELL"

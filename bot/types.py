@@ -107,3 +107,4 @@ class GateResult:
     qty: str | None = None
     notional: float | None = None
     stop_price: str | None = None
+    take_profit_price: str | None = None

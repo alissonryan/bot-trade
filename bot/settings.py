@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import math
 from dataclasses import dataclass
 
 # Verified live against the exchange: see docs/kcex-spot-api.md. The single
@@ -57,6 +58,19 @@ class Settings:
     fill_confirm_tries: int
     fill_confirm_wait_s: float
     log_level: str
+    tp_atr_mult: float = 0.0
+    min_tp_pct: float = 0.006
+    max_tp_pct: float = 0.06
+    time_limit_minutes: float = 0.0
+    cooldown_minutes: float = 0.0
+    journal_enabled: bool = False
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.cooldown_minutes) or self.cooldown_minutes < 0:
+            raise ValueError("invalid cooldown: finite nonnegative minutes required")
+        values = (self.tp_atr_mult, self.min_tp_pct, self.max_tp_pct, self.time_limit_minutes)
+        if any(not math.isfinite(v) or v < 0 for v in values) or self.min_tp_pct > self.max_tp_pct:
+            raise ValueError("invalid barrier configuration: finite nonnegative values and MIN_TP_PCT <= MAX_TP_PCT required")
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -104,4 +118,10 @@ class Settings:
             fill_confirm_tries=_i("FILL_CONFIRM_TRIES", 6),
             fill_confirm_wait_s=_f("FILL_CONFIRM_WAIT_S", 0.5),
             log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
+            tp_atr_mult=_f("TP_ATR_MULT", 0.0),
+            min_tp_pct=_f("MIN_TP_PCT", 0.006),
+            max_tp_pct=_f("MAX_TP_PCT", 0.06),
+            time_limit_minutes=_f("TIME_LIMIT_MINUTES", 0.0),
+            cooldown_minutes=_f("COOLDOWN_MINUTES", 0.0),
+            journal_enabled=_b("JOURNAL_ENABLED", False),
         )

@@ -1,10 +1,13 @@
 from pathlib import Path
+from decimal import Decimal
 import sys
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from bot.collar import decide, stop_for_entry
+from bot.collar import _round_qty, decide, stop_for_entry
 from bot.settings import Settings
 from bot.types import Bar, Snapshot, SymbolRules, TradeIntent
 
@@ -46,6 +49,90 @@ def test_hold_is_not_ok():
     )
     assert r.ok is False
     assert r.rule == "hold"
+
+
+def test_cooldown_blocks_only_buy_until_exact_expiry():
+    settings = _settings(cooldown_minutes=30)
+    for now, expected in [(1_799_999, False), (1_800_000, True)]:
+        gate = decide(TradeIntent("BUY", 1, "go", "range"), _snap(), settings,
+                      session_ok=True, day_pnl_usdt=0, last_exit_ms=0, now_ms=now)
+        assert gate.ok is expected
+        assert gate.rule == ("ok_buy" if expected else "cooldown")
+        assert gate.action == "BUY"
+
+
+def test_cooldown_never_blocks_sell_even_with_entry_halts():
+    gate = decide(TradeIntent("SELL", 0, "exit", "range"),
+                  _snap(bot_qty=.001, stale=True),
+                  _settings(cooldown_minutes=30, min_confidence=1),
+                  session_ok=True, day_pnl_usdt=-100, last_exit_ms=100, now_ms=101)
+    assert gate.ok and gate.rule == "ok_close" and gate.action == "SELL"
+
+
+@pytest.mark.parametrize("minutes,exited,now,rule", [
+    (0, 100, 101, "ok_buy"),
+    (30, None, 101, "ok_buy"),
+    (30, 100, 99, "cooldown"),  # clock rollback cannot release an entry
+    (30, 100, None, "cooldown"),
+])
+def test_cooldown_disabled_missing_exit_and_clock_edges(minutes, exited, now, rule):
+    gate = decide(TradeIntent("BUY", 1, "go", "range"), _snap(),
+                  _settings(cooldown_minutes=minutes), session_ok=True, day_pnl_usdt=0,
+                  last_exit_ms=exited, now_ms=now)
+    assert gate.rule == rule
+
+
+@pytest.mark.parametrize("qty,scale,expected", [
+    (0.00022987654321, 5, "0.00022"),
+    (0.000225, 5, "0.00022"),
+    (0.00022999999999999998, 5, "0.00022"),
+    (0.00023, 5, "0.00023"),
+    (0.000008, 5, "0.00000"),
+    (0.000891234567 - 0.00064, 5, "0.00025"),
+    (1.239, 2, "1.23"),
+    (1.9, 0, "1"),
+])
+def test_quantity_truncates_without_exceeding_input(qty, scale, expected):
+    result = _round_qty(qty, scale)
+    assert result == expected
+    assert Decimal(result) <= Decimal(str(qty))
+
+
+def test_sell_entire_balance_delta_does_not_round_up():
+    qty = 0.00022987654321
+    gate = decide(TradeIntent("SELL", 1, "exit", "trend"), _snap(bot_qty=qty),
+                  _settings(), session_ok=True, day_pnl_usdt=0,
+                  rules=SymbolRules(qty_scale=5, min_amount=1))
+    assert gate.ok
+    assert gate.qty is not None
+    assert Decimal(gate.qty) <= Decimal(str(qty))
+    assert gate.qty == "0.00022"
+
+
+@pytest.mark.parametrize("free_usdt", [450, 399])
+def test_buy_truncated_quantity_respects_order_and_portfolio_caps(free_usdt):
+    settings = _settings(max_order_usdt=20, max_portfolio_pct=0.05)
+    gate = decide(TradeIntent("BUY", 1, "go", "trend"),
+                  _snap(last=87000, free_usdt=free_usdt), settings,
+                  session_ok=True, day_pnl_usdt=0, rules=SymbolRules(qty_scale=5, min_amount=1))
+    assert gate.ok
+    assert gate.qty is not None
+    notional = Decimal(gate.qty) * Decimal("87000")
+    assert notional <= Decimal(str(settings.max_order_usdt))
+    assert notional <= Decimal(str(settings.max_portfolio_pct)) * Decimal(str(free_usdt))
+
+
+@pytest.mark.parametrize("cap,last,minimum,rule", [
+    (20, 87000, 20, "min_notional"),
+    (0.8, 100000, 1, "dust"),
+])
+def test_floor_below_venue_minimum_is_not_an_approved_order(cap, last, minimum, rule):
+    gate = decide(TradeIntent("BUY", 1, "go", "trend"), _snap(last=last),
+                  _settings(max_order_usdt=cap), session_ok=True, day_pnl_usdt=0,
+                  rules=SymbolRules(qty_scale=5, min_amount=minimum))
+    assert not gate.ok
+    assert gate.rule == rule
+    assert gate.qty is None
 
 
 def test_reject_wrong_symbol():
@@ -274,6 +361,55 @@ def test_stop_for_entry_recomputes_on_real_fill():
     at_last = stop_for_entry(80_000.0, 400.0, s)
     at_fill = stop_for_entry(80_040.0, 400.0, s)
     assert float(at_fill) - float(at_last) == 40.0
+
+
+def test_take_profit_opt_in_env_and_gate(monkeypatch):
+    monkeypatch.setenv("TP_ATR_MULT", "3")
+    monkeypatch.setenv("MIN_TP_PCT", "0.006")
+    monkeypatch.setenv("MAX_TP_PCT", "0.06")
+    monkeypatch.setenv("TIME_LIMIT_MINUTES", "60")
+    settings = _settings()
+    assert settings.time_limit_minutes == 60
+    gate = decide(TradeIntent("BUY", 1, "go", "trend"), _snap(last=80000, atr=400),
+                  settings, session_ok=True, day_pnl_usdt=0)
+    assert gate.take_profit_price == "81200.00"
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"tp_atr_mult": float("nan")}, {"tp_atr_mult": -1},
+    {"time_limit_minutes": float("inf")}, {"time_limit_minutes": -1},
+    {"min_tp_pct": -.1}, {"min_tp_pct": .1, "max_tp_pct": .01},
+])
+def test_invalid_barrier_config_rejected_before_trading(kwargs):
+    with pytest.raises(ValueError, match="barrier"):
+        _settings(**kwargs)
+
+
+@pytest.mark.parametrize("atr,expected", [(1, "80480.00"), (400, "81200.00"), (10000, "84800.00")])
+def test_take_profit_atr_clamps_and_fill_recomputation(atr, expected):
+    from bot.collar import take_profit_for_entry
+    settings = _settings(tp_atr_mult=3, min_tp_pct=.006, max_tp_pct=.06)
+    assert take_profit_for_entry(80000, atr, settings) == expected
+    assert take_profit_for_entry(80040, 400, settings) == "81240.00"
+    assert take_profit_for_entry(80000, atr, _settings(tp_atr_mult=0)) is None
+
+
+@pytest.mark.parametrize("entry,scale,expected", [
+    (80000.009, 2, "79200.00"),
+    (80000.09, 1, "79200.0"),
+    (80000.9, 0, "79200"),
+    (80000.01, 2, "79200.01"),
+])
+def test_long_stop_truncates_to_price_scale(entry, scale, expected):
+    settings = _settings(atr_mult=2, min_stop_pct=0.004, max_stop_pct=0.04)
+    rules = SymbolRules(price_scale=scale)
+    stop = stop_for_entry(entry, 400, settings, rules)
+    assert stop == expected
+    assert Decimal(stop) <= Decimal(str(entry - 800))
+    gate = decide(TradeIntent("BUY", 1, "go", "trend"), _snap(last=entry, atr=400),
+                  settings, session_ok=True, day_pnl_usdt=0, rules=rules)
+    assert gate.ok
+    assert gate.stop_price == stop
 
 
 def test_unrealized_day_loss_cannot_change_a_buy_outcome():

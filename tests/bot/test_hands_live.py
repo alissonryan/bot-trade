@@ -102,6 +102,146 @@ def _open_position(store, qty=0.00025, state="OPEN", stop_id="oid-t"):
     )
 
 
+def _barrier_position(store, *, stop_id="oid-t"):
+    _open_position(store, stop_id=stop_id)
+    store.save_position(qty=.00025, entry=80000, stop_price=79200, entry_order_id="oid-m1",
+                        stop_order_id=stop_id, btc_before=FOREIGN_BTC, take_profit_price=81200,
+                        opened_ts="2020-01-01T00:00:00+00:00")
+
+
+def test_live_local_tp_cancels_only_resident_stop_confirms_then_sells(tmp_path):
+    store = Store(tmp_path / "tp.db")
+    _barrier_position(store)
+    full = FOREIGN_BTC + .00025
+    client = FakeClient(btc=[full, full, FOREIGN_BTC], open_ids=[{"oid-t", "owner"}, {"owner"}])
+    hands = _hands(store, client, tp_atr_mult=3)
+    hands.mark(_snap(bid=81200, last=81201))
+    assert not hands.position.is_open()
+    assert store.fills(1)[0]["source"] == "take_profit"
+    names = [call[0] for call in client.calls]
+    cancel = names.index("cancel")
+    assert names[cancel + 1] == "open_orders"
+    assert cancel < names.index("market")
+    assert [c for c in client.calls if c[0] == "cancel"] == [("cancel", "oid-t")]
+    assert not [c for c in client.calls if c[0] == "trigger"]  # no unproven OCO/GE pair
+
+
+@pytest.mark.parametrize("foreign", [False, True])
+def test_local_tp_unconfirmed_or_foreign_stop_never_sells(tmp_path, foreign):
+    from bot.hands import PositionStuck
+    store = Store(tmp_path / "tp.db")
+    _barrier_position(store)
+    if foreign:
+        store._conn.execute("DELETE FROM bot_orders WHERE order_id='oid-t'")
+        store._conn.commit()
+    client = FakeClient(btc=[FOREIGN_BTC + .00025], open_ids=[{"oid-t"}])
+    hands = _hands(store, client, tp_atr_mult=3)
+    if foreign:
+        with pytest.raises(PositionStuck):
+            hands.mark(_snap(bid=81200))
+        assert not [c for c in client.calls if c[0] == "cancel"]
+    else:
+        hands.mark(_snap(bid=81200))
+    assert not [c for c in client.calls if c[0] == "market"]
+    assert store.load_position()["state"] == "OPEN"
+
+
+def test_local_tp_failed_sell_and_restore_is_loud(tmp_path):
+    store = Store(tmp_path / "tp.db")
+    _barrier_position(store)
+    client = FakeClient(btc=[FOREIGN_BTC + .00025], open_ids=[{"oid-t"}, set()], sell_fail=True, trigger_fail=2)
+    hands = _hands(store, client, tp_atr_mult=3)
+    with pytest.raises(UnprotectedPosition):
+        hands.mark(_snap(bid=81200))
+    assert store.load_position()["state"] == "UNPROTECTED"
+
+
+def test_local_tp_idle_ticks_make_no_private_calls_and_closing_not_resold(tmp_path):
+    store = Store(tmp_path / "tp.db")
+    _barrier_position(store)
+    client = FakeClient(btc=[FOREIGN_BTC + .00025], open_ids=[{"oid-t"}, set()])
+    hands = _hands(store, client, tp_atr_mult=3)
+    hands.mark(_snap(bid=81199))
+    assert client.calls == []
+    hands.mark(_snap(bid=81200))
+    assert store.load_position()["state"] == "CLOSING"
+    hands = _hands(store, client, tp_atr_mult=3)
+    hands.mark(_snap(bid=81200))
+    assert len([c for c in client.calls if c[0] == "market"]) == 1
+
+
+def test_live_time_limit_survives_restart_and_persist(tmp_path, monkeypatch):
+    store = Store(tmp_path / "ttl.db")
+    _barrier_position(store)
+    opened = store.load_position()["opened_ts"]
+    full = FOREIGN_BTC + .00025
+    client = FakeClient(btc=[full, full, FOREIGN_BTC], open_ids=[{"oid-t"}, set()])
+    hands = _hands(store, client, time_limit_minutes=60, tp_atr_mult=0)
+    hands._persist("OPEN")
+    hands = _hands(store, client, time_limit_minutes=60, tp_atr_mult=0)
+    assert hands.position.opened_ts == opened
+    monkeypatch.setattr("bot.hands.time.time", lambda: 1_900_000_000)
+    hands.mark(_snap())
+    assert not hands.position.is_open()
+    assert store.fills(1)[0]["source"] == "time_limit"
+
+
+def test_tp_is_rebased_on_partial_fill_and_pending_metadata_precedes_stop(tmp_path):
+    store = Store(tmp_path / "pending.db")
+    def before_stop():
+        row = store.load_position()
+        assert row["state"] == "PENDING" and row["opened_ts"]
+        assert row["qty"] == pytest.approx(.00015)
+        assert row["take_profit_price"] == 81240
+    client = FakeClient(btc=[FOREIGN_BTC, FOREIGN_BTC + .00015], on_trigger=before_stop,
+                        deals={"data": [{"orderId": "oid-m1", "price": 80040, "quantity": .00015}]})
+    hands = _hands(store, client, tp_atr_mult=3)
+    gate = _buy_gate()
+    gate.take_profit_price = "81200"
+    hands.execute(gate, _snap())
+    assert hands.position.take_profit_price == 81240
+    assert hands.position.state == "OPEN"
+    triggers = [c[1] for c in client.calls if c[0] == "trigger"]
+    assert len(triggers) == 1 and triggers[0]["trigger_type"] == "LE"
+    assert float(triggers[0]["quantity"]) <= hands.position.qty
+
+
+def test_local_tp_lost_sell_response_does_not_restore_stop_on_owner_coins(tmp_path):
+    store = Store(tmp_path / "lost.db")
+    _barrier_position(store)
+    full = FOREIGN_BTC + .00025
+    client = FakeClient(btc=[full, full, FOREIGN_BTC], open_ids=[{"oid-t"}, set()], sell_fail=True)
+    hands = _hands(store, client, tp_atr_mult=3)
+    hands.mark(_snap(bid=81200))
+    assert not hands.position.is_open()
+    assert not [c for c in client.calls if c[0] == "trigger"]
+
+
+def test_time_limit_closing_reason_survives_restart_until_reconcile(tmp_path):
+    store = Store(tmp_path / "closing.db")
+    _barrier_position(store)
+    client = FakeClient(btc=[FOREIGN_BTC + .00025], open_ids=[{"oid-t"}, set()])
+    hands = _hands(store, client, tp_atr_mult=3)
+    hands.mark(_snap(bid=81200))
+    assert store.load_position()["exit_reason"] == "take_profit"
+    client.btc = [FOREIGN_BTC]
+    hands = _hands(store, client, tp_atr_mult=3)
+    assert hands.reconcile() == "closed_on_exchange"
+    assert store.fills(1)[0]["source"] == "take_profit"
+
+
+def test_local_exit_reconcile_error_keeps_reason_for_tick_audit(tmp_path):
+    store = Store(tmp_path / "audit.db")
+    _barrier_position(store)
+    hands = _hands(store, FakeClient(btc=[FOREIGN_BTC + .00025]), tp_atr_mult=3)
+    def fail():
+        raise RuntimeError("balances down")
+    hands.reconcile = fail
+    with pytest.raises(RuntimeError, match="balances down"):
+        hands.mark(_snap(bid=81200))
+    assert hands.last_mark_reason == "take_profit"
+
+
 def test_live_buy_confirms_fill_by_balance_then_places_trigger(tmp_path):
     store = Store(tmp_path / "l.db")
     client = FakeClient(btc=[FOREIGN_BTC, FOREIGN_BTC + 0.00025])
@@ -141,7 +281,7 @@ def test_live_buy_uses_deals_price_when_available(tmp_path):
 
 def test_live_buy_stop_fails_then_flattens(tmp_path):
     store = Store(tmp_path / "l.db")
-    client = FakeClient(btc=[FOREIGN_BTC, FOREIGN_BTC + 0.00025, FOREIGN_BTC + 0.00025, FOREIGN_BTC], trigger_fail=2)
+    client = FakeClient(btc=[FOREIGN_BTC, FOREIGN_BTC + 0.00025, FOREIGN_BTC + 0.00025, FOREIGN_BTC], trigger_fail=1)
     pos = _hands(store, client).execute(_buy_gate(), _snap())
     kinds = [c[0] for c in client.calls]
     assert kinds.count("trigger") == 1

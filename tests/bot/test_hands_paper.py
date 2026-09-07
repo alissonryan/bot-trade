@@ -97,3 +97,55 @@ def test_paper_stop_still_fires_on_a_real_bid(tmp_path):
     hands.mark(_snap(last=79100.0, bid=79100.0, ask=79102.0))
     assert hands.position.qty == 0.0
     assert hands.cash > 0
+
+
+def test_paper_tp_recomputed_from_fill_persisted_and_sells_at_bid(tmp_path):
+    settings = _settings(tp_atr_mult=3, paper_slippage_bps=2)
+    db = tmp_path / "tp.db"
+    hands = PaperHands(settings, Store(db))
+    hands.execute(GateResult(True, "ok_buy", "BUY", qty=".00025", stop_price="79200", take_profit_price="81200"), _snap(ask=80000))
+    assert hands.position.take_profit_price == pytest.approx(81216)
+    hands = PaperHands(settings, Store(db))
+    hands.mark(_snap(last=81300, bid=81215, ask=81301))
+    assert hands.position.is_open()  # executable bid, not last, triggers TP
+    hands.mark(_snap(last=81300, bid=81216, ask=81301))
+    assert not hands.position.is_open()
+    fill = hands.store.fills(1)[0]
+    assert fill["source"] == "paper_take_profit"
+    assert fill["price"] == pytest.approx(81216 * .9998)
+
+
+def test_paper_time_limit_survives_restart_and_missing_quote(tmp_path, monkeypatch):
+    settings = _settings(time_limit_minutes=60, tp_atr_mult=0)
+    db = tmp_path / "ttl.db"
+    monkeypatch.setattr("bot.hands.time.time", lambda: 1_700_000_000)
+    hands = PaperHands(settings, Store(db))
+    hands.execute(GateResult(True, "ok_buy", "BUY", qty=".00025", stop_price="79200"), _snap())
+    opened = hands.store.load_position()["opened_ts"]
+    monkeypatch.setattr("bot.hands.time.time", lambda: 1_700_003_599)
+    hands._persist()
+    hands = PaperHands(settings, Store(db))
+    assert hands.store.load_position()["opened_ts"] == opened
+    hands.mark(_snap())
+    assert hands.position.is_open()
+    monkeypatch.setattr("bot.hands.time.time", lambda: 1_700_003_600)
+    hands.mark(_snap(last=0, bid=0, ask=0))
+    assert hands.position.is_open()  # never credit a fabricated zero-price exit
+    snap = _snap()
+    snap.stale = True
+    hands.mark(snap)
+    assert not hands.position.is_open()  # stale entries blocked, timed exits allowed
+    assert hands.store.fills(1)[0]["source"] == "paper_time_limit"
+
+
+@pytest.mark.parametrize("bid", [float("nan"), float("inf"), -1])
+def test_bad_quotes_cannot_fire_local_barrier(tmp_path, bid):
+    from bot.hands import Position, local_exit_reason
+    pos = Position(qty=1, entry=100, state="OPEN", take_profit_price=101, opened_ts="2020-01-01T00:00:00+00:00")
+    assert local_exit_reason(pos, _snap(last=100, bid=bid), _settings(time_limit_minutes=1), 1_900_000_000_000) is None
+
+
+def test_opt_out_suspends_even_a_previously_persisted_local_target():
+    from bot.hands import Position, local_exit_reason
+    pos = Position(qty=1, entry=100, state="OPEN", take_profit_price=101)
+    assert local_exit_reason(pos, _snap(last=103, bid=102), _settings(tp_atr_mult=0, time_limit_minutes=0), 1) is None
