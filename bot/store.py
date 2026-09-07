@@ -459,6 +459,7 @@ class Store:
         opened_ts: str | None = None,
         take_profit_price: float | None = None,
         exit_reason: str | None = None,
+        commit: bool = True,
     ) -> None:
         if state not in POSITION_STATES:
             raise ValueError(f"unknown position state {state!r}")
@@ -473,7 +474,8 @@ class Store:
                 (qty, entry, stop_price, entry_order_id, stop_order_id, state, entry_source, btc_before,
                  opened_ts, take_profit_price, exit_reason),
             )
-        self._conn.commit()
+        if commit:
+            self._conn.commit()
 
     def load_position(self) -> dict | None:
         row = self._conn.execute(
@@ -542,8 +544,8 @@ class Store:
 
     def commit(self) -> None:
         """Public commit for callers that pass ``commit=False`` to add_fill /
-        kv_set / clear_position to combine several writes into one local
-        transaction (see LiveHands._settle_closed_on_exchange)."""
+        kv_set / clear_position / save_position to combine several writes into
+        one local transaction (see LiveHands._settle_closed_on_exchange)."""
         self._conn.commit()
 
     def rollback(self) -> None:

@@ -237,10 +237,10 @@ def test_completion_storage_fault_keeps_latch_and_fatal_exit(tmp_path, stage):
     hands = _hands(store, client)
     persist = hands._persist
     write = store.kv_set
-    def fail_persist(state=None):
+    def fail_persist(state=None, *, commit=True):
         if state == "OPEN":
             raise RuntimeError("successful stop position write failed")
-        persist(state)
+        persist(state, commit=commit)
     def fail_clear(key, value):
         if key == "stop_submission" and value == "":
             raise RuntimeError("latch clear failed")

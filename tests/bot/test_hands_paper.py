@@ -183,3 +183,180 @@ def test_take_profit_fires_on_a_fresh_depth_book():
     snap = _snap(last=103, bid=102)
     snap.depth_stale = False
     assert local_exit_reason(pos, snap, settings, 1) == "take_profit"
+
+
+# --- L6: PaperHands fill + position + cash must be one local transaction ---
+#
+# Store.add_fill/save_position/kv_set each commit on their own by default. A
+# crash (or any exception) between them used to leave the ledger and the
+# position/cash disagreeing -- a fill with no matching position/cash change,
+# or vice versa. PaperHands' cash lives in kv and its fills in the ledger; a
+# half-applied paper settlement corrupts the only forward evidence this
+# project has about whether the strategy works, exactly like a live one.
+#
+# These tests reuse the SAME Store connection across the failure and the
+# following assertion/retry -- closing and reopening a fresh connection would
+# only prove SQLite's own crash-recovery, not that this code rolls back
+# in-process failures on a connection the CLI keeps reusing after backoff.
+
+
+def _buy_gate(qty="0.00025", stop="79200.00"):
+    return GateResult(True, "ok_buy", "BUY", qty=qty, notional=20, stop_price=stop)
+
+
+def test_paper_buy_fill_and_position_roll_back_together_on_position_write_failure(tmp_path):
+    """If the position write fails after the fill insert, the fill must not be
+    durably committed either -- otherwise the ledger shows a BUY nothing else
+    ever tracked, and a retry could book a second BUY on top of it."""
+    store = Store(tmp_path / "x.db")
+    hands = PaperHands(_settings(paper_starting_usdt=450.0), store)
+
+    def boom(*a, **kw):
+        raise RuntimeError("disk full mid-buy")
+
+    store.save_position = boom
+    with pytest.raises(RuntimeError, match="disk full"):
+        hands.execute(_buy_gate(), _snap(ask=80010))
+
+    assert store.fills() == [], "orphan BUY fill with no matching position row"
+    assert store.load_position() is None
+    assert store.kv_get("paper_cash") is None, "cash must not move without the matching fill/position"
+    assert hands.cash == 450.0, "in-memory cash must not diverge from the rolled-back store"
+    assert hands.position.qty == 0.0
+
+
+def test_paper_buy_failure_leaves_no_open_transaction_on_the_same_connection(tmp_path):
+    """The CLI reuses one Store after its backoff; it does not reopen. A
+    failed settlement must roll back, not leave an open transaction for the
+    next unrelated commit on this SAME connection to durably sweep up."""
+    store = Store(tmp_path / "x.db")
+    hands = PaperHands(_settings(paper_starting_usdt=450.0), store)
+
+    def boom(*a, **kw):
+        raise RuntimeError("disk full mid-buy")
+
+    store.save_position = boom
+    with pytest.raises(RuntimeError, match="disk full"):
+        hands.execute(_buy_gate(), _snap(ask=80010))
+
+    assert store._conn.in_transaction is False
+    store.kv_set("unrelated", "x")  # simulates the CLI's next incidental write
+    assert store.fills() == [], "the orphan fill must not have been swept in by an unrelated later commit"
+    assert store.load_position() is None
+
+
+def test_paper_buy_retry_after_failed_write_books_exactly_once(tmp_path):
+    store = Store(tmp_path / "x.db")
+    hands = PaperHands(_settings(paper_starting_usdt=450.0), store)
+
+    calls = {"n": 0}
+    real_save_position = store.save_position
+
+    def flaky(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient disk error")
+        return real_save_position(*a, **kw)
+
+    store.save_position = flaky
+    with pytest.raises(RuntimeError, match="transient"):
+        hands.execute(_buy_gate(), _snap(ask=80010))
+    assert store.fills() == []
+    assert hands.cash == 450.0
+
+    pos = hands.execute(_buy_gate(), _snap(ask=80010))  # retry: same Hands, same Store
+    assert pos.qty == 0.00025
+    assert len(store.fills()) == 1, "retry must book exactly one fill, not zero or two"
+    assert hands.cash == pytest.approx(450.0 - pos.entry * 0.00025)
+    assert store.kv_get("paper_cash") == repr(hands.cash)
+
+
+def test_paper_close_fill_and_position_clear_roll_back_together(tmp_path):
+    """Mirrors the BUY case for the exit side (execute(SELL), the stop in
+    mark(), and TP/TTL all funnel through PaperHands._close)."""
+    store = Store(tmp_path / "x.db")
+    hands = PaperHands(_settings(paper_starting_usdt=450.0), store)
+    hands.execute(_buy_gate(), _snap(ask=80010))
+    cash_after_buy = hands.cash
+    position_after_buy = hands.store.load_position()
+
+    def boom(*a, **kw):
+        raise RuntimeError("disk full mid-close")
+
+    store.clear_position = boom
+    with pytest.raises(RuntimeError, match="disk full"):
+        hands.execute(GateResult(True, "ok_close", "SELL", qty="0.00025"), _snap(bid=81000))
+
+    fills = store.fills()
+    assert len(fills) == 1 and fills[0]["side"] == "BUY", "orphan SELL fill with the position never cleared"
+    assert store.load_position() == position_after_buy, "position must not be half-closed"
+    assert store.kv_get("paper_cash") == repr(cash_after_buy), "cash must not move without the matching fill/clear"
+    assert hands.cash == pytest.approx(cash_after_buy), "in-memory cash must not diverge from the rolled-back store"
+    assert hands.position.qty == pytest.approx(0.00025), "in-memory position must not be cleared early"
+
+
+def test_paper_close_failure_leaves_no_open_transaction_on_the_same_connection(tmp_path):
+    store = Store(tmp_path / "x.db")
+    hands = PaperHands(_settings(paper_starting_usdt=450.0), store)
+    hands.execute(_buy_gate(), _snap(ask=80010))
+
+    def boom(*a, **kw):
+        raise RuntimeError("disk full mid-close")
+
+    store.clear_position = boom
+    with pytest.raises(RuntimeError, match="disk full"):
+        hands.execute(GateResult(True, "ok_close", "SELL", qty="0.00025"), _snap(bid=81000))
+
+    assert store._conn.in_transaction is False
+    store.kv_set("unrelated", "x")
+    fills = store.fills()
+    assert len(fills) == 1 and fills[0]["side"] == "BUY", "the orphan SELL fill must not be swept in by an unrelated later commit"
+    assert store.load_position()["qty"] == pytest.approx(0.00025)
+
+
+def test_paper_close_retry_after_failed_write_books_exactly_once(tmp_path):
+    store = Store(tmp_path / "x.db")
+    hands = PaperHands(_settings(paper_starting_usdt=450.0), store)
+    hands.execute(_buy_gate(), _snap(ask=80010))
+
+    calls = {"n": 0}
+    real_clear_position = store.clear_position
+
+    def flaky(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient disk error")
+        return real_clear_position(*a, **kw)
+
+    store.clear_position = flaky
+    with pytest.raises(RuntimeError, match="transient"):
+        hands.execute(GateResult(True, "ok_close", "SELL", qty="0.00025"), _snap(bid=81000))
+    assert len(store.fills()) == 1  # only the BUY from setup; no orphan SELL
+
+    pos = hands.execute(GateResult(True, "ok_close", "SELL", qty="0.00025"), _snap(bid=81000))  # retry
+    assert pos.qty == 0.0
+    fills = store.fills()
+    assert len(fills) == 2 and fills[0]["side"] == "SELL", "retry must book exactly one SELL fill, not zero or two"
+    assert store.load_position() is None
+
+
+def test_paper_stop_hit_fill_and_close_are_one_transaction(tmp_path, monkeypatch):
+    """mark()'s stop-hit path also funnels through _close(); prove the same
+    atomicity there, not only through execute(SELL)."""
+    store = Store(tmp_path / "x.db")
+    hands = PaperHands(_settings(paper_starting_usdt=450.0), store)
+    hands.execute(_buy_gate(), _snap(ask=80010))
+    cash_after_buy = hands.cash
+
+    def boom(*a, **kw):
+        raise RuntimeError("disk full mid-stop")
+
+    store.clear_position = boom
+    with pytest.raises(RuntimeError, match="disk full"):
+        hands.mark(_snap(last=79100, bid=79090, ask=79110))
+
+    fills = store.fills()
+    assert len(fills) == 1 and fills[0]["side"] == "BUY"
+    assert hands.position.qty == pytest.approx(0.00025)
+    assert hands.cash == pytest.approx(cash_after_buy)
+    assert store._conn.in_transaction is False

@@ -25,7 +25,7 @@ import json
 import logging
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
 from typing import Any, Callable, NoReturn
@@ -339,19 +339,33 @@ class PaperHands:
     def reconcile(self) -> str:
         return "paper"
 
-    def _persist(self) -> None:
+    def _persist(self, *, position: Position | None = None, cash: float | None = None,
+                commit: bool = True) -> None:
+        """Write the position row and the cash kv entry.
+
+        Callers that need this combined with an ``add_fill``/``clear_position``
+        in one local transaction pass ``commit=False`` and an explicit
+        ``position``/``cash`` snapshot -- see ``execute``/``_close`` below,
+        which never mutate ``self.position``/``self.cash`` until the whole
+        transaction has actually committed (so a rollback needs no separate
+        restore step: the in-memory attributes were simply never touched).
+        """
+        pos = position if position is not None else self.position
         self.store.save_position(
-            qty=self.position.qty,
-            entry=self.position.entry,
-            stop_price=self.position.stop_price,
-            entry_order_id="paper-entry" if self.position.qty else None,
-            stop_order_id="paper-stop" if self.position.stop_price and self.position.qty else None,
+            qty=pos.qty,
+            entry=pos.entry,
+            stop_price=pos.stop_price,
+            entry_order_id="paper-entry" if pos.qty else None,
+            stop_order_id="paper-stop" if pos.stop_price and pos.qty else None,
             state="OPEN",
             entry_source="paper",
-            take_profit_price=self.position.take_profit_price,
-            opened_ts=self.position.opened_ts,
+            take_profit_price=pos.take_profit_price,
+            opened_ts=pos.opened_ts,
+            commit=False,
         )
-        self.store.kv_set(PAPER_CASH_KEY, repr(self.cash))
+        self.store.kv_set(PAPER_CASH_KEY, repr(cash if cash is not None else self.cash), commit=False)
+        if commit:
+            self.store.commit()
 
     def execute(self, gate: GateResult, snap: Snapshot) -> Position:
         slip = self.settings.paper_slippage_bps / 10_000.0
@@ -362,9 +376,9 @@ class PaperHands:
             if cost > self.cash + 1e-9:
                 log.warning("paper: not enough cash (%.2f) for %.2f USDT", self.cash, cost)
                 return self.position
-            self.cash -= cost
+            new_cash = self.cash - cost
             target = take_profit_for_entry(px, snap.atr or 0, self.settings)
-            self.position = Position(
+            new_position = Position(
                 qty=qty,
                 entry=px,
                 stop_price=float(gate.stop_price or 0) or None,
@@ -373,13 +387,30 @@ class PaperHands:
                 take_profit_price=float(target) if target else None,
                 opened_ts=_opened_now(),
             )
+            # Idempotent (INSERT OR IGNORE), so remembering these ids ahead of
+            # the transaction below is harmless even if that transaction rolls
+            # back -- the ids are only a cancel-allowlist, not the ledger.
             self.store.remember_order("paper-entry")
-            self.entry_order_id = "paper-entry"
-            if self.position.stop_price:
+            if new_position.stop_price:
                 self.store.remember_order("paper-stop")
-                self.stop_order_id = "paper-stop"
-            self.store.add_fill(self.today(), 0.0, side="BUY", qty=qty, price=px, fee=0.0, order_id="paper-entry", source="paper")
-            self._persist()
+            # The fill, the position row and the cash kv entry either all land
+            # or none do -- a fill with no matching position/cash change (or
+            # the reverse) is exactly the ledger corruption this closes.
+            try:
+                self.store.add_fill(self.today(), 0.0, side="BUY", qty=qty, price=px, fee=0.0,
+                                    order_id="paper-entry", source="paper", commit=False)
+                self._persist(position=new_position, cash=new_cash, commit=False)
+                self.store.commit()
+            except Exception:
+                self.store.rollback()
+                raise
+            # Only now, with the transaction durably committed, does in-memory
+            # state change -- a retry on this same object must never see cash
+            # or a position that disagrees with what was actually committed.
+            self.cash = new_cash
+            self.position = new_position
+            self.entry_order_id = "paper-entry"
+            self.stop_order_id = "paper-stop" if new_position.stop_price else None
         elif gate.action == "SELL" and self.position.qty > 0:
             px = (snap.bid or snap.last) * (1 - slip)
             self._close(px, source="paper", order_id="paper-exit")
@@ -388,12 +419,20 @@ class PaperHands:
     def _close(self, px: float, *, source: str, order_id: str) -> None:
         qty = self.position.qty
         pnl = (px - self.position.entry) * qty
-        self.cash += px * qty
-        self.store.add_fill(self.today(), pnl, side="SELL", qty=qty, price=px, fee=0.0, order_id=order_id, source=source)
+        new_cash = self.cash + px * qty
+        try:
+            self.store.add_fill(self.today(), pnl, side="SELL", qty=qty, price=px, fee=0.0,
+                                order_id=order_id, source=source, commit=False)
+            self.store.clear_position(commit=False)
+            self.store.kv_set(PAPER_CASH_KEY, repr(new_cash), commit=False)
+            self.store.commit()
+        except Exception:
+            self.store.rollback()
+            raise
+        self.cash = new_cash
         self.position = Position()
         self.entry_order_id = None
         self.stop_order_id = None
-        self._persist()
 
     def mark(self, snap: Snapshot, *, now_ms: int | None = None) -> Position:
         self.last_mark_reason = None
@@ -497,7 +536,7 @@ class LiveHands:
     def today(self) -> str:
         return _today()
 
-    def _persist(self, state: str | None = None) -> None:
+    def _persist(self, state: str | None = None, *, commit: bool = True) -> None:
         if state:
             self.position.state = state
         self.store.save_position(
@@ -512,6 +551,7 @@ class LiveHands:
             take_profit_price=self.position.take_profit_price,
             opened_ts=self.position.opened_ts,
             exit_reason=self.position.exit_reason,
+            commit=commit,
         )
 
     def _clear(self) -> None:
@@ -914,6 +954,11 @@ class LiveHands:
 
         qty = min(filled, qty_req)
         price, source = self._fill_price(entry_id, default=snap.ask or snap.last)
+        # Snapshot before mutating: on a transaction failure below, memory must
+        # not diverge from the still-uncommitted-old row (invariant 1's PENDING
+        # write with the estimate) -- restoring it here means no separate
+        # "undo" step, only "never applied".
+        snapshot = replace(self.position)
         self.position.qty = qty
         self.position.entry = price
         self.position.entry_source = source
@@ -921,8 +966,18 @@ class LiveHands:
         self.position.take_profit_price = float(target) if target else None
         if snap.atr:
             self.position.stop_price = float(stop_for_entry(price, snap.atr, self.settings, self.rules))
-        self._persist()
-        self.store.add_fill(self.today(), 0.0, side="BUY", qty=qty, price=price, fee=0.0, order_id=entry_id, source=source)
+        # The confirmed position update and the BUY fill are one local
+        # transaction: recording the fill without the matching qty/price/stop
+        # update (or the reverse) is exactly the ledger corruption L6 closes.
+        try:
+            self._persist(commit=False)
+            self.store.add_fill(self.today(), 0.0, side="BUY", qty=qty, price=price, fee=0.0,
+                                order_id=entry_id, source=source, commit=False)
+            self.store.commit()
+        except Exception:
+            self.store.rollback()
+            self.position = snapshot
+            raise
 
         qty_s = _fmt_qty(qty, self.qty_scale)
         stop_id = self._place_stop(qty_s, self.position.stop_price)
@@ -972,8 +1027,28 @@ class LiveHands:
             return False
         price, source = self._fill_price(sell_id, default=snap.bid or snap.last)
         pnl = (price - self.position.entry) * qty
-        self.store.add_fill(self.today(), pnl, side="SELL", qty=qty, price=price, fee=0.0, order_id=sell_id, source=f"flatten_{source}")
-        self._clear()
+        # The fill and the position clear are one local transaction -- an
+        # orphan fill with the row still open (or the reverse) is exactly the
+        # ledger corruption L6 closes. _flatten() never raises on its own
+        # (every earlier failure here returns False, not an exception), so a
+        # transaction failure is caught the same way: logged and reported as
+        # "not confirmed", which is what already drives the caller's loud
+        # UnprotectedPosition halt. The exchange-side sell already executed
+        # (confirmed by _watch_balance above) regardless of whether this local
+        # commit succeeds, so this is an AT-MOST-ONCE local record, not proof
+        # the sale itself is undone.
+        try:
+            self.store.add_fill(self.today(), pnl, side="SELL", qty=qty, price=price, fee=0.0,
+                                order_id=sell_id, source=f"flatten_{source}", commit=False)
+            self.store.clear_position(commit=False)
+            self.store.commit()
+        except Exception as exc:
+            self.store.rollback()
+            log.error("flatten executed on the exchange but the local fill/clear could not be committed: %s", exc)
+            return False
+        self.position = Position()
+        self.entry_order_id = None
+        self.stop_order_id = None
         return True
 
     # -- exit -------------------------------------------------------------------
@@ -1084,8 +1159,19 @@ class LiveHands:
                 log.warning("the sell had in fact executed; booking it instead of restoring a stop")
                 price, source = self._fill_price("", default=snap.bid or snap.last)
                 pnl = (price - self.position.entry) * qty
-                self.store.add_fill(self.today(), pnl, side="SELL", qty=qty, price=price, fee=0.0, order_id=None, source=exit_reason or f"recovered_{source}")
-                self._clear()
+                # One local transaction: an orphan fill with the row still
+                # open (or the reverse) is exactly the bug this closes.
+                try:
+                    self.store.add_fill(self.today(), pnl, side="SELL", qty=qty, price=price, fee=0.0,
+                                        order_id=None, source=exit_reason or f"recovered_{source}", commit=False)
+                    self.store.clear_position(commit=False)
+                    self.store.commit()
+                except Exception:
+                    self.store.rollback()
+                    raise
+                self.position = Position()
+                self.entry_order_id = None
+                self.stop_order_id = None
                 return self.position
             if sold < -self.tol:
                 # The account gained BTC while we thought we were selling --
@@ -1123,12 +1209,30 @@ class LiveHands:
                     "and protecting only the remainder", sold_q, qty,
                 )
                 price, source = self._fill_price("", default=snap.bid or snap.last)
-                self.store.add_fill(
-                    self.today(), (price - self.position.entry) * sold_q, side="SELL",
-                    qty=sold_q, price=price, fee=0.0, order_id=None,
-                    source=f"partial_{exit_reason or source}",
-                )
-            self.position.qty = remaining
+                # The partial fill and the qty reduction are one local
+                # transaction (L6): recording the partial sale with the row
+                # still at the OLD qty (or shrinking the row with no matching
+                # fill) is exactly the ledger corruption this closes. This is
+                # committed BEFORE any stop is attempted below -- a real POST,
+                # checkpointed separately by _place_stop's own write-ahead
+                # pattern -- so the durable fill/qty record does not depend on
+                # whether protection can be restored afterwards.
+                prev_qty = self.position.qty
+                self.position.qty = remaining
+                try:
+                    self.store.add_fill(
+                        self.today(), (price - self.position.entry) * sold_q, side="SELL",
+                        qty=sold_q, price=price, fee=0.0, order_id=None,
+                        source=f"partial_{exit_reason or source}", commit=False,
+                    )
+                    self._persist(commit=False)
+                    self.store.commit()
+                except Exception:
+                    self.store.rollback()
+                    self.position.qty = prev_qty
+                    raise
+            else:
+                self.position.qty = remaining  # remaining == qty; nothing was sold, nothing to book
             remaining_s = _fmt_qty(remaining, self.qty_scale)
             stop_id = self._place_stop(remaining_s, self.position.stop_price)
             if stop_id:
@@ -1148,8 +1252,17 @@ class LiveHands:
             return self.position
         price, source = self._fill_price(sell_id, default=snap.bid or snap.last)
         pnl = (price - self.position.entry) * qty
-        self.store.add_fill(self.today(), pnl, side="SELL", qty=qty, price=price, fee=0.0, order_id=sell_id, source=exit_reason or source)
-        self._clear()
+        try:
+            self.store.add_fill(self.today(), pnl, side="SELL", qty=qty, price=price, fee=0.0,
+                                order_id=sell_id, source=exit_reason or source, commit=False)
+            self.store.clear_position(commit=False)
+            self.store.commit()
+        except Exception:
+            self.store.rollback()
+            raise
+        self.position = Position()
+        self.entry_order_id = None
+        self.stop_order_id = None
         return self.position
 
     # -- reconciliation ---------------------------------------------------------
