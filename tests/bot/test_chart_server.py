@@ -123,3 +123,21 @@ def test_ws_streams_tick_json():
             assert msg["ts_ms"] == 1700000000000
     finally:
         server.shutdown()
+
+
+def test_ws_keeps_a_receive_only_browser_connected():
+    """Browsers don't send application frames while receiving the tick stream."""
+    import time
+
+    from websockets.sync.client import connect
+
+    server = ChartServer(hub=Hub(), client=FakeKcex(), host="127.0.0.1", port=0)
+    server.start()
+    try:
+        with connect(f"ws://127.0.0.1:{server.port}/ws", open_timeout=3, ping_interval=None) as ws:
+            deadline = time.monotonic() + 2.2
+            while time.monotonic() < deadline:
+                assert json.loads(ws.recv(timeout=3))["type"] == "tick"
+            assert ws.ping(b"still-connected").wait(timeout=3)
+    finally:
+        server.shutdown()

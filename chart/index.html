@@ -95,7 +95,8 @@
         const data = payload && payload.data ? payload.data : null;
         if (!data || !Array.isArray(data.t)) return;
         const bars = data.t.map((t, i) => ({
-          time: Math.floor(Number(t) / 1000),
+          // KCEX accepts request bounds in ms but returns candle times in seconds.
+          time: Number(t),
           open: Number(data.o[i]),
           high: Number(data.h[i]),
           low: Number(data.l[i]),

@@ -186,12 +186,13 @@ class _Handler(BaseHTTPRequestHandler):
         conn = self.connection
         server.add_client(conn)
         try:
-            conn.settimeout(1.0)
+            # A receive-only browser can stay silent indefinitely. A timeout on
+            # socket.makefile() poisons its buffered reader after the first idle
+            # second; shutdown() wakes this blocking read explicitly instead.
+            conn.settimeout(None)
             while not server.stopped:
                 try:
                     frame = _read_client_frame(self.rfile)
-                except socket.timeout:
-                    continue
                 except OSError:
                     break
                 if frame is None:
@@ -264,6 +265,10 @@ class ChartServer:
             self.clients.clear()
             self._write_locks.clear()
         for conn in clients:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
             try:
                 conn.close()
             except OSError:
