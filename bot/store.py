@@ -72,16 +72,13 @@ class Store:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.path)
-        # Identity is settled BEFORE any schema work. A refused open must leave
-        # the file exactly as it was found: creating tables or running forward
-        # migrations on another mode's database is already a write.
-        self._conn.execute(
-            "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)"
-        )
-        self._conn.commit()
+        # Identity is settled BEFORE any schema work, reading only. A refused
+        # open must leave the file exactly as it was found -- even creating the
+        # kv table to look for the stamp is a write on a legacy database that
+        # never had one.
         self.mode = mode
         if mode is not None:
-            self._claim_mode(mode)
+            self._preflight_mode(mode)
         self._conn.execute(
             """CREATE TABLE IF NOT EXISTS audit (
                 id INTEGER PRIMARY KEY,
@@ -120,16 +117,27 @@ class Store:
         self._conn.commit()
         if mode is None:
             self.mode = self.kv_get(MODE_KEY)
+        else:
+            # The schema exists now, so the stamp can finally be written.
+            self.kv_set(MODE_KEY, mode)
 
-    def _claim_mode(self, mode: str) -> None:
-        """Stamp the owning mode, or refuse a database another mode wrote.
+    def _preflight_mode(self, mode: str) -> None:
+        """Refuse another mode's database without writing a single byte.
 
         An unstamped file predates this check, so nothing in it proves who
         wrote it. Paper may adopt one -- being wrong there costs a simulated
         number. Live may not: being wrong there sends a real order sized from
         a position that may never have existed.
         """
-        stored = self.kv_get(MODE_KEY)
+        tables = {
+            row[0] for row in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        stored = None
+        if "kv" in tables:
+            row = self._conn.execute(
+                "SELECT value FROM kv WHERE key=?", (MODE_KEY,)).fetchone()
+            stored = row[0] if row else None
         if stored == mode:
             return
         if stored is not None:
@@ -138,26 +146,25 @@ class Store:
                 f"{mode!r}. Point this mode at its own database instead of migrating "
                 "state between them."
             )
-        if mode != "paper" and self._has_history():
+        if mode != "paper" and self._has_history(tables):
             raise StoreIdentityMismatch(
                 f"{self.path} is unstamped and already carries rows, so nothing proves "
                 f"it is not paper state; refusing to adopt it as {mode!r}. Start "
                 f"{mode!r} on an empty database, or inspect and stamp this one by hand."
             )
-        self.kv_set(MODE_KEY, mode)
 
-    def _has_history(self) -> bool:
+    def _has_history(self, tables: set[str]) -> bool:
         """Any trace at all, including kv and the journal.
 
         A paper database can carry nothing but `paper_cash` and journal rows;
-        skipping those tables let exactly that file be adopted as live.
+        skipping those tables let exactly that file be adopted as live. Only
+        tables that already exist are read, so looking costs no write.
         """
         for table in ("position", "fills", "bot_orders", "audit", "journal", "kv"):
-            try:
-                if self._conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
-                    return True
-            except sqlite3.Error:  # table absent on a very old file
+            if table not in tables:
                 continue
+            if self._conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
+                return True
         return False
 
     def close(self) -> None:

@@ -99,7 +99,10 @@ class Eye:
             self.bid = bid
         if ask is not None:
             self.ask = ask
-        if bid is not None or ask is not None:
+        # Both sides, or the book is not fresh -- same rule as the REST path
+        # and the Hub: a one-sided frame leaves the other quote stale, and the
+        # take-profit compares against the BID.
+        if bid is not None and ask is not None:
             self.depth_update_ms = now_ms
         self.ws_ok = True
         self.ws_frames += 1
@@ -221,17 +224,15 @@ class Eye:
         book = depth["data"]["data"]
         bids = book.get("bids") or book.get("bestBids") or []
         asks = book.get("asks") or book.get("bestAsks") or []
-        fresh = False
         if bids:
             self.bid = float(bids[0]["p"])
-            fresh = True
         if asks:
             self.ask = float(asks[0]["p"])
-            fresh = True
-        # An empty book is not a fresh book. Stamping the age here regardless
-        # made the previous quote read as live, so a local take-profit could
-        # sell against a bid the venue was no longer showing.
-        if fresh:
+        # Both sides, or the book is not fresh. A one-sided response leaves the
+        # other quote at whatever it was minutes ago, and the take-profit
+        # compares against the BID -- stamping on asks alone let it sell into a
+        # bid the venue was no longer showing. An empty book is not fresh either.
+        if bids and asks:
             self.depth_update_ms = self._now_ms()
 
     def poll_quotes(self, *, force: bool = False) -> bool:

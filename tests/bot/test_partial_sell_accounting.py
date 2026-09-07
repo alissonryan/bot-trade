@@ -122,3 +122,59 @@ def test_an_empty_book_is_not_a_fresh_book(tmp_path):
     eye._poll_depth_rest()
     assert eye.depth_update_ms == 0, "an empty book must not refresh depth age"
     assert eye._depth_stale() is True
+
+
+# --- third round of review findings ------------------------------------------
+
+def test_a_one_lot_partial_sell_is_booked_not_swallowed_by_tolerance(tmp_path):
+    """0.00025 -> 0.00024 is exactly one lot, but float noise puts the delta at
+    9.999999999999999e-06, just under `tol`. The booking test used `> tol` while
+    the shrink was unconditional, so the row lost a lot with no fill behind it."""
+    client = Mock()
+    balances = iter([0.00025, 0.00024, 0.00024, 0.00024])
+    client.balances.side_effect = lambda *_a, **_k: {
+        "data": [{"currency": "BTC", "available": next(balances), "frozen": 0}]
+    }
+    client.place_market.side_effect = RuntimeError("sell POST failed")
+    client.place_trigger.return_value = {"data": "stop-1"}
+
+    hands, store = _hands(tmp_path, client)
+    _open_position(hands, store)
+    hands.execute(GateResult(True, "ok_close", "SELL", qty="0.00025"), _snap())
+
+    sells = [f for f in store.fills(10) if f["side"] == "SELL"]
+    assert sells, "one lot left the account and nothing was booked"
+    assert sum(f["qty"] for f in sells) == pytest.approx(1e-05, abs=1e-9)
+    assert hands.position.qty == pytest.approx(0.00024, abs=1e-9)
+    assert store.day_pnl(hands.today()) != 0
+
+
+def test_a_one_sided_book_is_not_fresh_for_a_bid_driven_exit(tmp_path):
+    """Only asks arrived; the bid is whatever it was minutes ago. Take-profit
+    compares against the bid, so this must not read as a live book."""
+    from bot.eye import Eye
+    client = Mock()
+    client.depth.return_value = {"data": {"data": {"bids": [], "asks": [{"p": "82001"}]}}}
+    eye = Eye(client, Settings.from_env())
+    eye.bid, eye.ask = 82_000.0, 82_001.0
+    eye.depth_update_ms = 0
+    eye._poll_depth_rest()
+    assert eye.depth_update_ms == 0, "a book with no bid must not refresh depth age"
+    assert eye._depth_stale() is True
+
+
+def test_a_one_sided_ws_frame_is_not_a_fresh_book(tmp_path):
+    """Same rule on the socket path: the Hub and Eye must not call a book fresh
+    when only one side arrived."""
+    from bot.eye import Eye
+    from bot.hub import Hub
+    from kcex.ws import DepthEvent
+
+    hub = Hub()
+    hub.apply(DepthEvent(bid=None, ask=82_001.0, symbol="BTC_USDT"))
+    assert hub.depth_ts_ms == 0
+
+    eye = Eye(Mock(), Settings.from_env())
+    eye.apply_ws_price(80_000.0, bid=None, ask=82_001.0)
+    assert eye.depth_update_ms == 0
+    assert eye._depth_stale() is True

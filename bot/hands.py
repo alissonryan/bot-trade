@@ -856,20 +856,25 @@ class LiveHands:
                     f"sell failed and the balance is not a finite number; the {qty_s} BTC "
                     "position size cannot be established"
                 ) from exc
-            remaining = max(0.0, qty - max(sold, 0.0))
-            if sold > self.tol:
+            # Book and shrink by the SAME quantised figure. Using `> tol` for
+            # the booking while shrinking unconditionally lost exactly one lot:
+            # 0.00025 -> 0.00024 lands at 9.999999999999999e-06, just under the
+            # tolerance, so no fill was written while the row still shrank.
+            sold_q = _floor_qty(max(sold, 0.0), self.qty_scale)
+            remaining = max(0.0, qty - sold_q)
+            if sold_q > 0:
                 # Book the BTC that actually left BEFORE shrinking the row.
                 # Without this the ledger silently loses that PnL forever:
                 # day-loss, the post-loss cooldown and the journal would all
                 # stop seeing a loss that really happened.
                 log.warning(
                     "sell failed but %.8f of %.8f BTC actually sold; booking the partial "
-                    "and protecting only the remainder", sold, qty,
+                    "and protecting only the remainder", sold_q, qty,
                 )
                 price, source = self._fill_price("", default=snap.bid or snap.last)
                 self.store.add_fill(
-                    self.today(), (price - self.position.entry) * sold, side="SELL",
-                    qty=sold, price=price, fee=0.0, order_id=None,
+                    self.today(), (price - self.position.entry) * sold_q, side="SELL",
+                    qty=sold_q, price=price, fee=0.0, order_id=None,
                     source=f"partial_{exit_reason or source}",
                 )
             self.position.qty = remaining

@@ -169,3 +169,28 @@ def test_a_refused_open_leaves_the_file_untouched(tmp_path):
     with pytest.raises(StoreIdentityMismatch):
         Store(path, mode="live")
     assert path.read_bytes() == before
+
+
+def test_a_refused_legacy_open_creates_no_table_at_all(tmp_path):
+    """The earlier byte-identical test used a file that already had `kv`, so it
+    missed this: bootstrapping `kv` to read the stamp is itself a write on a
+    legacy database that never had one."""
+    import sqlite3
+    path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE audit (id INTEGER PRIMARY KEY)")
+    conn.execute("INSERT INTO audit VALUES (1)")
+    conn.commit()
+    conn.close()
+
+    def tables():
+        c = sqlite3.connect(path)
+        names = sorted(r[0] for r in c.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"))
+        c.close()
+        return names
+
+    before = tables()
+    with pytest.raises(StoreIdentityMismatch):
+        Store(path, mode="live")
+    assert tables() == before
