@@ -85,7 +85,7 @@ def test_journal_budget_skip_is_audited_after_decision_and_execution(tmp_path):
     from bot.brain import reflect_result
     settings = _settings(mode="paper", journal_enabled=True, llm_fallback_cost_usd=.02,
                          llm_model="test", openrouter_api_key="test")
-    store = Store(tmp_path / "journal-cycle.db")
+    store = Store(tmp_path / "journal-cycle.db", mode='paper')
     jid = store.journal_begin(TradeIntent("BUY", 1, "old thesis", "range"), {}, decision_ms=0)
     store.journal_resolve(jid, {"kind": "closed", "realized_pnl_usdt": 1}, known_ms=1)
     hands = PaperHands(settings, store)
@@ -112,7 +112,7 @@ def test_journal_budget_skip_is_audited_after_decision_and_execution(tmp_path):
 def test_journal_known_unexecuted_paper_buy_has_no_return(tmp_path):
     settings = _settings(mode='paper', journal_enabled=True, paper_starting_usdt=20,
                          max_portfolio_pct=1, paper_slippage_bps=500)
-    store = Store(tmp_path / 'cash.db')
+    store = Store(tmp_path / 'cash.db', mode='paper')
     hands = PaperHands(settings, store)
     _, _, gate = run_once(settings=settings, eye=FakeEye(), store=store, client=NoClient(), hands=hands,  # type: ignore[arg-type]
                          budget=Budget(0,2,''), last_llm_ms=0, last_px=0,
@@ -127,7 +127,7 @@ def test_journal_known_unexecuted_paper_buy_has_no_return(tmp_path):
 
 def test_journal_write_failure_does_not_attach_trade_to_old_ambiguous_buy(tmp_path, monkeypatch):
     settings = _settings(mode='paper', journal_enabled=True)
-    store = Store(tmp_path / 'orphan.db')
+    store = Store(tmp_path / 'orphan.db', mode='paper')
     old = store.journal_begin(TradeIntent('BUY',1,'ambiguous','range'),{},decision_ms=0,track_entry=True)
     monkeypatch.setattr('bot.cycle.record_decision',Mock(side_effect=ValueError('journal unavailable')))
     hands = PaperHands(settings,store)
@@ -153,7 +153,7 @@ def test_cooldown_survives_process_restart(tmp_path, monkeypatch):
     exited = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
     monkeypatch.setattr("bot.cycle.time.time", lambda: exited + 60)
     settings = _settings(mode="paper", cooldown_minutes=30)
-    store = Store(path)
+    store = Store(path, mode='paper')
     hands = PaperHands(settings, store)
     _, _, gate = run_once(
         settings=settings, eye=FakeEye(), store=store, client=NoClient(), hands=hands,  # type: ignore[arg-type]
@@ -168,7 +168,7 @@ def test_cooldown_survives_process_restart(tmp_path, monkeypatch):
 @pytest.mark.parametrize("action,minutes", [("SELL", 30), ("BUY", 0)])
 def test_exit_and_optout_never_query_cooldown_store(tmp_path, action, minutes):
     settings = _settings(mode="paper", cooldown_minutes=minutes)
-    store = Store(tmp_path / "skip.db")
+    store = Store(tmp_path / "skip.db", mode='paper')
     store.last_loss_exit_ms = Mock(side_effect=AssertionError("must not query cooldown"))
     hands = PaperHands(settings, store)
     eye = FakeEye()
@@ -189,7 +189,7 @@ def test_real_losing_paper_exit_arms_next_cycle_cooldown(tmp_path, exit_type, mo
     settings = _settings(mode="paper", cooldown_minutes=30,
                          tp_atr_mult=2 if exit_type == "take_profit" else 0,
                          time_limit_minutes=30 if exit_type == "time_limit" else 0)
-    store = Store(tmp_path / "real-exit.db")
+    store = Store(tmp_path / "real-exit.db", mode='paper')
     hands = PaperHands(settings, store)
     eye = FakeEye()
     if exit_type == "time_limit":
@@ -219,7 +219,7 @@ def test_a_winning_take_profit_does_not_arm_the_cooldown(tmp_path):
     still prevent stacking, so nothing is left unguarded by allowing this.
     """
     settings = _settings(mode="paper", cooldown_minutes=30, tp_atr_mult=2)
-    store = Store(tmp_path / "win-exit.db")
+    store = Store(tmp_path / "win-exit.db", mode='paper')
     hands = PaperHands(settings, store)
     eye = FakeEye()
     hands.execute(GateResult(True, "ok_buy", "BUY", qty=".1", stop_price="90"), eye.snapshot())
@@ -244,7 +244,7 @@ def test_truncated_buy_below_minimum_never_reaches_exchange(tmp_path, cap, last,
     settings = _settings(mode="live", max_order_usdt=cap)
     eye = FakeEye(last=last)
     eye.rules = SymbolRules(qty_scale=5, min_amount=minimum)
-    store = Store(tmp_path / "c.db")
+    store = Store(tmp_path / "c.db", mode='live')
     client = Mock()
     client.balances.return_value = {"data": [{"currency": "BTC", "available": "0", "frozen": "0"}]}
     hands = LiveHands(settings, store, client, rules=eye.rules)
@@ -279,7 +279,7 @@ def test_run_once_polls_quotes_when_not_due(tmp_path):
 @pytest.mark.parametrize("is_due", [False, True])
 def test_barrier_tick_runs_before_llm_and_audits_without_reentry(tmp_path, mode, is_due):
     settings = _settings(mode=mode, tp_atr_mult=3)
-    store = Store(tmp_path / "barrier.db")
+    store = Store(tmp_path / "barrier.db", mode=mode)
     store.save_position(qty=.00025, entry=80000, stop_price=79200, entry_order_id="e", stop_order_id="s", take_profit_price=81200)
     client = Mock()
     eye = FakeEye(last=81201)
@@ -306,7 +306,7 @@ def test_barrier_tick_runs_before_llm_and_audits_without_reentry(tmp_path, mode,
 
 def test_live_barrier_halt_not_masked_by_audit_outage(tmp_path):
     settings = _settings(mode="live", tp_atr_mult=3)
-    store = Store(tmp_path / "barrier.db")
+    store = Store(tmp_path / "barrier.db", mode='live')
     hands = LiveHands(settings, store, Mock())
     def fail(*args, **kwargs):
         hands.last_mark_reason = "take_profit"
@@ -321,7 +321,7 @@ def test_live_barrier_halt_not_masked_by_audit_outage(tmp_path):
 @pytest.mark.parametrize("is_due", [False, True])
 def test_opt_out_preserves_pre_p1_paper_stop_scheduling(tmp_path, is_due):
     settings = _settings(mode="paper", tp_atr_mult=0, time_limit_minutes=0)
-    store = Store(tmp_path / "opt-out.db")
+    store = Store(tmp_path / "opt-out.db", mode='paper')
     store.save_position(qty=.00025, entry=80000, stop_price=79200, entry_order_id="e", stop_order_id="s")
     hands = PaperHands(settings, store)
     thinker = Mock(return_value=ThinkResult(TradeIntent("HOLD", 0, "fixed", "range"), "ok"))
@@ -336,7 +336,7 @@ def test_opt_out_preserves_pre_p1_paper_stop_scheduling(tmp_path, is_due):
 
 def test_opt_out_preserves_pre_p1_live_idle_no_mark(tmp_path):
     settings = _settings(mode="live", tp_atr_mult=0, time_limit_minutes=0)
-    store = Store(tmp_path / "opt-out.db")
+    store = Store(tmp_path / "opt-out.db", mode='live')
     client = Mock()
     hands = LiveHands(settings, store, client)
     hands.mark = Mock(side_effect=AssertionError("opt-out live tick must not change behavior"))
@@ -411,7 +411,7 @@ def test_exec_error_is_audited_then_raised(tmp_path):
 def test_live_dead_session_raises_before_thinking(tmp_path):
     s = _settings(mode="live")
     eye = FakeEye()
-    store = Store(tmp_path / "c.db")
+    store = Store(tmp_path / "c.db", mode='live')
 
     class DeadClient:
         def user_info(self):
@@ -436,7 +436,7 @@ def test_live_dead_session_raises_before_thinking(tmp_path):
 def test_live_reconcile_runs_every_llm_cycle(tmp_path):
     s = _settings(mode="live", openrouter_api_key="", llm_model="")
     eye = FakeEye()
-    store = Store(tmp_path / "c.db")
+    store = Store(tmp_path / "c.db", mode='live')
 
     class OkClient:
         def user_info(self):
@@ -480,7 +480,7 @@ def test_audit_failure_does_not_swallow_the_unprotected_halt(tmp_path):
     `except Exception` branch, backs off and keeps trading instead of halting
     with EXIT_UNPROTECTED -- the exact failure the invariant exists to catch."""
     s = _settings(mode="paper")
-    store = Store(tmp_path / "c.db")
+    store = Store(tmp_path / "c.db", mode='paper')
     eye = FakeEye()
 
     class BoomHands(PaperHands):

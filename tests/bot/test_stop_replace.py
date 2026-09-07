@@ -63,7 +63,7 @@ def snap():
 
 
 def setup(tmp_path):
-    store = Store(tmp_path / "bot.db")
+    store = Store(tmp_path / "bot.db", mode="live")
     store.remember_order("old")
     store.save_position(qty=QTY, entry=80000, stop_price=79200, entry_order_id="entry",
                         stop_order_id="old", btc_before=BASE, opened_ts="2026-09-01T00:00:00+00:00")
@@ -87,7 +87,7 @@ def test_cancel_ok_proven_replace_rejection_flattens(tmp_path):
 
 def restart(store, client, hands):
     store._conn.close()
-    return LiveHands(hands.settings, Store(store.path), client, sleep=lambda _: None)
+    return LiveHands(hands.settings, Store(store.path, mode="live"), client, sleep=lambda _: None)
 
 
 def test_replacement_and_flatten_failure_stays_halted_after_restart(tmp_path):
@@ -276,7 +276,7 @@ if sys.argv[2] == 'cancel':
     client.cancel_order = crash
 else:
     client.place_trigger = crash
-hands = LiveHands(replace(Settings.from_env(), mode='live'), Store(Path(sys.argv[1])), client)
+hands = LiveHands(replace(Settings.from_env(), mode='live'), Store(Path(sys.argv[1]), mode="live"), client)
 hands.replace_stop(80000, snap())
 """
     root = Path(__file__).resolve().parents[2]
@@ -284,7 +284,7 @@ hands.replace_stop(80000, snap())
     result = subprocess.run([sys.executable, "-c", script, str(store.path), stage], cwd=root,
                             capture_output=True, text=True, timeout=20)
     assert result.returncode == 23, result.stderr
-    reopened = Store(store.path)
+    reopened = Store(store.path, mode="live")
     assert json.loads(reopened.kv_get("stop_replacement"))["phase"] == stage
     # Synthetic exchange truth: the cancelled id is absent after the process died.
     client.ids.remove("old")

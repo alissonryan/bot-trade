@@ -121,3 +121,51 @@ def test_live_hands_accepts_a_genuine_live_position(tmp_path):
                         state="OPEN", entry_source="live")
     hands = LiveHands(replace(Settings.from_env(), mode="live"), store, Mock(), rules=None)
     assert hands.position.qty == 0.00025
+
+
+# --- the bypasses the first version of this guard left open -------------------
+# Layer 3 originally inspected only the position row, so an EMPTY database had
+# nothing to inspect and live hands attached to a paper store happily traded.
+
+def test_live_hands_refuse_a_paper_stamped_store_even_when_empty(tmp_path):
+    from unittest.mock import Mock
+    from dataclasses import replace
+    from bot.hands import LiveHands
+    from bot.settings import Settings
+
+    store = Store(tmp_path / "paper.db", mode="paper")  # no rows at all
+    with pytest.raises(StoreIdentityMismatch, match="live"):
+        LiveHands(replace(Settings.from_env(), mode="live"), store, Mock(), rules=None)
+
+
+def test_live_hands_refuse_a_store_with_no_identity(tmp_path):
+    from unittest.mock import Mock
+    from dataclasses import replace
+    from bot.hands import LiveHands
+    from bot.settings import Settings
+
+    store = Store(tmp_path / "anon.db")  # mode=None bypassed layer 2 entirely
+    with pytest.raises(StoreIdentityMismatch, match="live"):
+        LiveHands(replace(Settings.from_env(), mode="live"), store, Mock(), rules=None)
+
+
+def test_kv_only_paper_state_is_not_adopted_as_live(tmp_path):
+    """`paper_cash` alone is unambiguous paper state; the first `_has_history`
+    looked at position/fills/bot_orders/audit and missed kv and journal."""
+    path = tmp_path / "legacy.db"
+    legacy = Store(path)
+    legacy.kv_set("paper_cash", "450.0")
+    legacy.close()
+    with pytest.raises(StoreIdentityMismatch):
+        Store(path, mode="live")
+
+
+def test_a_refused_open_leaves_the_file_untouched(tmp_path):
+    """Identity is settled before any schema work: creating tables or running
+    forward migrations on another mode's database is already a write."""
+    path = tmp_path / "paper.db"
+    Store(path, mode="paper").close()
+    before = path.read_bytes()
+    with pytest.raises(StoreIdentityMismatch):
+        Store(path, mode="live")
+    assert path.read_bytes() == before

@@ -19,7 +19,7 @@ from test_hands_live import FakeClient, _hands, _open_position, _buy_gate, _snap
                                   KcexError("server error", http_status=503),
                                   KcexError("business status", {"status": 406}, http_status=200)])
 def test_lost_stop_response_never_reposts_or_sells_after_restart(tmp_path, error):
-    store = Store(tmp_path / "p7.db")
+    store = Store(tmp_path / "p7.db", mode="live")
     _open_position(store)
     def timeout():
         raise error
@@ -30,7 +30,7 @@ def test_lost_stop_response_never_reposts_or_sells_after_restart(tmp_path, error
     assert [c[0] for c in client.calls] == ["trigger"]
     assert store.load_position()["state"] == "UNPROTECTED"
     store._conn.close()
-    recovered = _hands(Store(store.path), client)
+    recovered = _hands(Store(store.path, mode="live"), client)
     with pytest.raises(UnprotectedPosition):
         recovered.reconcile()
     with pytest.raises(UnprotectedPosition):
@@ -41,7 +41,7 @@ def test_lost_stop_response_never_reposts_or_sells_after_restart(tmp_path, error
 
 @pytest.mark.parametrize("path", ["buy", "restore_sell", "reconcile"])
 def test_each_stop_caller_halts_on_ambiguity(tmp_path, path):
-    store = Store(tmp_path / "p7.db")
+    store = Store(tmp_path / "p7.db", mode="live")
     if path != "buy":
         _open_position(store)
     def timeout():
@@ -60,7 +60,7 @@ def test_each_stop_caller_halts_on_ambiguity(tmp_path, path):
     assert sum(c[0] == "market" and c[1]["side"] == "SELL" for c in client.calls) == (path == "restore_sell")
     before = list(client.calls)
     store._conn.close()
-    recovered = _hands(Store(store.path), client)
+    recovered = _hands(Store(store.path, mode="live"), client)
     from bot.cli import _loop
     assert _loop(True, recovered.settings, client, recovered.store, object(), recovered) == 2
     assert client.calls == before
@@ -68,7 +68,7 @@ def test_each_stop_caller_halts_on_ambiguity(tmp_path, path):
 
 @pytest.mark.parametrize("sell_fail", [False, True])
 def test_proven_stop_rejection_flattens_once_and_failed_flatten_halts(tmp_path, sell_fail):
-    store = Store(tmp_path / "p7.db")
+    store = Store(tmp_path / "p7.db", mode="live")
     balances = [FOREIGN_BTC, FOREIGN_BTC + .00025, FOREIGN_BTC + .00025]
     if not sell_fail:
         balances.append(FOREIGN_BTC)
@@ -79,7 +79,7 @@ def test_proven_stop_rejection_flattens_once_and_failed_flatten_halts(tmp_path, 
             hands.execute(_buy_gate(), _snap())
         from bot.cli import _loop
         store._conn.close()
-        recovered = _hands(Store(store.path), client)
+        recovered = _hands(Store(store.path, mode="live"), client)
         assert _loop(True, recovered.settings, client, recovered.store, object(), recovered) == 2
     else:
         assert not hands.execute(_buy_gate(), _snap()).is_open()
@@ -108,7 +108,7 @@ def test_no_write_or_write_helper_inside_any_hands_loop():
 
 @pytest.mark.parametrize("payload", [{}, {"data": None}, {"data": {"id": "unexpected"}}])
 def test_malformed_stop_success_never_clears_submission_latch(tmp_path, payload):
-    store = Store(tmp_path / "p7.db")
+    store = Store(tmp_path / "p7.db", mode="live")
     _open_position(store)
     client = FakeClient(btc=[FOREIGN_BTC + .00025])
     def malformed(**kwargs):
@@ -124,7 +124,7 @@ def test_malformed_stop_success_never_clears_submission_latch(tmp_path, payload)
 
 
 def test_stop_id_persistence_failure_is_fatal_and_latched(tmp_path):
-    store = Store(tmp_path / "p7.db")
+    store = Store(tmp_path / "p7.db", mode="live")
     _open_position(store)
     def unavailable(order_id):
         raise RuntimeError("disk failed after acceptance")
@@ -139,7 +139,7 @@ def test_stop_id_persistence_failure_is_fatal_and_latched(tmp_path):
 
 
 def test_hard_process_crash_leaves_stop_submission_latched(tmp_path):
-    store = Store(tmp_path / "p7.db")
+    store = Store(tmp_path / "p7.db", mode="live")
     _open_position(store)
     store._conn.close()
     root = Path(__file__).resolve().parents[2]
@@ -151,13 +151,13 @@ from bot.store import Store
 def crash():
     os._exit(23)
 client = FakeClient(btc=[FOREIGN_BTC + .00025], on_trigger=crash)
-_hands(Store(Path(sys.argv[1])), client)._place_stop('0.00025', 79200)
+_hands(Store(Path(sys.argv[1]), mode="live"), client)._place_stop('0.00025', 79200)
 """
     result = subprocess.run([sys.executable, "-c", script, str(store.path)], cwd=root,
                             capture_output=True, text=True, timeout=20)
     assert result.returncode == 23, result.stderr
     client = FakeClient(btc=[FOREIGN_BTC + .00025])
-    recovered = _hands(Store(store.path), client)
+    recovered = _hands(Store(store.path, mode="live"), client)
     from bot.cli import _loop
     assert _loop(True, recovered.settings, client, recovered.store, object(), recovered) == 2
     assert client.calls == []
@@ -175,7 +175,7 @@ def test_real_transport_provenance_controls_entry_fallback(tmp_path, status, bus
             self.calls += 1
             return Response()
     transport = Transport()
-    store = Store(tmp_path / "p7.db")
+    store = Store(tmp_path / "p7.db", mode="live")
     client = FakeClient(btc=[FOREIGN_BTC, FOREIGN_BTC + .00025, FOREIGN_BTC + .00025, FOREIGN_BTC])
     client.place_trigger = KcexClient(token="", session=transport).place_trigger
     hands = _hands(store, client)
@@ -189,7 +189,7 @@ def test_real_transport_provenance_controls_entry_fallback(tmp_path, status, bus
 
 
 def test_rejection_state_write_failure_cannot_replace_fatal_exit(tmp_path):
-    store = Store(tmp_path / "p7.db")
+    store = Store(tmp_path / "p7.db", mode="live")
     _open_position(store)
     client = FakeClient(btc=[FOREIGN_BTC + .00025], trigger_fail=1)
     hands = _hands(store, client)
@@ -207,7 +207,7 @@ def test_rejection_state_write_failure_cannot_replace_fatal_exit(tmp_path):
 
 @pytest.mark.parametrize("path", ["restore_sell", "reconcile"])
 def test_proven_rejection_in_recovery_never_starts_another_sell(tmp_path, path):
-    store = Store(tmp_path / "p7.db")
+    store = Store(tmp_path / "p7.db", mode="live")
     _open_position(store)
     client = FakeClient(btc=[FOREIGN_BTC + .00025], open_ids=[set()], trigger_fail=1,
                         sell_fail=path == "restore_sell")
@@ -220,7 +220,7 @@ def test_proven_rejection_in_recovery_never_starts_another_sell(tmp_path, path):
     before = list(client.calls)
     store._conn.close()
     with pytest.raises(UnprotectedPosition):
-        _hands(Store(store.path), client).reconcile()
+        _hands(Store(store.path, mode="live"), client).reconcile()
     assert client.calls == before
     assert sum(c[0] == "trigger" for c in client.calls) == 1
     assert sum(c[0] == "market" and c[1]["side"] == "SELL" for c in client.calls) == (path == "restore_sell")
@@ -228,7 +228,7 @@ def test_proven_rejection_in_recovery_never_starts_another_sell(tmp_path, path):
 
 @pytest.mark.parametrize("stage", ["persist_success", "clear_success", "clear_after_flatten"])
 def test_completion_storage_fault_keeps_latch_and_fatal_exit(tmp_path, stage):
-    store = Store(tmp_path / "p7.db")
+    store = Store(tmp_path / "p7.db", mode="live")
     client = FakeClient(btc=[FOREIGN_BTC, FOREIGN_BTC + .00025, FOREIGN_BTC + .00025, FOREIGN_BTC],
                         trigger_fail=int(stage == "clear_after_flatten"))
     hands = _hands(store, client)
@@ -251,7 +251,7 @@ def test_completion_storage_fault_keeps_latch_and_fatal_exit(tmp_path, stage):
     before = list(client.calls)
     store._conn.close()
     with pytest.raises(UnprotectedPosition):
-        _hands(Store(store.path), client).reconcile()
+        _hands(Store(store.path, mode="live"), client).reconcile()
     assert client.calls == before
     assert sum(c[0] == "trigger" for c in client.calls) == 1
     assert sum(c[0] == "market" and c[1]["side"] == "SELL" for c in client.calls) == (stage == "clear_after_flatten")

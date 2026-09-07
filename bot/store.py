@@ -72,6 +72,16 @@ class Store:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.path)
+        # Identity is settled BEFORE any schema work. A refused open must leave
+        # the file exactly as it was found: creating tables or running forward
+        # migrations on another mode's database is already a write.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)"
+        )
+        self._conn.commit()
+        self.mode = mode
+        if mode is not None:
+            self._claim_mode(mode)
         self._conn.execute(
             """CREATE TABLE IF NOT EXISTS audit (
                 id INTEGER PRIMARY KEY,
@@ -108,8 +118,8 @@ class Store:
         self._conn.execute("CREATE TABLE IF NOT EXISTS journal (id INTEGER PRIMARY KEY)")
         self._migrate()
         self._conn.commit()
-        if mode is not None:
-            self._claim_mode(mode)
+        if mode is None:
+            self.mode = self.kv_get(MODE_KEY)
 
     def _claim_mode(self, mode: str) -> None:
         """Stamp the owning mode, or refuse a database another mode wrote.
@@ -137,7 +147,12 @@ class Store:
         self.kv_set(MODE_KEY, mode)
 
     def _has_history(self) -> bool:
-        for table in ("position", "fills", "bot_orders", "audit"):
+        """Any trace at all, including kv and the journal.
+
+        A paper database can carry nothing but `paper_cash` and journal rows;
+        skipping those tables let exactly that file be adopted as live.
+        """
+        for table in ("position", "fills", "bot_orders", "audit", "journal", "kv"):
             try:
                 if self._conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
                     return True

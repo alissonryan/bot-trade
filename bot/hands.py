@@ -320,9 +320,24 @@ class LiveHands:
         self.rules = rules
         self._sleep = sleep
         self.position, self.entry_order_id, self.stop_order_id = _load(store)
+        self._require_live_store()
         self._reject_paper_provenance()
         self._exit_hint: float | None = None
         self.last_mark_reason: str | None = None
+
+    def _require_live_store(self) -> None:
+        """The store itself must be a live store, not merely row-clean.
+
+        Checking only the position row left the hole open on an EMPTY database:
+        a paper-stamped or unidentified store has no row to look at, so live
+        hands attached to it happily sent a real market order and a trigger.
+        The mode of the file is the fact; the row is only corroboration.
+        """
+        if getattr(self.store, "mode", None) != "live":
+            raise StoreIdentityMismatch(
+                f"live hands require a store opened as 'live'; got "
+                f"{getattr(self.store, 'mode', None)!r} for {self.store.path}"
+            )
 
     def _reject_paper_provenance(self) -> None:
         """Never adopt a simulated position as a real one.
