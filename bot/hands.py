@@ -32,7 +32,7 @@ from typing import Any, Callable, NoReturn
 
 from bot.collar import stop_for_entry, take_profit_for_entry
 from bot.settings import Settings
-from bot.store import Store
+from bot.store import Store, StoreIdentityMismatch
 from bot.types import GateResult, Snapshot, SymbolRules
 from kcex.client import KcexClient, KcexError
 from kcex.orders import complete_open_order_ids
@@ -308,8 +308,32 @@ class LiveHands:
         self.rules = rules
         self._sleep = sleep
         self.position, self.entry_order_id, self.stop_order_id = _load(store)
+        self._reject_paper_provenance()
         self._exit_hint: float | None = None
         self.last_mark_reason: str | None = None
+
+    def _reject_paper_provenance(self) -> None:
+        """Never adopt a simulated position as a real one.
+
+        The database is already separated by mode and stamped, but this row is
+        what `reconcile()` sizes a resident stop from. If anything about it says
+        paper, the honest move is to stop and make a human look: the account
+        holds the owner's own BTC, and a trigger sized from a position the bot
+        never bought would sit on top of their coins.
+        """
+        if not self.position.is_open() and not self.entry_order_id and not self.stop_order_id:
+            return
+        marks = {
+            "entry_source": self.position.entry_source,
+            "entry_order_id": self.entry_order_id,
+            "stop_order_id": self.stop_order_id,
+        }
+        tainted = {k: v for k, v in marks.items() if isinstance(v, str) and v.startswith("paper")}
+        if tainted:
+            raise StoreIdentityMismatch(
+                f"live hands refuse a position carrying paper provenance {tainted}; "
+                "square the account by hand and clear the row before trading live"
+            )
 
     # -- helpers ----------------------------------------------------------------
 

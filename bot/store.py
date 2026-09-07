@@ -18,6 +18,16 @@ from typing import Any
 from bot.types import GateResult, TradeIntent
 
 POSITION_STATES = ("PENDING", "OPEN", "UNPROTECTED", "CLOSING")
+MODE_KEY = "store_mode"
+
+
+class StoreIdentityMismatch(RuntimeError):
+    """The database was not written by the mode now trying to open it.
+
+    Adopting paper state in live sizes a real order from a position the bot
+    never bought. Refusing costs one manual inspection, so this always fails
+    closed and never migrates a database from one mode to the other.
+    """
 JOURNAL_ENTRY_KEY = "journal_active_entry"
 log = logging.getLogger(__name__)
 _JOURNAL_COLUMNS = (
@@ -58,7 +68,7 @@ def _iso_ms(value: str) -> int:
 
 
 class Store:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, mode: str | None = None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.path)
@@ -98,6 +108,45 @@ class Store:
         self._conn.execute("CREATE TABLE IF NOT EXISTS journal (id INTEGER PRIMARY KEY)")
         self._migrate()
         self._conn.commit()
+        if mode is not None:
+            self._claim_mode(mode)
+
+    def _claim_mode(self, mode: str) -> None:
+        """Stamp the owning mode, or refuse a database another mode wrote.
+
+        An unstamped file predates this check, so nothing in it proves who
+        wrote it. Paper may adopt one -- being wrong there costs a simulated
+        number. Live may not: being wrong there sends a real order sized from
+        a position that may never have existed.
+        """
+        stored = self.kv_get(MODE_KEY)
+        if stored == mode:
+            return
+        if stored is not None:
+            raise StoreIdentityMismatch(
+                f"{self.path} was written in {stored!r} mode and cannot be opened as "
+                f"{mode!r}. Point this mode at its own database instead of migrating "
+                "state between them."
+            )
+        if mode != "paper" and self._has_history():
+            raise StoreIdentityMismatch(
+                f"{self.path} is unstamped and already carries rows, so nothing proves "
+                f"it is not paper state; refusing to adopt it as {mode!r}. Start "
+                f"{mode!r} on an empty database, or inspect and stamp this one by hand."
+            )
+        self.kv_set(MODE_KEY, mode)
+
+    def _has_history(self) -> bool:
+        for table in ("position", "fills", "bot_orders", "audit"):
+            try:
+                if self._conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone():
+                    return True
+            except sqlite3.Error:  # table absent on a very old file
+                continue
+        return False
+
+    def close(self) -> None:
+        self._conn.close()
 
     # -- schema -----------------------------------------------------------------
 
