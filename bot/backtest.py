@@ -229,7 +229,7 @@ def replay(history: list[Bar], settings: Settings, policy, *, rules: SymbolRules
     cash = settings.paper_starting_usdt
     qty = entry = stop = entry_fee = 0.0
     entry_t = 0
-    last_exit_ms = None
+    last_loss_exit_ms = None
     target = None
     last_action = None
     day = ""
@@ -245,11 +245,14 @@ def replay(history: list[Bar], settings: Settings, policy, *, rules: SymbolRules
     sell_factor = (1 - spread_bps / 20000) * (1 - slippage_bps / 10000)
 
     def close(mid, t, reason, *, cooldown_t=None):
-        nonlocal cash, qty, entry, stop, cost, day_pnl, entry_fee, target, last_exit_ms
-        last_exit_ms = (t if cooldown_t is None else cooldown_t) * 1000
+        nonlocal cash, qty, entry, stop, cost, day_pnl, entry_fee, target, last_loss_exit_ms
+        exit_ms = (t if cooldown_t is None else cooldown_t) * 1000
         price = mid * sell_factor
         fee = qty * price * rules.taker_fee
         pnl = qty * (price - entry) - entry_fee - fee
+        if pnl < 0:
+            # Only a loss arms the cooldown; a win must not cut a continuation.
+            last_loss_exit_ms = exit_ms
         cash += qty * price - fee
         cost += qty * (mid - price) + fee
         day_pnl += pnl
@@ -258,7 +261,7 @@ def replay(history: list[Bar], settings: Settings, policy, *, rules: SymbolRules
         if journal:
             journal.add_fill(day, pnl, ts=datetime.fromtimestamp(t, timezone.utc).isoformat(),
                              side="SELL", qty=qty, price=price, fee=fee, source=reason,
-                             known_ms=last_exit_ms)
+                             known_ms=exit_ms)
         qty = entry = stop = entry_fee = 0.0
         target = None
 
@@ -291,7 +294,7 @@ def replay(history: list[Bar], settings: Settings, policy, *, rules: SymbolRules
         intent = result.intent or TradeIntent("HOLD", 0, result.reason, "unknown")
         gate = decide(intent, snap, settings, session_ok=True, day_pnl_usdt=day_pnl,
                       unrealized_pnl_usdt=qty * (snap.bid - entry), rules=rules,
-                      last_exit_ms=last_exit_ms, now_ms=bar.t * 1000)
+                      last_loss_exit_ms=last_loss_exit_ms, now_ms=bar.t * 1000)
         if barrier:
             gate = GateResult(False, barrier, "HOLD")
         if journal:

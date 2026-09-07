@@ -56,6 +56,9 @@ def test_replay_cooldown_uses_exit_time_and_preserves_sells(exit_type):
         history[22] = Bar(history[22].t, 100, 101, 95, 100)
     else:
         actions[1] = "SELL"
+        # The cooldown only arms on a LOSS, so the discretionary exit has to be
+        # one. A flat book would settle at breakeven and correctly not arm it.
+        history[22] = Bar(history[22].t, 99, 99.5, 98.5, 99)
     s = replace(Settings.from_env(), mode="paper", cooldown_minutes=30,
                 tp_atr_mult=0, time_limit_minutes=0)
     intents = [{"action": action, "confidence": 1, "reason": "fixed", "regime": "range"}

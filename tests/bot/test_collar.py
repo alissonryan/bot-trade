@@ -55,7 +55,7 @@ def test_cooldown_blocks_only_buy_until_exact_expiry():
     settings = _settings(cooldown_minutes=30)
     for now, expected in [(1_799_999, False), (1_800_000, True)]:
         gate = decide(TradeIntent("BUY", 1, "go", "range"), _snap(), settings,
-                      session_ok=True, day_pnl_usdt=0, last_exit_ms=0, now_ms=now)
+                      session_ok=True, day_pnl_usdt=0, last_loss_exit_ms=0, now_ms=now)
         assert gate.ok is expected
         assert gate.rule == ("ok_buy" if expected else "cooldown")
         assert gate.action == "BUY"
@@ -65,7 +65,7 @@ def test_cooldown_never_blocks_sell_even_with_entry_halts():
     gate = decide(TradeIntent("SELL", 0, "exit", "range"),
                   _snap(bot_qty=.001, stale=True),
                   _settings(cooldown_minutes=30, min_confidence=1),
-                  session_ok=True, day_pnl_usdt=-100, last_exit_ms=100, now_ms=101)
+                  session_ok=True, day_pnl_usdt=-100, last_loss_exit_ms=100, now_ms=101)
     assert gate.ok and gate.rule == "ok_close" and gate.action == "SELL"
 
 
@@ -78,7 +78,7 @@ def test_cooldown_never_blocks_sell_even_with_entry_halts():
 def test_cooldown_disabled_missing_exit_and_clock_edges(minutes, exited, now, rule):
     gate = decide(TradeIntent("BUY", 1, "go", "range"), _snap(),
                   _settings(cooldown_minutes=minutes), session_ok=True, day_pnl_usdt=0,
-                  last_exit_ms=exited, now_ms=now)
+                  last_loss_exit_ms=exited, now_ms=now)
     assert gate.rule == rule
 
 

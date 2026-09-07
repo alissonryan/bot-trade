@@ -150,8 +150,8 @@ def run_once(
         day_pnl_usdt=store.day_pnl(day),
         unrealized_pnl_usdt=unrealized_pnl(hands, snap.bid or snap.last),
         rules=getattr(eye, "rules", None),
-        last_exit_ms=(store.last_exit_ms()
-                      if settings.cooldown_minutes > 0 and intent.action == "BUY" else None),
+        last_loss_exit_ms=(store.last_loss_exit_ms()
+                           if settings.cooldown_minutes > 0 and intent.action == "BUY" else None),
         now_ms=int(time.time() * 1000) if settings.cooldown_minutes > 0 else None,
     )
 

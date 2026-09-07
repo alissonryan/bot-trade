@@ -55,7 +55,7 @@ def decide(
     day_pnl_usdt: float,
     unrealized_pnl_usdt: float = 0.0,
     rules: SymbolRules | None = None,
-    last_exit_ms: int | None = None,
+    last_loss_exit_ms: int | None = None,
     now_ms: int | None = None,
 ) -> GateResult:
     qty_scale = rules.qty_scale if rules else settings.qty_scale
@@ -108,10 +108,16 @@ def decide(
         return GateResult(False, "confidence", "BUY")
     if snap.bot_qty > 0:
         return GateResult(False, "already_long", "BUY")
-    # Only entries wait after a confirmed SELL. Wall-clock time comes from the
-    # caller, not a potentially stale quote; missing time fails closed for BUY.
-    if settings.cooldown_minutes > 0 and last_exit_ms is not None:
-        if now_ms is None or now_ms - last_exit_ms < settings.cooldown_minutes * 60_000:
+    # Only entries wait, and only after a LOSING exit. A profitable exit does
+    # not arm this: re-entering the same direction while the move continues is
+    # riding it, not revenge, and `already_long` plus the fresh-signal path
+    # already stop stacking. Blocking after a win only ever cancels profit --
+    # Rafael Vargas measured that cost on his own book and retired the
+    # post-any-exit form (Apex Brief v17, Rule 3: NO CHASING -> NO REVENGE).
+    # Wall-clock time comes from the caller, not a potentially stale quote;
+    # missing time fails closed for BUY.
+    if settings.cooldown_minutes > 0 and last_loss_exit_ms is not None:
+        if now_ms is None or now_ms - last_loss_exit_ms < settings.cooldown_minutes * 60_000:
             return GateResult(False, "cooldown", "BUY")
     if snap.atr is None or snap.atr <= 0 or snap.last <= 0:
         return GateResult(False, "atr", "BUY")

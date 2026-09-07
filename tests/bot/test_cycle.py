@@ -169,7 +169,7 @@ def test_cooldown_survives_process_restart(tmp_path, monkeypatch):
 def test_exit_and_optout_never_query_cooldown_store(tmp_path, action, minutes):
     settings = _settings(mode="paper", cooldown_minutes=minutes)
     store = Store(tmp_path / "skip.db")
-    store.last_exit_ms = Mock(side_effect=AssertionError("must not query cooldown"))
+    store.last_loss_exit_ms = Mock(side_effect=AssertionError("must not query cooldown"))
     hands = PaperHands(settings, store)
     eye = FakeEye()
     if action == "SELL":
@@ -180,11 +180,11 @@ def test_exit_and_optout_never_query_cooldown_store(tmp_path, action, minutes):
         think=lambda *args: ThinkResult(TradeIntent(action, 1, "go", "range"), "ok"),
     )
     assert gate is not None and gate.ok
-    store.last_exit_ms.assert_not_called()
+    store.last_loss_exit_ms.assert_not_called()
 
 
-@pytest.mark.parametrize("exit_type", ["llm_sell", "stop", "take_profit", "time_limit"])
-def test_real_paper_exit_arms_next_cycle_cooldown(tmp_path, exit_type, monkeypatch):
+@pytest.mark.parametrize("exit_type", ["llm_sell", "stop", "time_limit"])
+def test_real_losing_paper_exit_arms_next_cycle_cooldown(tmp_path, exit_type, monkeypatch):
     from datetime import datetime, timedelta, timezone
     settings = _settings(mode="paper", cooldown_minutes=30,
                          tp_atr_mult=2 if exit_type == "take_profit" else 0,
@@ -209,6 +209,31 @@ def test_real_paper_exit_arms_next_cycle_cooldown(tmp_path, exit_type, monkeypat
         think=lambda *args: ThinkResult(TradeIntent("BUY", 1, "go", "range"), "ok"),
     )
     assert gate is not None and gate.rule == "cooldown" and not gate.ok
+
+
+def test_a_winning_take_profit_does_not_arm_the_cooldown(tmp_path):
+    """The continuation case: a profitable exit must leave the next entry free.
+
+    Blocking here is what Rafael Vargas measured as pure lost profit and retired
+    (Apex Brief v17, Rule 3). `already_long` and the fresh-signal requirement
+    still prevent stacking, so nothing is left unguarded by allowing this.
+    """
+    settings = _settings(mode="paper", cooldown_minutes=30, tp_atr_mult=2)
+    store = Store(tmp_path / "win-exit.db")
+    hands = PaperHands(settings, store)
+    eye = FakeEye()
+    hands.execute(GateResult(True, "ok_buy", "BUY", qty=".1", stop_price="90"), eye.snapshot())
+    eye.last = 110  # target crossed: the exit books a profit
+    hands.mark(eye.snapshot(), now_ms=int(time.time() * 1000))
+    assert hands.position.qty == 0
+    booked = store.fills(1)[0]
+    assert booked["side"] == "SELL" and booked["pnl"] > 0, "this case must be a win"
+    _, _, gate = run_once(
+        settings=settings, eye=eye, store=store, client=NoClient(), hands=hands,  # type: ignore[arg-type]
+        budget=Budget(0, 2, ""), last_llm_ms=0, last_px=0,
+        think=lambda *args: ThinkResult(TradeIntent("BUY", 1, "go", "range"), "ok"),
+    )
+    assert gate is not None and gate.rule != "cooldown"
 
 
 @pytest.mark.parametrize("cap,last,minimum,rule", [

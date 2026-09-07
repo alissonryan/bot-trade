@@ -333,9 +333,22 @@ class Store:
         Reconciled exits are dated at observation, conservatively delaying entry.
         Legacy rows without a SELL timestamp cannot establish a cooldown age.
         """
-        row = self._conn.execute(
-            "SELECT ts FROM fills WHERE side='SELL' ORDER BY id DESC LIMIT 1"
-        ).fetchone()
+        return self._last_exit("SELECT ts FROM fills WHERE side='SELL' ORDER BY id DESC LIMIT 1")
+
+    def last_loss_exit_ms(self) -> int | None:
+        """Last *losing* bot SELL — the only exit that arms the cooldown.
+
+        A profitable exit does not start the clock: re-entering the same
+        direction while the move continues is riding it, not revenge, and every
+        entry still needs a fresh signal. Breakeven (``pnl >= 0``) is not a loss.
+        A later win never resets an armed clock, because the loss still happened.
+        """
+        return self._last_exit(
+            "SELECT ts FROM fills WHERE side='SELL' AND pnl < 0 ORDER BY id DESC LIMIT 1"
+        )
+
+    def _last_exit(self, sql: str) -> int | None:
+        row = self._conn.execute(sql).fetchone()
         if not row or not row[0]:
             return None
         dt = datetime.fromisoformat(row[0].replace("Z", "+00:00"))

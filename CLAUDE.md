@@ -66,7 +66,7 @@ TDD is mandatory for collar/hands changes. See AGENTS.md § P1 for the canonical
 
 ## P2 cooldown
 
-`COOLDOWN_MINUTES=0` is opt-out. Positive durations gate BUY only using the last persisted SELL fill and wall-clock decision time; SELL never queries cooldown history, and LLM scheduling is unchanged. No hands/live order changes. See AGENTS.md § P2 for restart, reconciliation, legacy timestamps, conservative intrabar replay timing, and the tiny-sample/no-evidence measurement limitation.
+`COOLDOWN_MINUTES=0` is opt-out. Positive durations gate BUY only, armed by the last persisted **losing** SELL fill (`pnl < 0`) and wall-clock decision time. A profitable exit does not arm it — blocking a continuation after a win only cancels profit, which is why Rafael Vargas retired the post-any-exit form (Apex Brief v17, Rule 3). SELL never queries cooldown history, and LLM scheduling is unchanged. No hands/live order changes. See AGENTS.md § P2 for restart, reconciliation, legacy timestamps, conservative intrabar replay timing, and the tiny-sample/no-evidence measurement limitation.
 
 ## P4 journal
 
