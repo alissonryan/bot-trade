@@ -7,6 +7,7 @@ bot in a position. Entries go through every check.
 
 from __future__ import annotations
 
+import math
 from decimal import Decimal, ROUND_DOWN
 
 from bot.settings import Settings
@@ -104,7 +105,12 @@ def decide(
     # decision, not a bug fix -- do not add it here without asking the owner.
     if day_pnl_usdt + unrealized_pnl_usdt <= -abs(settings.max_day_loss_usdt):
         return GateResult(False, "day_loss", "BUY")
-    if intent.confidence < settings.min_confidence:
+    # parse_intent() already rejects a non-finite confidence, but this gate is
+    # the last line of defense before an order is sized: every comparison
+    # against NaN/Infinity is False, so `confidence < min_confidence` alone
+    # would let a corrupted or directly-constructed intent through no matter
+    # how high MIN_CONFIDENCE is set.
+    if not math.isfinite(intent.confidence) or intent.confidence < settings.min_confidence:
         return GateResult(False, "confidence", "BUY")
     if snap.bot_qty > 0:
         return GateResult(False, "already_long", "BUY")

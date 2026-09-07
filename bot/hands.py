@@ -94,7 +94,8 @@ def local_exit_reason(pos: Position, snap: Snapshot, settings: Settings, now_ms:
         return None
     if not any(math.isfinite(p) and p > 0 for p in (snap.bid, snap.last)):
         return None
-    if settings.tp_atr_mult > 0 and pos.take_profit_price and not snap.stale and snap.bid >= pos.take_profit_price:
+    if (settings.tp_atr_mult > 0 and pos.take_profit_price and not snap.stale
+            and not snap.depth_stale and snap.bid >= pos.take_profit_price):
         return "take_profit"
     if settings.time_limit_minutes > 0 and pos.opened_ts:
         opened = datetime.fromisoformat(pos.opened_ts)
@@ -755,30 +756,63 @@ class LiveHands:
             )
         except Exception as exc:  # noqa: BLE001
             # The POST is never retried, so this may be a lost response for an
-            # order that actually executed. Re-read the balance before putting a
-            # stop back: a trigger for BTC we no longer own would sit on top of
-            # the owner's own coins and could freeze and sell them.
+            # order that actually executed -- fully, partially, or not at all.
+            # Re-read the balance before putting a stop back: a trigger sized
+            # for BTC we no longer fully own would sit on top of the owner's
+            # own coins and could freeze and sell them.
             log.error("sell failed: %s; re-reading the balance before restoring the stop", exc)
             try:
                 after = btc_total(self.client)
             except Exception as read_exc:  # noqa: BLE001
                 log.error("balance unreadable after the failed sell: %s", read_exc)
                 after = None
-            if after is not None and start - after >= qty - self.tol:
+            if after is None:
+                # No evidence of how much, if any, actually sold. Guessing
+                # here is exactly what places an oversized stop over BTC we
+                # no longer hold (or leaves BTC we still hold unprotected).
+                # Halt instead of guessing; no stop POST is sent.
+                self._persist("UNPROTECTED")
+                raise UnprotectedPosition(
+                    f"sell failed and the balance could not be read afterwards; "
+                    f"{qty_s} BTC position is of unknown remaining size and unprotected"
+                ) from exc
+
+            sold = start - after
+            if sold >= qty - self.tol:
                 log.warning("the sell had in fact executed; booking it instead of restoring a stop")
                 price, source = self._fill_price("", default=snap.bid or snap.last)
                 pnl = (price - self.position.entry) * qty
                 self.store.add_fill(self.today(), pnl, side="SELL", qty=qty, price=price, fee=0.0, order_id=None, source=exit_reason or f"recovered_{source}")
                 self._clear()
                 return self.position
-            stop_id = self._place_stop(qty_s, self.position.stop_price)
+            if sold < -self.tol:
+                # The account gained BTC while we thought we were selling --
+                # the numbers contradict each other and any stop size here
+                # would be a guess.
+                self._persist("UNPROTECTED")
+                raise UnprotectedPosition(
+                    f"sell failed and the balance moved the wrong way (start {start:.8f}, "
+                    f"after {after:.8f}); cannot establish the remaining {qty_s} BTC position"
+                ) from exc
+
+            # Partial fill (or nothing sold, when sold <= tol): protect only
+            # what we still actually hold, never the original full size.
+            remaining = max(0.0, qty - max(sold, 0.0))
+            if sold > self.tol:
+                log.warning(
+                    "sell failed but %.8f of %.8f BTC actually sold; protecting only "
+                    "the remaining amount, not the original size", sold, qty,
+                )
+            self.position.qty = remaining
+            remaining_s = _fmt_qty(remaining, self.qty_scale)
+            stop_id = self._place_stop(remaining_s, self.position.stop_price)
             if stop_id:
                 self.stop_order_id = stop_id
                 self.position.exit_reason = None
                 self._persist("OPEN")
                 return self.position
             self._persist("UNPROTECTED")
-            raise UnprotectedPosition(f"sell failed and stop could not be restored for {qty_s} BTC") from exc
+            raise UnprotectedPosition(f"sell failed and stop could not be restored for {remaining_s} BTC") from exc
 
         sell_id = self._order_id(resp)
         self.store.remember_order(sell_id)
@@ -873,6 +907,18 @@ class LiveHands:
             self._persist()
 
         if not holding and self.position.state == "PENDING":
+            # Balance math alone is not proof the entry is gone for good: an
+            # order that is STILL RESTING on the book can fill at any moment,
+            # and dropping the row now means a later fill leaves the bot
+            # holding real BTC with nothing tracking or protecting it.
+            # Invariant 2 requires proof it did not fill -- it was resting and
+            # got cancelled -- not merely "the balance has not moved yet".
+            if self.entry_order_id and self.entry_order_id in ids:
+                log.warning(
+                    "pending entry %s is still resting on the book; keeping PENDING "
+                    "for a later reconcile", self.entry_order_id,
+                )
+                return "entry_still_open"
             # The entry never actually filled (see _buy: the row is kept PENDING
             # whenever the fill could not be confirmed). There was no position, so
             # there is no exit to book -- inventing a SELL here would write a

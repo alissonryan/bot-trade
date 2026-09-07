@@ -303,6 +303,19 @@ def test_sell_long_closes_without_new_stop():
     assert r.stop_price is None
 
 
+@pytest.mark.parametrize("confidence", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_confidence_never_reaches_ok_buy(confidence):
+    # Defense in depth: even if a non-finite confidence somehow reaches the
+    # collar (parse_intent() should already reject it upstream), comparisons
+    # against NaN/Infinity are always False, so a bare `< min_confidence`
+    # check would approve the BUY no matter how high MIN_CONFIDENCE is set.
+    s = _settings(min_confidence=0.0)
+    gate = decide(TradeIntent("BUY", confidence, "x", "trend"), _snap(), s,
+                  session_ok=True, day_pnl_usdt=0.0)
+    assert gate.ok is False
+    assert gate.rule == "confidence"
+
+
 def test_low_confidence_blocks_buy_but_not_sell():
     s = _settings(min_confidence=0.6)
     buy = decide(TradeIntent("BUY", 0.4, "meh", "range"), _snap(), s, session_ok=True, day_pnl_usdt=0.0)

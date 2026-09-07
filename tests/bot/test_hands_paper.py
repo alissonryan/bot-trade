@@ -149,3 +149,37 @@ def test_opt_out_suspends_even_a_previously_persisted_local_target():
     from bot.hands import Position, local_exit_reason
     pos = Position(qty=1, entry=100, state="OPEN", take_profit_price=101)
     assert local_exit_reason(pos, _snap(last=103, bid=102), _settings(tp_atr_mult=0, time_limit_minutes=0), 1) is None
+
+
+def test_take_profit_never_fires_on_a_stale_depth_book():
+    """Snapshot.stale only tracks the ticker (`last`); the order book (bid/ask)
+    can freeze behind a healthy ticker (WS bookTicker down, REST depth top-up
+    failing) while target crossed at a bid that may no longer exist."""
+    from bot.hands import Position, local_exit_reason
+    pos = Position(qty=1, entry=100, state="OPEN", take_profit_price=101)
+    settings = _settings(tp_atr_mult=3, time_limit_minutes=0)
+    snap = _snap(last=103, bid=102)  # target crossed
+    snap.depth_stale = True
+    assert local_exit_reason(pos, snap, settings, 1) is None
+
+
+def test_time_limit_still_exits_on_a_stale_depth_book():
+    """Exits must never be blocked by staleness the same way entries are --
+    only the take_profit branch gains the freshness requirement; TTL must
+    keep firing on a stale-but-valid quote."""
+    from bot.hands import Position, local_exit_reason
+    pos = Position(qty=1, entry=100, state="OPEN", take_profit_price=101,
+                   opened_ts="2020-01-01T00:00:00+00:00")
+    settings = _settings(tp_atr_mult=3, time_limit_minutes=1)
+    snap = _snap(last=103, bid=102)  # target also crossed
+    snap.depth_stale = True
+    assert local_exit_reason(pos, snap, settings, 1_900_000_000_000) == "time_limit"
+
+
+def test_take_profit_fires_on_a_fresh_depth_book():
+    from bot.hands import Position, local_exit_reason
+    pos = Position(qty=1, entry=100, state="OPEN", take_profit_price=101)
+    settings = _settings(tp_atr_mult=3, time_limit_minutes=0)
+    snap = _snap(last=103, bid=102)
+    snap.depth_stale = False
+    assert local_exit_reason(pos, snap, settings, 1) == "take_profit"

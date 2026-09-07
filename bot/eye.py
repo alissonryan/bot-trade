@@ -336,6 +336,7 @@ class Eye:
             bot_avg_entry=self.bot_avg_entry,
             ws_ok=self.ws_ok,
             stale=self._stale(),
+            depth_stale=self._depth_stale(),
             last_intent_action=self.last_intent_action,
             last_bot_pnl_usdt=self.last_bot_pnl_usdt,
         )

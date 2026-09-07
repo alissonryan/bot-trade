@@ -166,6 +166,12 @@ def replay_snapshot(
     eye = Eye(KcexClient(token=""), settings, bot_qty=qty, bot_avg_entry=entry)  # no I/O methods called
     eye._now_ms = lambda: t * 1000
     eye.last_update_ms = t * 1000
+    # bid/ask below are derived synthetically from `price` at this same `t`,
+    # so the replayed book is fresh by construction -- depth_update_ms must
+    # say so, or every replayed snapshot reads as permanently depth-stale
+    # (Eye defaults depth_update_ms to 0 == stale) and take_profit could
+    # never fire in the backtest.
+    eye.depth_update_ms = t * 1000
     eye.last = price
     eye.bid = price * (1 - spread_bps / 20000)
     eye.ask = price * (1 + spread_bps / 20000)

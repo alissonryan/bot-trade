@@ -126,6 +126,40 @@ def test_live_local_tp_cancels_only_resident_stop_confirms_then_sells(tmp_path):
     assert not [c for c in client.calls if c[0] == "trigger"]  # no unproven OCO/GE pair
 
 
+def test_live_take_profit_blocked_by_stale_depth_book(tmp_path):
+    """A frozen order book (WS bookTicker down, REST depth top-up failing)
+    behind a healthy ticker must not let take_profit sell into a bid that may
+    no longer exist -- even though the target is crossed and the position is
+    otherwise eligible."""
+    store = Store(tmp_path / "tp_stale.db")
+    _barrier_position(store)
+    client = FakeClient(btc=[FOREIGN_BTC + .00025], open_ids=[{"oid-t"}])
+    hands = _hands(store, client, tp_atr_mult=3)
+    snap = _snap(bid=81200, last=81201)
+    snap.depth_stale = True
+    hands.mark(snap)
+    assert hands.position.is_open()
+    assert hands.last_mark_reason != "take_profit"
+    assert not [c for c in client.calls if c[0] in ("cancel", "market", "trigger")]
+
+
+def test_live_time_limit_still_exits_despite_stale_depth_book(tmp_path, monkeypatch):
+    """Exits must never be blocked by staleness the way entries are -- only
+    take_profit gains the freshness requirement; TTL keeps working on a
+    stale-but-valid quote."""
+    store = Store(tmp_path / "ttl_stale.db")
+    _barrier_position(store)
+    full = FOREIGN_BTC + .00025
+    client = FakeClient(btc=[full, full, FOREIGN_BTC], open_ids=[{"oid-t"}, set()])
+    hands = _hands(store, client, tp_atr_mult=3, time_limit_minutes=1)
+    monkeypatch.setattr("bot.hands.time.time", lambda: 1_900_000_000)
+    snap = _snap(bid=81200, last=81201)
+    snap.depth_stale = True
+    hands.mark(snap)
+    assert not hands.position.is_open()
+    assert store.fills(1)[0]["source"] == "time_limit"
+
+
 @pytest.mark.parametrize("foreign", [False, True])
 def test_local_tp_unconfirmed_or_foreign_stop_never_sells(tmp_path, foreign):
     from bot.hands import PositionStuck
@@ -348,6 +382,54 @@ def test_live_sell_failure_restores_stop(tmp_path):
     assert [c[0] for c in client.calls].count("trigger") == 1
 
 
+def test_live_sell_partial_fill_protects_only_remaining_qty(tmp_path):
+    """The sell POST is never retried, so a lost response can hide a real
+    PARTIAL fill. Restoring a stop for the original full size would sit on
+    top of BTC the bot no longer holds -- part of it is now the owner's."""
+    store = Store(tmp_path / "l.db")
+    _open_position(store)
+    start = FOREIGN_BTC + 0.00025
+    after = FOREIGN_BTC + 0.00015  # 0.0001 actually sold before the response was lost
+    client = FakeClient(btc=[start, after], open_ids=[set()], sell_fail=True)
+    hands = _hands(store, client)
+    pos = hands.execute(GateResult(True, "ok_close", "SELL", qty="0.00025"), _snap())
+    assert pos.qty == pytest.approx(0.00015)
+    assert pos.state == "OPEN"
+    trig = next(c[1] for c in client.calls if c[0] == "trigger")
+    assert trig["quantity"] == "0.00015"
+    row = store.load_position()
+    assert row["qty"] == pytest.approx(0.00015)
+    assert row["state"] == "OPEN"
+
+
+def test_live_sell_failure_with_unreadable_balance_halts_without_guessing(tmp_path):
+    """Finding: on a failed sell with the balance endpoint also down, the old
+    code fell straight through to placing a stop for the ORIGINAL qty -- a
+    pure guess in either direction (could be zero sold, could be all sold).
+    Ambiguity here must halt, not size an order from thin air."""
+    store = Store(tmp_path / "l.db")
+    _open_position(store)
+
+    class BlindAfterFirstRead(FakeClient):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.reads = 0
+
+        def balances(self, currencies="BTC,USDT"):
+            self.reads += 1
+            if self.reads > 1:
+                raise ConnectionError("429 slow down")
+            return super().balances(currencies)
+
+    client = BlindAfterFirstRead(btc=[FOREIGN_BTC + 0.00025], open_ids=[set()], sell_fail=True)
+    hands = _hands(store, client)
+    with pytest.raises(UnprotectedPosition):
+        hands.execute(GateResult(True, "ok_close", "SELL", qty="0.00025"), _snap())
+    assert not any(c[0] == "trigger" for c in client.calls)
+    row = store.load_position()
+    assert row["state"] == "UNPROTECTED"
+
+
 def test_live_sell_aborts_when_stop_cancel_unconfirmed(tmp_path):
     store = Store(tmp_path / "l.db")
     _open_position(store)
@@ -544,14 +626,58 @@ def test_buy_keeps_the_row_when_the_fill_is_merely_unconfirmed(tmp_path):
 
 def test_reconcile_clears_a_pending_entry_without_booking_a_fill(tmp_path):
     """The other half of findings 2/3: a PENDING row whose entry never filled must
-    be dropped by reconcile *without* inventing a SELL fill and a PnL for it."""
-    client = FakeClient(btc=[FOREIGN_BTC], open_ids=[set()])
+    be dropped by reconcile *without* inventing a SELL fill and a PnL for it.
+
+    The open-order book is not empty here (some unrelated "owner" order is
+    resting) so the assertion is real evidence that reconcile() checks for
+    OUR entry id specifically, not merely "the book happens to be empty"."""
+    client = FakeClient(btc=[FOREIGN_BTC], open_ids=[{"owner"}])
     hands = _open_hands(tmp_path, client, state="PENDING", stop_id="none")
     hands.stop_order_id = None
 
     assert hands.reconcile() == "entry_never_filled"
     assert hands.position.qty == 0.0
     assert hands.store.day_pnl(hands.today()) == 0.0
+    assert hands.store.load_position() is None
+
+
+def test_reconcile_keeps_pending_when_entry_still_resting_on_book(tmp_path):
+    """Review finding: reconcile() dropped a PENDING row on balance math alone,
+    without ever checking whether the entry order was still resting on the
+    book. An order that is STILL OPEN can fill at any moment -- dropping the
+    row now means the bot later holds real BTC with no position tracking it."""
+    client = FakeClient(btc=[FOREIGN_BTC], open_ids=[{"oid-m1"}])  # our entry still open
+    hands = _open_hands(tmp_path, client, state="PENDING", stop_id="none")
+    hands.stop_order_id = None
+
+    verdict = hands.reconcile()
+
+    assert verdict != "entry_never_filled"
+    assert hands.position.qty == pytest.approx(0.00025)
+    assert hands.position.state == "PENDING"
+    assert hands.store.load_position() is not None
+    assert hands.store.day_pnl(hands.today()) == 0.0
+
+
+def test_reconcile_pending_fails_closed_on_incomplete_order_read(tmp_path):
+    """An order-book read that cannot prove completeness (transport error,
+    malformed page, page-limit exhaustion -- see kcex/orders.py) must never
+    be treated as an empty book. Row survives; reconcile raises instead of
+    guessing the entry is gone."""
+    client = FakeClient(btc=[FOREIGN_BTC], open_ids=[{"owner"}])
+
+    def boom(**kwargs):
+        raise RuntimeError("open-orders endpoint down")
+
+    client.open_orders = boom
+    hands = _open_hands(tmp_path, client, state="PENDING", stop_id="none")
+    hands.stop_order_id = None
+
+    with pytest.raises(RuntimeError):
+        hands.reconcile()
+
+    assert hands.store.load_position() is not None
+    assert hands.store.load_position()["state"] == "PENDING"
 
 
 # --- review findings: the exit path ---

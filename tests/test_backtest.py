@@ -123,6 +123,7 @@ def test_replay_snapshot_matches_real_eye():
     eye._now_ms = lambda: t * 1000
     eye.last, eye.bid, eye.ask = 126, snap.bid, snap.ask
     eye.last_update_ms = t * 1000
+    eye.depth_update_ms = t * 1000
     eye.bars = history[-21:]
     eye.free_usdt = 430
     eye.last_intent_action = "BUY"
@@ -259,6 +260,7 @@ def test_snapshot_parity_through_real_eye_poll_heavy():
     snap = replay_snapshot(history, t, forming.o, settings, cash=430)
     eye.last, eye.bid, eye.ask = forming.o, snap.bid, snap.ask
     eye.last_update_ms = t * 1000
+    eye.depth_update_ms = t * 1000
     assert asdict(eye.snapshot()) == asdict(snap)
     assert snap.last == forming.o != forming.c
     assert forming not in snap.bars_15m

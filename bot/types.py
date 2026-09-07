@@ -72,6 +72,12 @@ class Snapshot:
     stale: bool
     last_intent_action: str | None = None
     last_bot_pnl_usdt: float = 0.0
+    # `stale` only tracks the ticker (`last`). The order book (bid/ask) rides a
+    # separate WS channel that can freeze while the ticker stays healthy, so a
+    # take-profit exit -- which prices off `bid` -- needs its own freshness
+    # signal. Defaults False so every existing construction (tests, replays)
+    # keeps behaving as a fresh book unless a caller says otherwise.
+    depth_stale: bool = False
 
     def compact(self) -> dict[str, Any]:
         """The fields worth keeping in the audit row to re-read a decision later."""
@@ -87,6 +93,7 @@ class Snapshot:
             "bot_avg_entry": self.bot_avg_entry,
             "ws_ok": self.ws_ok,
             "stale": self.stale,
+            "depth_stale": self.depth_stale,
             "bars": len(self.bars_15m),
         }
 

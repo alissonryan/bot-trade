@@ -187,6 +187,24 @@ def test_stale_ws_depth_triggers_depth_rest_again():
     assert client.depth_calls == 1
 
 
+def test_snapshot_carries_depth_staleness_independently_of_ticker():
+    """Regression: Snapshot.stale only ever measured last_update_ms, so a
+    healthy ticker with a frozen order book looked fully fresh to any caller
+    that only checked snap.stale (e.g. a take-profit exit pricing off bid)."""
+    client = FakeKcex()
+    hub = Hub()
+    eye = Eye(client, Settings.from_env(), hub=hub)
+    hub.apply(TickerEvent(last=111.0, ts_ms=int(time.time() * 1000), symbol="BTC_USDT"))
+    eye.sync_hub()
+    snap = eye.snapshot()
+    assert snap.stale is False
+    assert snap.depth_stale is True  # no depth frame has ever arrived
+
+    hub.apply(DepthEvent(bid=110.0, ask=112.0, symbol="BTC_USDT"))
+    eye.sync_hub()
+    assert eye.snapshot().depth_stale is False
+
+
 def test_rules_are_loaded_once():
     eye = Eye(FakeKcex(), Settings.from_env())
     rules = eye.load_rules()

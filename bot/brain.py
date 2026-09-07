@@ -150,6 +150,12 @@ def parse_intent(text: str | None) -> TradeIntent | None:
         conf = float(data.get("confidence", 0))
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(conf):
+        # NaN/Infinity survive float() and every comparison against them is
+        # False, so the min/max clamp below does nothing and a downstream
+        # `confidence < min_confidence` gate would silently pass. Treat it
+        # exactly like any other unparseable field.
+        return None
     conf = min(max(conf, 0.0), 1.0)
     reason = str(data.get("reason", ""))[:240]
     regime = str(data.get("regime", "unknown")).lower()
