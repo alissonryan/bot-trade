@@ -42,9 +42,16 @@ TRADE_TYPE_SELL = "SELL"
 
 
 class KcexError(RuntimeError):
-    def __init__(self, message: str, payload: dict[str, Any] | None = None):
+    def __init__(self, message: str, payload: dict[str, Any] | None = None, *, http_status: int | None = None):
         super().__init__(message)
         self.payload = payload or {}
+        # Only the transport sets this; payload.status is an unrelated business field.
+        self.http_status = http_status
+
+    @property
+    def request_rejected(self) -> bool:
+        """Known request refusals only; network/5xx/unknown business codes are ambiguous."""
+        return self.http_status in (401, 406)
 
     @property
     def status(self) -> int | None:
@@ -126,26 +133,26 @@ class KcexClient:
             if status == 406:
                 raise KcexError(
                     f"{method} {path} blocked by WAF (406): set KCEX_USER_AGENT to a browser User-Agent",
-                    {"status": 406},
+                    {"status": 406}, http_status=406,
                 )
             if status == 401:
                 raise KcexError(
                     f"{method} {path} unauthorized (401): session token missing or expired; "
                     "run: python -m kcex.cli login",
-                    {"status": 401},
+                    {"status": 401}, http_status=401,
                 )
             if status in RETRY_STATUS and not last:
                 self._sleep(RETRY_BACKOFF_S[min(attempt, len(RETRY_BACKOFF_S) - 1)])
                 continue
             if status >= 400:
-                raise KcexError(f"{method} {path} failed: HTTP {status}", {"status": status})
+                raise KcexError(f"{method} {path} failed: HTTP {status}", {"status": status}, http_status=status)
 
             payload = response.json()
             if not isinstance(payload, dict):
                 return payload
             code = payload.get("code")
             if code not in (0, 200, "0", "200", None) and payload.get("success") is not True:
-                raise KcexError(f"{method} {path} failed: {payload.get('msg') or payload}", payload)
+                raise KcexError(f"{method} {path} failed: {payload.get('msg') or payload}", payload, http_status=status)
             return payload
         raise KcexError(f"{method} {path} failed after {attempts} attempts", {"status": None})
 

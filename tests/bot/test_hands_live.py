@@ -10,6 +10,7 @@ from bot.hands import LiveHands, UnprotectedPosition, avg_fill_from_deals
 from bot.settings import Settings
 from bot.store import Store
 from bot.types import Bar, GateResult, Snapshot
+from kcex.client import KcexError
 
 FOREIGN_BTC = 0.00064  # the account already holds BTC the bot does not own
 
@@ -74,7 +75,7 @@ class FakeClient:
             self.on_trigger()
         if self.trigger_fail > 0:
             self.trigger_fail -= 1
-            raise RuntimeError("trigger down")
+            raise KcexError("synthetic WAF request rejection", http_status=406)
         return {"code": 0, "data": "oid-t"}
 
     def cancel_order(self, order_id: str):
@@ -142,7 +143,7 @@ def test_live_buy_stop_fails_then_flattens(tmp_path):
     client = FakeClient(btc=[FOREIGN_BTC, FOREIGN_BTC + 0.00025, FOREIGN_BTC + 0.00025, FOREIGN_BTC], trigger_fail=2)
     pos = _hands(store, client).execute(_buy_gate(), _snap())
     kinds = [c[0] for c in client.calls]
-    assert kinds.count("trigger") == 2
+    assert kinds.count("trigger") == 1
     assert kinds[-1] in ("balances", "my_deals")
     sells = [c for c in client.calls if c[0] == "market" and c[1]["side"] == "SELL"]
     assert len(sells) == 1

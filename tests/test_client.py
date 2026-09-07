@@ -104,3 +104,20 @@ def test_business_error_code_raises():
     with pytest.raises(KcexError) as exc:
         client.balances()
     assert "insufficient balance" in str(exc.value)
+
+
+@pytest.mark.parametrize("status", [401, 406])
+def test_request_rejection_requires_actual_http_provenance(status):
+    http, _ = _client([FakeResponse(status)])
+    business, _ = _client([FakeResponse(200, {"code": 90001, "status": status})])
+    with pytest.raises(KcexError) as transport_error:
+        http.place_trigger(currency="BTC", market="USDT", side="SELL",
+                           trigger_price="79000", quantity="0.00025", trigger_type="LE", amount="0", market_order=True)
+    with pytest.raises(KcexError) as business_error:
+        business.place_trigger(currency="BTC", market="USDT", side="SELL",
+                               trigger_price="79000", quantity="0.00025", trigger_type="LE", amount="0", market_order=True)
+    assert transport_error.value.http_status == status
+    assert transport_error.value.request_rejected is True
+    assert business_error.value.http_status == 200
+    assert business_error.value.request_rejected is False
+    assert KcexError("untrusted payload", {"status": status}).request_rejected is False

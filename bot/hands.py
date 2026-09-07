@@ -21,18 +21,19 @@ LiveHands talks to KCEX spot. Invariants, in the order they matter:
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, NoReturn
 
 from bot.collar import stop_for_entry
 from bot.settings import Settings
 from bot.store import Store
 from bot.types import GateResult, Snapshot, SymbolRules
-from kcex.client import KcexClient
+from kcex.client import KcexClient, KcexError
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ PAPER_CASH_KEY = "paper_cash"
 # BTC on the account that is not the bot's. Seeded the first time reconcile()
 # runs flat; an increase while flat means an entry filled without being recorded.
 FOREIGN_BTC_KEY = "foreign_btc"
+STOP_SUBMISSION_KEY = "stop_submission"
 
 
 class UnprotectedPosition(RuntimeError):
@@ -309,26 +311,56 @@ class LiveHands:
         return str(response)
 
     def _place_stop(self, qty_s: str, stop_price: float | None) -> str | None:
+        self._guard_stop_submission()
         if not stop_price:
             return None
-        for attempt in range(2):
-            try:
-                resp = self.client.place_trigger(
-                    currency="BTC",
-                    market="USDT",
-                    side="SELL",
-                    trigger_price=f"{stop_price:.{self.rules.price_scale if self.rules else 2}f}",
-                    trigger_type="LE",
-                    quantity=qty_s,
-                    amount="0",
-                    market_order=True,
-                )
-                stop_id = self._order_id(resp)
-                self.store.remember_order(stop_id)
-                return stop_id
-            except Exception as exc:  # noqa: BLE001
-                log.error("stop placement attempt %d failed: %s", attempt + 1, exc)
-        return None
+        operation = {"phase": "submitting", "qty": qty_s, "stop_price": stop_price,
+                     "entry_id": self.entry_order_id}
+        self.store.kv_set(STOP_SUBMISSION_KEY, json.dumps(operation))
+        self._persist()  # preserve entry PENDING; the durable latch survives a crash
+        try:
+            resp = self.client.place_trigger(
+                currency="BTC", market="USDT", side="SELL",
+                trigger_price=f"{stop_price:.{self.rules.price_scale if self.rules else 2}f}",
+                trigger_type="LE", quantity=qty_s, amount="0", market_order=True,
+            )
+        except Exception as exc:
+            if isinstance(exc, KcexError) and exc.request_rejected:
+                operation["phase"] = "rejected"
+                try:
+                    self.store.kv_set(STOP_SUBMISSION_KEY, json.dumps(operation))
+                    self._persist("UNPROTECTED")
+                except Exception as storage_exc:
+                    self._halt_stop_submission(storage_exc)
+                log.error("stop request rejected by HTTP %s; no retry", exc.http_status)
+                return None  # caller may flatten; a failed fallback stays halted
+            self._halt_stop_submission(exc)
+        try:
+            stop_id = resp.get("data") if isinstance(resp, dict) else None
+            if type(stop_id) not in (str, int) or not str(stop_id).strip() or stop_id == 0:
+                raise ValueError("stop response contains no known order id")
+            self.store.remember_order(str(stop_id))
+            self.stop_order_id = str(stop_id)
+            self._persist("OPEN")  # durable id before releasing the submission latch
+            self.store.kv_set(STOP_SUBMISSION_KEY, "")
+            return self.stop_order_id
+        except Exception as exc:
+            self._halt_stop_submission(exc)
+
+
+    def _halt_stop_submission(self, cause: Exception | None = None) -> NoReturn:
+        try:
+            self._persist("UNPROTECTED")
+        except Exception:
+            log.exception("could not persist halted position; submission marker remains")
+        raise UnprotectedPosition(
+            "unfinished stop submission; inspect exchange and manually resolve orphan triggers; no retry or automatic SELL"
+        ) from cause
+
+
+    def _guard_stop_submission(self) -> None:
+        if self.store.kv_get(STOP_SUBMISSION_KEY):
+            self._halt_stop_submission()
 
     def _watch_balance(self, target: Callable[[float], float], expected: float) -> float | None:
         """Poll BTC total until ``target(total)`` reaches ``expected`` (full) or tries run
@@ -373,6 +405,7 @@ class LiveHands:
     def execute(self, gate: GateResult, snap: Snapshot) -> Position:
         if self.settings.mode != "live":
             raise RuntimeError("LiveHands requires MODE=live")
+        self._guard_stop_submission()
         if gate.action == "BUY" and gate.qty and gate.stop_price:
             return self._buy(gate, snap)
         if gate.action == "SELL" and gate.qty:
@@ -457,6 +490,10 @@ class LiveHands:
 
         log.error("stop could not be placed for %s BTC; flattening", qty_s)
         if self._flatten(qty_s, snap):
+            try:
+                self.store.kv_set(STOP_SUBMISSION_KEY, "")
+            except Exception as exc:
+                self._halt_stop_submission(exc)
             return self.position
         self._persist("UNPROTECTED")
         raise UnprotectedPosition(f"long {qty_s} BTC (entry {entry_id}) has no stop and could not be flattened")
@@ -607,6 +644,7 @@ class LiveHands:
 
     def reconcile(self) -> str:
         """Bring the local row in line with the exchange. Returns a short verdict."""
+        self._guard_stop_submission()
         if not self.position.is_open():
             return self._reconcile_flat()
         total = btc_total(self.client)
