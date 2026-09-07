@@ -60,6 +60,22 @@ PYTHONPATH=. python -m kcex.cli login          # human captcha + 2FA
 
 Paper without KCEX login uses `PAPER_STARTING_USDT` (default 450) once, then its own ledger. Prices come from the confirmed public KCEX WS by default, with REST as fallback when WS is down or stale (`KCEX_WS_URL=-` forces REST-only). `--chart` serves a read-only local candlestick chart; it never binds off loopback and never opens a second KCEX connection.
 
+## P1 barriers
+
+TDD is mandatory for collar/hands changes. See AGENTS.md § P1 for the canonical contract: opt-in `TP_ATR_MULT`/`TIME_LIMIT_MINUTES`, target recomputed on fills, persistent entry age, shared pre-LLM tick hook, and **one resident LE stop only** (GE exists but OCO is unproven). TP/TTL are local; synchronous LLM/HTTP calls and downtime leave gaps, so checks are not guaranteed every second. P0 samples local exits only at Min15 opens; do not infer local TP fills from candle highs. Trailing is deferred to P6 with coordinator approval.
+
+## Paper/live isolation
+
+Each mode gets its own database (`bot/cli.py::db_path_for_mode`): paper keeps `data/bot.db`, live gets `data/bot-live.db`. `Store(path, mode=...)` stamps the owning mode and raises `StoreIdentityMismatch` on a mismatched open; `LiveHands` additionally refuses any position row with `paper` provenance. An unstamped legacy database may be adopted by paper, never by live. **Account switching is not covered** — the token rotates weekly and no account id is captured, so treat one live database as belonging to one account by hand. See AGENTS.md § Paper/live isolation.
+
+## P2 cooldown
+
+`COOLDOWN_MINUTES=0` is opt-out. Positive durations gate BUY only, armed by the last persisted **losing** SELL fill (`pnl < 0`) and wall-clock decision time. A profitable exit does not arm it — blocking a continuation after a win only cancels profit, which is why Rafael Vargas retired the post-any-exit form (Apex Brief v17, Rule 3). SELL never queries cooldown history, and LLM scheduling is unchanged. No hands/live order changes. See AGENTS.md § P2 for restart, reconciliation, legacy timestamps, conservative intrabar replay timing, and the tiny-sample/no-evidence measurement limitation.
+
+## P4 journal
+
+`JOURNAL_ENABLED=0` is opt-out. See AGENTS.md § P4: persistent BUY/fill linkage, null-PnL non-execution, independent outcome/reflection knowledge timestamps and mandatory final prompt `as_of` filter. At most five lessons/400-char reflections; one 160-token reflection after decision AND execution shares the daily Budget with an estimated next-decision reserve. No reflection is a judge or order controller. P0 offline skips reflection explicitly; fixed cached intents cannot measure learning, and changed lesson payloads must miss old cache keys. Anti-look-ahead, migration, budget-priority and isolated-process opt-out tests are required.
+
 ## Resume (2026-09-04, safety revision)
 
 - `main` @ `d6ae9c9` (public WS + local chart) merged with PR #1 `fix/live-safety-observability` (live invariants, fill-by-balance, reconcile, observability). Paper works; live login **not** in `.env`.

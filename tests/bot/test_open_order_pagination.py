@@ -84,7 +84,7 @@ def test_repetition_or_inconsistent_metadata_is_an_error(payloads):
 def live(tmp_path, payloads):
     from bot.store import Store
     from test_hands_live import FakeClient, _hands, _open_position, FOREIGN_BTC
-    store = Store(tmp_path / "p8.db")
+    store = Store(tmp_path / "p8.db", mode="live")
     _open_position(store)
     client = FakeClient(btc=[FOREIGN_BTC + .00025])
     pages = Pages(payloads)
@@ -116,7 +116,7 @@ def test_reconcile_sees_second_page_stop_without_creating_another(tmp_path):
 def test_incomplete_entry_list_keeps_pending_without_cancel_or_stop(tmp_path):
     from bot.store import Store
     from test_hands_live import FakeClient, _hands, _buy_gate, _snap, FOREIGN_BTC
-    store = Store(tmp_path / "entry.db")
+    store = Store(tmp_path / "entry.db", mode="live")
     client = FakeClient(btc=[FOREIGN_BTC])  # no confirmed entry fill
     client.open_orders = Pages([page(["owner"], 1, 2, 1), RuntimeError("page outage")]).open_orders
     hands = _hands(store, client)

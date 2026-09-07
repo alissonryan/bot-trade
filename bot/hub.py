@@ -44,4 +44,7 @@ class Hub:
             # price, so on its own it must never make a hub with last == 0.0
             # read as a healthy, fresh price feed. DepthEvent has no ts_ms
             # field, so stamp arrival wall-clock time instead.
-            self.depth_ts_ms = int(time.time() * 1000)
+            # Both sides, or the book is not fresh: a one-sided frame leaves the
+            # other quote at whatever it was, and the take-profit reads the BID.
+            if event.bid is not None and event.ask is not None:
+                self.depth_ts_ms = int(time.time() * 1000)

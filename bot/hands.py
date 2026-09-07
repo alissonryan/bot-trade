@@ -27,13 +27,15 @@ import math
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_DOWN
 from typing import Any, Callable, NoReturn
 
-from bot.collar import stop_for_entry
+from bot.collar import stop_for_entry, take_profit_for_entry
 from bot.settings import Settings
-from bot.store import Store
+from bot.store import Store, StoreIdentityMismatch
 from bot.types import GateResult, Snapshot, SymbolRules
 from kcex.client import KcexClient, KcexError
+from kcex.orders import complete_open_order_ids
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +43,7 @@ PAPER_CASH_KEY = "paper_cash"
 # BTC on the account that is not the bot's. Seeded the first time reconcile()
 # runs flat; an increase while flat means an entry filled without being recorded.
 FOREIGN_BTC_KEY = "foreign_btc"
+STOP_REPLACE_KEY = "stop_replacement"
 STOP_SUBMISSION_KEY = "stop_submission"
 
 
@@ -65,6 +68,9 @@ class Position:
     state: str = "FLAT"
     entry_source: str | None = None
     btc_before: float | None = None
+    take_profit_price: float | None = None
+    opened_ts: str | None = None
+    exit_reason: str | None = None
 
     def is_open(self) -> bool:
         return self.qty > 0
@@ -72,6 +78,32 @@ class Position:
 
 def _today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _opened_now() -> str:
+    return datetime.fromtimestamp(time.time(), timezone.utc).isoformat()
+
+
+def local_exit_reason(pos: Position, snap: Snapshot, settings: Settings, now_ms: int) -> str | None:
+    """Local TP can miss a cross-and-return between ticks and needs the process alive.
+    TTL uses wall time, not the quote timestamp (which freezes during an outage).
+    """
+    if not pos.is_open() or pos.state != "OPEN":
+        return None
+    if any(not math.isfinite(p) or p < 0 for p in (snap.bid, snap.last)):
+        return None
+    if not any(math.isfinite(p) and p > 0 for p in (snap.bid, snap.last)):
+        return None
+    if (settings.tp_atr_mult > 0 and pos.take_profit_price and not snap.stale
+            and not snap.depth_stale and snap.bid >= pos.take_profit_price):
+        return "take_profit"
+    if settings.time_limit_minutes > 0 and pos.opened_ts:
+        opened = datetime.fromisoformat(pos.opened_ts)
+        if opened.tzinfo is None:
+            opened = opened.replace(tzinfo=timezone.utc)
+        if now_ms - opened.timestamp() * 1000 >= settings.time_limit_minutes * 60000:
+            return "time_limit"
+    return None
 
 
 def _floor_qty(qty: float, scale: int) -> float:
@@ -100,15 +132,24 @@ def _extract_list(payload: Any) -> list[Any]:
 
 
 def btc_total(client: KcexClient) -> float:
-    """BTC available + frozen on the account (frozen includes BTC parked in a trigger)."""
+    """BTC available + frozen on the account (frozen includes BTC parked in a trigger).
+
+    A non-finite figure is ignorance, not a quantity. It must never reach the
+    arithmetic that sizes a stop: ``qty - nan`` collapses to zero and would send
+    a 0.00000 trigger while erasing a real position. Callers already treat a
+    raise here as "the balance could not be read", which is the honest reading.
+    """
     total = 0.0
     for row in _extract_list(client.balances("BTC")):
         if isinstance(row, dict) and row.get("currency") == "BTC":
-            total += float(row.get("available") or 0) + float(row.get("frozen") or 0)
+            for key in ("available", "frozen"):
+                value = float(row.get(key) or 0)
+                if not math.isfinite(value):
+                    raise ValueError(f"non-finite BTC {key} in the balance response")
+                total += value
+    if not math.isfinite(total):
+        raise ValueError("non-finite BTC balance total")
     return total
-
-
-from kcex.orders import complete_open_order_ids
 
 
 def open_order_ids(client: KcexClient, *, max_pages: int = 50, page_size: int = 100) -> set[str]:
@@ -159,6 +200,9 @@ def _load(store: Store) -> tuple[Position, str | None, str | None]:
         state=row.get("state") or "OPEN",
         entry_source=row.get("entry_source"),
         btc_before=row.get("btc_before"),
+        take_profit_price=row.get("take_profit_price"),
+        opened_ts=row.get("opened_ts"),
+        exit_reason=row.get("exit_reason"),
     )
     return pos, row.get("entry_order_id"), row.get("stop_order_id")
 
@@ -172,6 +216,7 @@ class PaperHands:
         self.cash = float(cached) if cached is not None else float(settings.paper_starting_usdt)
         self.entry_order_id = "paper-entry" if self.position.is_open() else None
         self.stop_order_id = "paper-stop" if self.position.is_open() else None
+        self.last_mark_reason: str | None = None
 
     def today(self) -> str:
         return _today()
@@ -188,6 +233,8 @@ class PaperHands:
             stop_order_id="paper-stop" if self.position.stop_price and self.position.qty else None,
             state="OPEN",
             entry_source="paper",
+            take_profit_price=self.position.take_profit_price,
+            opened_ts=self.position.opened_ts,
         )
         self.store.kv_set(PAPER_CASH_KEY, repr(self.cash))
 
@@ -201,12 +248,15 @@ class PaperHands:
                 log.warning("paper: not enough cash (%.2f) for %.2f USDT", self.cash, cost)
                 return self.position
             self.cash -= cost
+            target = take_profit_for_entry(px, snap.atr or 0, self.settings)
             self.position = Position(
                 qty=qty,
                 entry=px,
                 stop_price=float(gate.stop_price or 0) or None,
                 state="OPEN",
                 entry_source="paper",
+                take_profit_price=float(target) if target else None,
+                opened_ts=_opened_now(),
             )
             self.store.remember_order("paper-entry")
             self.entry_order_id = "paper-entry"
@@ -230,7 +280,8 @@ class PaperHands:
         self.stop_order_id = None
         self._persist()
 
-    def mark(self, snap: Snapshot) -> Position:
+    def mark(self, snap: Snapshot, *, now_ms: int | None = None) -> Position:
+        self.last_mark_reason = None
         if self.position.qty > 0 and self.position.stop_price is not None:
             # Only quotes that actually exist can trigger a stop. bid/last sit at
             # 0.0 until the matching frame arrives, and a deals-only frame already
@@ -243,7 +294,13 @@ class PaperHands:
                 slip = self.settings.paper_slippage_bps / 10_000.0
                 reference = min(x for x in (snap.bid, snap.last) if x > 0)
                 px = min(reference, self.position.stop_price) * (1 - slip)
+                self.last_mark_reason = "stop"
                 self._close(px, source="paper_stop", order_id="paper-stop")
+        reason = local_exit_reason(self.position, snap, self.settings, now_ms if now_ms is not None else int(time.time() * 1000))
+        if reason:
+            self.last_mark_reason = reason
+            px = (snap.bid or snap.last) * (1 - self.settings.paper_slippage_bps / 10000)
+            self._close(px, source=f"paper_{reason}", order_id="paper-exit")
         return self.position
 
 
@@ -263,7 +320,47 @@ class LiveHands:
         self.rules = rules
         self._sleep = sleep
         self.position, self.entry_order_id, self.stop_order_id = _load(store)
+        self._require_live_store()
+        self._reject_paper_provenance()
         self._exit_hint: float | None = None
+        self.last_mark_reason: str | None = None
+
+    def _require_live_store(self) -> None:
+        """The store itself must be a live store, not merely row-clean.
+
+        Checking only the position row left the hole open on an EMPTY database:
+        a paper-stamped or unidentified store has no row to look at, so live
+        hands attached to it happily sent a real market order and a trigger.
+        The mode of the file is the fact; the row is only corroboration.
+        """
+        if getattr(self.store, "mode", None) != "live":
+            raise StoreIdentityMismatch(
+                f"live hands require a store opened as 'live'; got "
+                f"{getattr(self.store, 'mode', None)!r} for {self.store.path}"
+            )
+
+    def _reject_paper_provenance(self) -> None:
+        """Never adopt a simulated position as a real one.
+
+        The database is already separated by mode and stamped, but this row is
+        what `reconcile()` sizes a resident stop from. If anything about it says
+        paper, the honest move is to stop and make a human look: the account
+        holds the owner's own BTC, and a trigger sized from a position the bot
+        never bought would sit on top of their coins.
+        """
+        if not self.position.is_open() and not self.entry_order_id and not self.stop_order_id:
+            return
+        marks = {
+            "entry_source": self.position.entry_source,
+            "entry_order_id": self.entry_order_id,
+            "stop_order_id": self.stop_order_id,
+        }
+        tainted = {k: v for k, v in marks.items() if isinstance(v, str) and v.startswith("paper")}
+        if tainted:
+            raise StoreIdentityMismatch(
+                f"live hands refuse a position carrying paper provenance {tainted}; "
+                "square the account by hand and clear the row before trading live"
+            )
 
     # -- helpers ----------------------------------------------------------------
 
@@ -290,6 +387,9 @@ class LiveHands:
             state=self.position.state if self.position.is_open() else "OPEN",
             entry_source=self.position.entry_source,
             btc_before=self.position.btc_before,
+            take_profit_price=self.position.take_profit_price,
+            opened_ts=self.position.opened_ts,
+            exit_reason=self.position.exit_reason,
         )
 
     def _clear(self) -> None:
@@ -346,7 +446,6 @@ class LiveHands:
         except Exception as exc:
             self._halt_stop_submission(exc)
 
-
     def _halt_stop_submission(self, cause: Exception | None = None) -> NoReturn:
         try:
             self._persist("UNPROTECTED")
@@ -355,7 +454,6 @@ class LiveHands:
         raise UnprotectedPosition(
             "unfinished stop submission; inspect exchange and manually resolve orphan triggers; no retry or automatic SELL"
         ) from cause
-
 
     def _guard_stop_submission(self) -> None:
         if self.store.kv_get(STOP_SUBMISSION_KEY):
@@ -399,16 +497,129 @@ class LiveHands:
             log.warning("deals unavailable for %s: %s", order_id, exc)
         return default, "estimated"
 
+    # -- stop replacement foundation (not wired to a trailing policy) ------------
+
+    def replace_stop(self, stop_price: float, snap: Snapshot) -> Position:
+        """Replace one owned resident stop; never retry its POST."""
+        self._guard_stop_submission()
+        if self.store.kv_get(STOP_REPLACE_KEY):
+            raise UnprotectedPosition("unfinished stop replacement; reconcile before any write")
+        if self.settings.mode != "live" or self.position.state != "OPEN":
+            raise ValueError("replacement requires an open live position")
+        if not self.stop_order_id or not self.store.is_bot_order(self.stop_order_id):
+            raise PositionStuck("replacement cannot cancel an unrecorded stop")
+        if (not math.isfinite(stop_price) or not math.isfinite(snap.bid) or snap.stale
+                or stop_price <= 0 or stop_price >= snap.bid
+                or self.position.stop_price is None or stop_price <= self.position.stop_price):
+            raise ValueError("replacement requires a higher positive stop below a fresh bid")
+        scale = self.rules.price_scale if self.rules else 2
+        stop_price = float(Decimal(str(stop_price)).quantize(Decimal(1).scaleb(-scale), rounding=ROUND_DOWN))
+        if stop_price <= self.position.stop_price:
+            raise ValueError("replacement must improve at venue precision")
+        operation = {"phase": "cancel", "old_id": self.stop_order_id,
+                     "stop_price": stop_price, "snapshot": snap.__dict__,
+                     "entry_id": self.entry_order_id, "qty": self.position.qty}
+        operation["snapshot"] = {**snap.__dict__, "bars_15m": []}
+        self.store.kv_set(STOP_REPLACE_KEY, json.dumps(operation))
+        self._persist("UNPROTECTED")  # durable BEFORE cancel, including lost responses
+        try:
+            self.cancel_if_ours(self.stop_order_id)
+        except Exception as exc:
+            raise UnprotectedPosition("stop cancel ambiguous; reconcile owned id") from exc
+        self.reconcile()
+        return self.position
+
+    def _replacement_orders(self) -> set[str]:
+        """Use the same complete-list proof as ordinary exits and reconciliation."""
+        return open_order_ids(self.client)
+
+    def _replacement_holding(self) -> None:
+        """Require the exact known holding; a stop fill/partial/owner move is not
+        permission to place another SELL over the owner's remaining BTC.
+        """
+        rows = _extract_list(self.client.balances("BTC"))
+        btc = [row for row in rows if isinstance(row, dict) and row.get("currency") == "BTC"]
+        if len(btc) != 1 or "available" not in btc[0] or "frozen" not in btc[0]:
+            raise ValueError("unknown BTC balance")
+        amounts = [float(btc[0][key]) for key in ("available", "frozen")]
+        base = self.position.btc_before
+        if (base is None or not math.isfinite(base) or base < 0
+                or any(not math.isfinite(v) or v < 0 for v in amounts)
+                or not math.isclose(sum(amounts), base + self.position.qty, rel_tol=0, abs_tol=1e-12)):
+            raise ValueError("BTC holding changed during replacement; inspect before any SELL")
+
+    def _reconcile_replacement(self, operation: dict) -> str:
+        """Write-ahead phases deliberately survive restart, even with opt-out.
+
+        A crash after writing `placing` cannot prove whether POST reached KCEX.
+        No new POST/SELL is safe then: an unrecorded stop could sell owner's BTC.
+        """
+        if operation["phase"] != "cancel":
+            self._persist("UNPROTECTED")
+            raise UnprotectedPosition("stop replacement write ambiguous; human inspection required")
+        if (self.settings.mode != "live" or not self.position.is_open()
+                or operation["entry_id"] != self.entry_order_id or operation["qty"] != self.position.qty
+                or not self.store.is_bot_order(operation["old_id"])):
+            raise UnprotectedPosition("stop replacement does not match resident position")
+        try:
+            ids = self._replacement_orders()
+            if operation["old_id"] in ids:
+                self._persist("OPEN")
+                # Keep the operation: a delayed cancel may still remove this stop.
+                return "replacement_cancel_not_confirmed"
+        except Exception as exc:
+            self._persist("UNPROTECTED")
+            raise UnprotectedPosition("stop cancel confirmation unavailable") from exc
+        self.stop_order_id = None
+        self._persist("UNPROTECTED")
+        self._replacement_holding()
+        operation["phase"] = "placing"
+        self.store.kv_set(STOP_REPLACE_KEY, json.dumps(operation))
+        snap = Snapshot(**operation["snapshot"])
+        stop_price = operation["stop_price"]
+        qty_s = _fmt_qty(self.position.qty, self.qty_scale)
+        try:
+            response = self.client.place_trigger(
+                currency="BTC", market="USDT", side="SELL",
+                trigger_price=f"{stop_price:.{self.rules.price_scale if self.rules else 2}f}",
+                trigger_type="LE", quantity=qty_s, amount="0", market_order=True,
+            )
+        except Exception as exc:
+            # Only these transport rejections prove the request was not accepted.
+            # Unknown venue codes / server errors / lost responses are ambiguous.
+            if isinstance(exc, KcexError) and exc.request_rejected:
+                self._replacement_holding()
+                operation["phase"] = "flattening"
+                self.store.kv_set(STOP_REPLACE_KEY, json.dumps(operation))
+                if self._flatten(qty_s, snap):
+                    self.store.kv_set(STOP_REPLACE_KEY, "")
+                    return "replacement_rejected_flattened"
+            raise UnprotectedPosition("stop replacement failed; inspect exchange") from exc
+        stop_id = response.get("data") if isinstance(response, dict) else None
+        if type(stop_id) not in (str, int) or not str(stop_id).strip() or stop_id == 0:
+            raise UnprotectedPosition("stop response has no known id; do not retry or flatten")
+        self.stop_order_id = str(stop_id)
+        self.store.remember_order(self.stop_order_id)
+        ids = self._replacement_orders()
+        if self.stop_order_id not in ids or operation["old_id"] in ids:
+            raise UnprotectedPosition("replacement protection not confirmed; inspect known order ids")
+        self.position.stop_price = stop_price
+        self._persist("OPEN")
+        self.store.kv_set(STOP_REPLACE_KEY, "")
+        return "stop_replaced"
+
     # -- entry ------------------------------------------------------------------
 
     def execute(self, gate: GateResult, snap: Snapshot) -> Position:
         if self.settings.mode != "live":
             raise RuntimeError("LiveHands requires MODE=live")
         self._guard_stop_submission()
+        if self.store.kv_get(STOP_REPLACE_KEY):
+            raise UnprotectedPosition("unfinished stop replacement blocks order execution")
         if gate.action == "BUY" and gate.qty and gate.stop_price:
             return self._buy(gate, snap)
         if gate.action == "SELL" and gate.qty:
-            return self._sell(snap)
+            return self._sell(snap, exit_reason=gate.rule if gate.rule in ("take_profit", "time_limit") else None)
         return self.position
 
     def _buy(self, gate: GateResult, snap: Snapshot) -> Position:
@@ -435,6 +646,8 @@ class LiveHands:
             state="PENDING",
             entry_source="estimated",
             btc_before=before,
+            take_profit_price=float(gate.take_profit_price) if gate.take_profit_price else None,
+            opened_ts=_opened_now(),
         )
         self._persist()  # invariant 1: the entry exists on disk before the stop is tried
 
@@ -475,6 +688,8 @@ class LiveHands:
         self.position.qty = qty
         self.position.entry = price
         self.position.entry_source = source
+        target = take_profit_for_entry(price, snap.atr or 0, self.settings, self.rules)
+        self.position.take_profit_price = float(target) if target else None
         if snap.atr:
             self.position.stop_price = float(stop_for_entry(price, snap.atr, self.settings, self.rules))
         self._persist()
@@ -533,7 +748,24 @@ class LiveHands:
 
     # -- exit -------------------------------------------------------------------
 
-    def _sell(self, snap: Snapshot) -> Position:
+    def mark(self, snap: Snapshot, *, now_ms: int | None = None) -> Position:
+        """Cheap every tick; private reads only when a local exit is due.
+        One resident LE stop: GE exists, but exchange-side OCO is unproven.
+        """
+        self.last_mark_reason = None
+        now = now_ms if now_ms is not None else int(time.time() * 1000)
+        reason = local_exit_reason(self.position, snap, self.settings, now)
+        if reason:
+            self.last_mark_reason = reason  # retain trigger context even on a reads outage
+            self.reconcile()  # the resident stop may already have executed
+            reason = local_exit_reason(self.position, snap, self.settings, now)
+            if reason:
+                self.last_mark_reason = reason
+                return self.execute(GateResult(True, reason, "SELL", qty=_fmt_qty(self.position.qty, self.qty_scale)), snap)
+            self.last_mark_reason = "reconcile"  # no invented TP fill when exchange already exited
+        return self.position
+
+    def _sell(self, snap: Snapshot, *, exit_reason: str | None = None) -> Position:
         if not self.position.is_open():
             return self.position
         qty = self.position.qty
@@ -563,6 +795,8 @@ class LiveHands:
             self.stop_order_id = None
             self._persist("UNPROTECTED")  # honest state while the sell is in flight
 
+        self.position.exit_reason = exit_reason
+        self._persist()
         try:
             resp = self.client.place_market(
                 currency="BTC",
@@ -573,29 +807,86 @@ class LiveHands:
             )
         except Exception as exc:  # noqa: BLE001
             # The POST is never retried, so this may be a lost response for an
-            # order that actually executed. Re-read the balance before putting a
-            # stop back: a trigger for BTC we no longer own would sit on top of
-            # the owner's own coins and could freeze and sell them.
+            # order that actually executed -- fully, partially, or not at all.
+            # Re-read the balance before putting a stop back: a trigger sized
+            # for BTC we no longer fully own would sit on top of the owner's
+            # own coins and could freeze and sell them.
             log.error("sell failed: %s; re-reading the balance before restoring the stop", exc)
             try:
                 after = btc_total(self.client)
             except Exception as read_exc:  # noqa: BLE001
                 log.error("balance unreadable after the failed sell: %s", read_exc)
                 after = None
-            if after is not None and start - after >= qty - self.tol:
+            if after is None:
+                # No evidence of how much, if any, actually sold. Guessing
+                # here is exactly what places an oversized stop over BTC we
+                # no longer hold (or leaves BTC we still hold unprotected).
+                # Halt instead of guessing; no stop POST is sent.
+                self._persist("UNPROTECTED")
+                raise UnprotectedPosition(
+                    f"sell failed and the balance could not be read afterwards; "
+                    f"{qty_s} BTC position is of unknown remaining size and unprotected"
+                ) from exc
+
+            sold = start - after
+            if sold >= qty - self.tol:
                 log.warning("the sell had in fact executed; booking it instead of restoring a stop")
                 price, source = self._fill_price("", default=snap.bid or snap.last)
                 pnl = (price - self.position.entry) * qty
-                self.store.add_fill(self.today(), pnl, side="SELL", qty=qty, price=price, fee=0.0, order_id=None, source=f"recovered_{source}")
+                self.store.add_fill(self.today(), pnl, side="SELL", qty=qty, price=price, fee=0.0, order_id=None, source=exit_reason or f"recovered_{source}")
                 self._clear()
                 return self.position
-            stop_id = self._place_stop(qty_s, self.position.stop_price)
+            if sold < -self.tol:
+                # The account gained BTC while we thought we were selling --
+                # the numbers contradict each other and any stop size here
+                # would be a guess.
+                self._persist("UNPROTECTED")
+                raise UnprotectedPosition(
+                    f"sell failed and the balance moved the wrong way (start {start:.8f}, "
+                    f"after {after:.8f}); cannot establish the remaining {qty_s} BTC position"
+                ) from exc
+
+            # Partial fill (or nothing sold, when sold <= tol): protect only
+            # what we still actually hold, never the original full size.
+            if not all(math.isfinite(v) for v in (start, after, sold)):
+                # Never let a bad parse do arithmetic: qty - nan collapses to
+                # zero, which would send a 0.00000 trigger and drop a live row.
+                self._persist("UNPROTECTED")
+                raise UnprotectedPosition(
+                    f"sell failed and the balance is not a finite number; the {qty_s} BTC "
+                    "position size cannot be established"
+                ) from exc
+            # Book and shrink by the SAME quantised figure. Using `> tol` for
+            # the booking while shrinking unconditionally lost exactly one lot:
+            # 0.00025 -> 0.00024 lands at 9.999999999999999e-06, just under the
+            # tolerance, so no fill was written while the row still shrank.
+            sold_q = _floor_qty(max(sold, 0.0), self.qty_scale)
+            remaining = max(0.0, qty - sold_q)
+            if sold_q > 0:
+                # Book the BTC that actually left BEFORE shrinking the row.
+                # Without this the ledger silently loses that PnL forever:
+                # day-loss, the post-loss cooldown and the journal would all
+                # stop seeing a loss that really happened.
+                log.warning(
+                    "sell failed but %.8f of %.8f BTC actually sold; booking the partial "
+                    "and protecting only the remainder", sold_q, qty,
+                )
+                price, source = self._fill_price("", default=snap.bid or snap.last)
+                self.store.add_fill(
+                    self.today(), (price - self.position.entry) * sold_q, side="SELL",
+                    qty=sold_q, price=price, fee=0.0, order_id=None,
+                    source=f"partial_{exit_reason or source}",
+                )
+            self.position.qty = remaining
+            remaining_s = _fmt_qty(remaining, self.qty_scale)
+            stop_id = self._place_stop(remaining_s, self.position.stop_price)
             if stop_id:
                 self.stop_order_id = stop_id
+                self.position.exit_reason = None
                 self._persist("OPEN")
                 return self.position
             self._persist("UNPROTECTED")
-            raise UnprotectedPosition(f"sell failed and stop could not be restored for {qty_s} BTC") from exc
+            raise UnprotectedPosition(f"sell failed and stop could not be restored for {remaining_s} BTC") from exc
 
         sell_id = self._order_id(resp)
         self.store.remember_order(sell_id)
@@ -606,7 +897,7 @@ class LiveHands:
             return self.position
         price, source = self._fill_price(sell_id, default=snap.bid or snap.last)
         pnl = (price - self.position.entry) * qty
-        self.store.add_fill(self.today(), pnl, side="SELL", qty=qty, price=price, fee=0.0, order_id=sell_id, source=source)
+        self.store.add_fill(self.today(), pnl, side="SELL", qty=qty, price=price, fee=0.0, order_id=sell_id, source=exit_reason or source)
         self._clear()
         return self.position
 
@@ -644,6 +935,18 @@ class LiveHands:
     def reconcile(self) -> str:
         """Bring the local row in line with the exchange. Returns a short verdict."""
         self._guard_stop_submission()
+        operation = self.store.kv_get(STOP_REPLACE_KEY)
+        if operation:
+            try:
+                return self._reconcile_replacement(json.loads(operation))
+            except Exception as exc:
+                # Even a storage/parser failure must preserve the fatal exit, not
+                # let the main loop back off and resume ordinary order execution.
+                try:
+                    self._persist("UNPROTECTED")
+                except Exception:
+                    log.exception("replacement state persistence failed; durable marker remains")
+                raise UnprotectedPosition("unfinished stop replacement; inspect exchange and durable marker") from exc
         if not self.position.is_open():
             return self._reconcile_flat()
         total = btc_total(self.client)
@@ -678,6 +981,18 @@ class LiveHands:
             self._persist()
 
         if not holding and self.position.state == "PENDING":
+            # Balance math alone is not proof the entry is gone for good: an
+            # order that is STILL RESTING on the book can fill at any moment,
+            # and dropping the row now means a later fill leaves the bot
+            # holding real BTC with nothing tracking or protecting it.
+            # Invariant 2 requires proof it did not fill -- it was resting and
+            # got cancelled -- not merely "the balance has not moved yet".
+            if self.entry_order_id and self.entry_order_id in ids:
+                log.warning(
+                    "pending entry %s is still resting on the book; keeping PENDING "
+                    "for a later reconcile", self.entry_order_id,
+                )
+                return "entry_still_open"
             # The entry never actually filled (see _buy: the row is kept PENDING
             # whenever the fill could not be confirmed). There was no position, so
             # there is no exit to book -- inventing a SELL here would write a
@@ -694,7 +1009,8 @@ class LiveHands:
             else:
                 price = self.position.stop_price or self.position.entry
             pnl = (price - self.position.entry) * qty
-            self.store.add_fill(self.today(), pnl, side="SELL", qty=qty, price=price, fee=0.0, order_id=self.stop_order_id, source="reconcile")
+            self.store.add_fill(self.today(), pnl, side="SELL", qty=qty, price=price, fee=0.0, order_id=self.stop_order_id,
+                                source=self.position.exit_reason or "reconcile")
             log.warning("position closed on the exchange (state %s); pnl est %.4f", self.position.state, pnl)
             self.store.kv_set(FOREIGN_BTC_KEY, repr(total))
             self._clear()

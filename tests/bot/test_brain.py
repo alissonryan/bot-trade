@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 
+import pytest
 import requests
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -36,6 +37,22 @@ def test_parse_truncates_reason():
     )
     assert intent is not None
     assert len(intent.reason) == 240
+
+
+@pytest.mark.parametrize("confidence", ["NaN", "Infinity", "-Infinity"])
+def test_parse_rejects_non_finite_confidence_json_literal(confidence):
+    # json.loads() accepts these non-standard tokens by default, so a model
+    # that emits a bare NaN/Infinity token (not a quoted string) must still
+    # be rejected -- comparisons against NaN are always False and would
+    # silently bypass the confidence gate downstream.
+    raw = '{"action":"BUY","confidence":%s,"reason":"x","regime":"trend"}' % confidence
+    assert parse_intent(raw) is None
+
+
+@pytest.mark.parametrize("confidence", ["NaN", "Infinity", "-Infinity", "nan", "inf", "-inf"])
+def test_parse_rejects_non_finite_confidence_string_form(confidence):
+    raw = '{"action":"BUY","confidence":"%s","reason":"x","regime":"trend"}' % confidence
+    assert parse_intent(raw) is None
 
 
 class FakeResp:

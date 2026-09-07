@@ -30,6 +30,17 @@ log = logging.getLogger("bot")
 
 DATA_DIR = Path("data")
 DB_PATH = DATA_DIR / "bot.db"
+
+
+def db_path_for_mode(mode: str) -> Path:
+    """One database per mode, so live can never reach a simulated position.
+
+    Paper keeps `bot.db` and its existing history; live gets its own file. The
+    separation is structural -- the stamp in `Store` and the provenance check in
+    `LiveHands` are the second and third layers, for a human who points a flag
+    somewhere unexpected.
+    """
+    return DB_PATH if mode == "paper" else DATA_DIR / f"bot-{mode}.db"
 LOCK_PATH = DATA_DIR / "bot.lock"
 LOG_PATH = DATA_DIR / "bot.log"
 
@@ -137,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         token = require_live_token()
         warn_token_age(os.getenv("KCEX_TOKEN_AT"))
     client = KcexClient(token=token or None)
-    store = Store(DB_PATH)
+    store = Store(db_path_for_mode(settings.mode), mode=settings.mode)
     eye = Eye(client, settings)
     eye.start_ws_thread()
     eye.load_rules()

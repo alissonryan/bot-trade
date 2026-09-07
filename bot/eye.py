@@ -99,7 +99,10 @@ class Eye:
             self.bid = bid
         if ask is not None:
             self.ask = ask
-        if bid is not None or ask is not None:
+        # Both sides, or the book is not fresh -- same rule as the REST path
+        # and the Hub: a one-sided frame leaves the other quote stale, and the
+        # take-profit compares against the BID.
+        if bid is not None and ask is not None:
             self.depth_update_ms = now_ms
         self.ws_ok = True
         self.ws_frames += 1
@@ -225,7 +228,12 @@ class Eye:
             self.bid = float(bids[0]["p"])
         if asks:
             self.ask = float(asks[0]["p"])
-        self.depth_update_ms = self._now_ms()
+        # Both sides, or the book is not fresh. A one-sided response leaves the
+        # other quote at whatever it was minutes ago, and the take-profit
+        # compares against the BID -- stamping on asks alone let it sell into a
+        # bid the venue was no longer showing. An empty book is not fresh either.
+        if bids and asks:
+            self.depth_update_ms = self._now_ms()
 
     def poll_quotes(self, *, force: bool = False) -> bool:
         """Refresh last/bid/ask over REST when the socket is not delivering. Never raises.
@@ -336,6 +344,7 @@ class Eye:
             bot_avg_entry=self.bot_avg_entry,
             ws_ok=self.ws_ok,
             stale=self._stale(),
+            depth_stale=self._depth_stale(),
             last_intent_action=self.last_intent_action,
             last_bot_pnl_usdt=self.last_bot_pnl_usdt,
         )
