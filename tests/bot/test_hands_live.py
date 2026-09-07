@@ -60,7 +60,8 @@ class FakeClient:
 
     def open_orders(self, **kw):
         self.calls.append(("open_orders",))
-        return {"data": [{"id": i} for i in self._next(self.open_ids)]}
+        rows = [{"id": i} for i in self._next(self.open_ids)]
+        return {"data": rows, "total": len(rows)}  # synthetic complete snapshot
 
     def place_market(self, **kwargs):
         self.calls.append(("market", kwargs))

@@ -251,3 +251,23 @@ For the record: `https://www.kcex.com/fapi/v1/contract/{ping,detail,ticker,depth
 - Spot BTC: `0.00064` **frozen** in a trigger sell
 - Fill: buy `0.00064 BTC` @ `77287.12` (~49.46 USDT), taker, fee 0
 - Open order: stop-market sell `0.00064 BTC` trigger `75722` (`orderType` 103, `LE`)
+
+### Complete open-order reads (P8)
+
+The request's `pageNum`/`pageSize` parameters above were captured; the private
+response pagination metadata is **not captured**. Tests are explicitly synthetic,
+not evidence that KCEX guarantees the accepted response contract.
+`kcex/orders.py` centralizes reads for ordinary stop-cancel confirmation, reconcile,
+and the P6 replacement foundation. It recognizes list envelopes already supported
+by hands (`data`, `resultList`, `list`, `orders`, `records`, `rows`), validates
+`total`, `pageSize`, and `pageNum` at envelope levels, and follows the server's
+declared page size. A short page alone never establishes completeness: all declared
+orders must be collected, or, with no total, an explicit empty page must be reached.
+
+The bound is 50 pages per collection. An unexhausted bound, repeated IDs, malformed
+IDs/envelopes, inconsistent metadata, or a failed page raises instead of returning
+a partial set. Ordinary SELL/reconcile therefore issue no subsequent market SELL
+or replacement trigger on an incomplete read; P6 retains its existing fatal/journal
+behavior. Pagination adds only GETs, no write retries. Page-number listing is not
+an atomic snapshot: undetectable concurrent membership changes and truthful totals
+still depend on venue semantics; this patch does not establish a live guarantee.

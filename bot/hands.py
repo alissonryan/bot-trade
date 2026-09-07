@@ -108,12 +108,11 @@ def btc_total(client: KcexClient) -> float:
     return total
 
 
-def open_order_ids(client: KcexClient) -> set[str]:
-    ids = set()
-    for row in _extract_list(client.open_orders()):
-        if isinstance(row, dict) and row.get("id") is not None:
-            ids.add(str(row["id"]))
-    return ids
+from kcex.orders import complete_open_order_ids
+
+
+def open_order_ids(client: KcexClient, *, max_pages: int = 50, page_size: int = 100) -> set[str]:
+    return complete_open_order_ids(client, max_pages=max_pages, page_size=page_size)
 
 
 def _first(row: dict[str, Any], keys: tuple[str, ...]) -> float | None:
