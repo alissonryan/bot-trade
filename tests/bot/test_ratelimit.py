@@ -79,3 +79,87 @@ def test_kill_switch_zero_never_raises(tmp_path):
     for _ in range(100):
         meter.record(ENTRY, now)
     meter.check_storm(now)
+
+
+class _FakeClient:
+    def __init__(self):
+        self.calls = []
+
+    def place_market(self, **kw):
+        self.calls.append("place_market")
+        return {"data": {"orderId": "1"}}
+
+    def place_limit(self, **kw):
+        self.calls.append("place_limit")
+        return {"data": {"orderId": "3"}}
+
+    def place_trigger(self, **kw):
+        self.calls.append("place_trigger")
+        return {"data": {"orderId": "2"}}
+
+    def cancel_order(self, order_id):
+        self.calls.append("cancel_order")
+        return {"code": 0}
+
+    def balances(self, **kw):
+        self.calls.append("balances")
+        return {}
+
+
+def test_wrap_records_entry_and_protective(tmp_path):
+    meter = _meter(tmp_path)
+    client = meter.wrap(_FakeClient())
+    client.place_market(side="BUY", quantity="0.001")
+    client.place_trigger(side="SELL", price="1")
+    client.cancel_order("abc")
+    counts = meter.counts(now_ms=int(__import__("time").time() * 1000))
+    assert counts.writes_1h == 3
+    assert counts.entries_24h == 1          # only the BUY market order is an ENTRY
+
+
+def test_a_sell_market_order_is_protective(tmp_path):
+    meter = _meter(tmp_path)
+    client = meter.wrap(_FakeClient())
+    client.place_market(side="SELL", quantity="0.001")
+    assert meter.counts(now_ms=int(__import__("time").time() * 1000)).entries_24h == 0
+
+
+def test_reads_are_passed_through_uncounted(tmp_path):
+    meter = _meter(tmp_path)
+    client = meter.wrap(_FakeClient())
+    client.balances(currencies="BTC,USDT")
+    assert meter.store.count_writes(since_ms=0) == 0
+
+
+def test_the_row_is_written_even_when_the_post_raises(tmp_path):
+    class Boom(_FakeClient):
+        def place_market(self, **kw):
+            raise RuntimeError("network")
+
+    meter = _meter(tmp_path)
+    client = meter.wrap(Boom())
+    with pytest.raises(RuntimeError):
+        client.place_market(side="BUY", quantity="0.001")
+    assert meter.store.count_writes(since_ms=0) == 1
+
+
+def test_every_write_method_on_the_real_client_is_metered():
+    """Guard: a new POST/DELETE on KcexClient must not slip through uncounted."""
+    import inspect
+
+    from bot.ratelimit import METERED_WRITE_METHODS
+    from kcex.client import KcexClient
+
+    writes = set()
+    for name, fn in inspect.getmembers(KcexClient, inspect.isfunction):
+        if name.startswith("_") or name in {"request", "get", "post", "delete"}:
+            continue
+        source = inspect.getsource(fn)
+        # cancel_order calls self.request("DELETE", ...) directly, not self.delete().
+        if ("self.post(" in source or "self.delete(" in source
+                or 'self.request("POST"' in source or 'self.request("DELETE"' in source):
+            writes.add(name)
+    assert writes == set(METERED_WRITE_METHODS), (
+        f"unmetered venue writes: {sorted(writes - set(METERED_WRITE_METHODS))}; "
+        f"stale entries: {sorted(set(METERED_WRITE_METHODS) - writes)}"
+    )

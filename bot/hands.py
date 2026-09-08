@@ -31,6 +31,7 @@ from decimal import Decimal, ROUND_DOWN
 from typing import Any, Callable, NoReturn
 
 from bot.collar import stop_for_entry, take_profit_for_entry
+from bot.ratelimit import ENTRY, PROTECTIVE, WriteMeter
 from bot.settings import Settings
 from bot.store import Store, StoreIdentityMismatch
 from bot.types import GateResult, Snapshot, SymbolRules
@@ -323,9 +324,10 @@ def _load(store: Store) -> tuple[Position, str | None, str | None]:
 
 
 class PaperHands:
-    def __init__(self, settings: Settings, store: Store):
+    def __init__(self, settings: Settings, store: Store, *, meter: WriteMeter | None = None):
         self.settings = settings
         self.store = store
+        self.meter = meter
         self.position, _, _ = _load(store)
         cached = store.kv_get(PAPER_CASH_KEY)
         self.cash = float(cached) if cached is not None else float(settings.paper_starting_usdt)
@@ -393,6 +395,14 @@ class PaperHands:
             self.store.remember_order("paper-entry")
             if new_position.stop_price:
                 self.store.remember_order("paper-stop")
+            if self.meter is not None:
+                # Paper writes to no venue, but it must cost the same rate-limit
+                # budget a live trade would -- otherwise the P0 replay is not
+                # faithful and `rate_limit` can never be exercised in paper.
+                now = int(time.time() * 1000)
+                self.meter.record(ENTRY, now)          # the entry market order
+                if gate.stop_price:
+                    self.meter.record(PROTECTIVE, now)  # the stop that follows it
             # The fill, the position row and the cash kv entry either all land
             # or none do -- a fill with no matching position/cash change (or
             # the reverse) is exactly the ledger corruption this closes.
@@ -417,6 +427,10 @@ class PaperHands:
         return self.position
 
     def _close(self, px: float, *, source: str, order_id: str) -> None:
+        if self.meter is not None:
+            now = int(time.time() * 1000)
+            self.meter.record(PROTECTIVE, now)      # cancel the resident stop
+            self.meter.record(PROTECTIVE, now)      # then the exit market order
         qty = self.position.qty
         pnl = (px - self.position.entry) * qty
         new_cash = self.cash + px * qty
@@ -467,10 +481,12 @@ class LiveHands:
         *,
         rules: SymbolRules | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        meter: WriteMeter | None = None,
     ):
         self.settings = settings
         self.store = store
-        self.client = client
+        self.meter = meter
+        self.client = meter.wrap(client) if meter is not None else client
         self.rules = rules
         self._sleep = sleep
         self.position, self.entry_order_id, self.stop_order_id = _load(store)
