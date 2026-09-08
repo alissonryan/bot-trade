@@ -10,7 +10,11 @@ prove a resident stop is still protecting the position -- capture the missing
 order-history/deals evidence in docs/kcex-spot-api.md, or inspect the exchange and exit
 by hand), 7 exit latch blocked (a durable EXIT-latch record, or a legacy CLOSING row
 with no latch, fences every write path; this is not auto-resumable and no timeout
-resolves it -- a human must inspect the exchange directly).
+resolves it -- a human must inspect the exchange directly), 8 write storm (venue writes
+in the last hour hit the kill ceiling -- a control-flow loop or a crash/restart loop;
+this process placed nothing this cycle and will NOT resume by itself -- read
+data/bot.log and the order_writes table, and if a position is open confirm protection
+on the exchange by hand before restarting).
 
 HALT CONTRACT for exit code 6 specifically (2026-09 third-round re-review corrected
 this): the barrier tick that can raise ``TerminalEvidenceUnavailable`` runs BEFORE
@@ -45,6 +49,7 @@ from bot.hands import (
     TerminalEvidenceUnavailable,
     UnprotectedPosition,
 )
+from bot.ratelimit import WriteMeter, WriteStormHalt
 from bot.settings import Settings
 from bot.store import Store
 from kcex.client import KcexClient
@@ -105,6 +110,11 @@ EXIT_TERMINAL_EVIDENCE_UNAVAILABLE = 6
 # remedy (inspect the in-flight state itself, not just the resident stop), so
 # it gets its own code rather than overloading either existing one.
 EXIT_EXIT_LATCH_BLOCKED = 7
+# The bot is issuing venue writes in a pattern nobody designed -- a control-flow
+# loop, or a crash/restart loop that survives an in-process counter. Distinct from
+# 2/5/6/7: those name a position that needs squaring by hand; 8 names the bot's own
+# behaviour. Read data/bot.log and the order_writes table before restarting it.
+EXIT_WRITE_STORM = 8
 
 
 class AlreadyRunning(RuntimeError):
@@ -222,20 +232,22 @@ def main(argv: list[str] | None = None) -> int:
             print(f"chart server failed to start: {exc}")
             return 1
         print(f"chart http://{settings.chart_host}:{settings.chart_port}/")
+    meter = WriteMeter(store, settings)
     if settings.mode == "live":
-        hands: PaperHands | LiveHands = LiveHands(settings, store, client, rules=eye.rules)
+        hands: PaperHands | LiveHands = LiveHands(settings, store, client, rules=eye.rules, meter=meter)
     else:
-        hands = PaperHands(settings, store)
+        hands = PaperHands(settings, store, meter=meter)
 
     try:
         with InstanceLock(LOCK_PATH):
-            return _loop(args.once, settings, client, store, eye, hands)
+            return _loop(args.once, settings, client, store, eye, hands, meter=meter)
     except AlreadyRunning as exc:
         log.error("%s", exc)
         return EXIT_ALREADY_RUNNING
 
 
-def _loop(once: bool, settings: Settings, client: KcexClient, store: Store, eye: Eye, hands: PaperHands | LiveHands) -> int:
+def _loop(once: bool, settings: Settings, client: KcexClient, store: Store, eye: Eye, hands: PaperHands | LiveHands,
+          meter: WriteMeter | None = None) -> int:
     budget = Budget(spent_usd=0.0, cap_usd=settings.llm_daily_budget_usd, day=utc_day())
     log.info("mode=%s symbol=%s cycle=%dmin ws=%s", settings.mode, settings.symbol, settings.cycle_minutes, settings.ws_enabled)
     try:
@@ -273,11 +285,23 @@ def _loop(once: bool, settings: Settings, client: KcexClient, store: Store, eye:
                 budget=budget,
                 last_llm_ms=last_llm_ms,
                 last_px=last_px,
+                meter=meter,
             )
             backoff = 1.0
         except SessionDead as exc:
             log.critical("session dead: %s. Run: python -m kcex.cli login", exc)
             return EXIT_SESSION_DEAD
+        except WriteStormHalt as exc:
+            log.critical(
+                "WRITE STORM: %s. This process placed nothing on this cycle and exits "
+                "now; it will NOT resume by itself. The counts come from the "
+                "order_writes table in this mode's database -- read them, and "
+                "data/bot.log, before restarting. If a position is open, the stop "
+                "observation above is the last thing reconcile() actually saw; confirm "
+                "protection on the exchange by hand.",
+                exc,
+            )
+            return EXIT_WRITE_STORM
         except UnprotectedPosition as exc:
             log.critical("UNPROTECTED POSITION: %s. Fix it on the exchange, then restart.", exc)
             return EXIT_UNPROTECTED

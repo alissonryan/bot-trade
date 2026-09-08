@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT))
 from bot.brain import Budget, ThinkResult
 from bot.cycle import SessionDead, due, run_once, unrealized_pnl
 from bot.hands import LiveHands, PaperHands, Position, UnprotectedPosition
+from bot.ratelimit import PROTECTIVE, WriteMeter, WriteStormHalt
 from bot.settings import Settings
 from bot.store import Store
 from bot.types import Bar, GateResult, Snapshot, SymbolRules, TradeIntent
@@ -500,3 +501,38 @@ def test_audit_failure_does_not_swallow_the_unprotected_halt(tmp_path):
             settings=s, eye=eye, store=store, client=NoClient(), hands=BoomHands(s, store),
             budget=Budget(0, 2, "2026-09-04"), last_llm_ms=0, last_px=0.0, think=think,
         )
+
+
+def test_storm_halts_before_the_llm_and_before_any_write(tmp_path):
+    store = Store(tmp_path / "bot.db", mode="paper")
+    settings = _settings(max_writes_per_hour=1, kill_writes_per_hour=1)
+    meter = WriteMeter(store, settings)
+    meter.record(PROTECTIVE, int(time.time() * 1000))
+    hands = PaperHands(settings, store)
+    eye = FakeEye()
+    called = []
+    with pytest.raises(WriteStormHalt):
+        run_once(
+            settings=settings, eye=eye, store=store, client=NoClient(), hands=hands,
+            budget=Budget(0, 2, ""), last_llm_ms=0, last_px=0.0,
+            think=lambda *a, **k: called.append("llm"),
+            meter=meter,
+        )
+    assert called == []          # the LLM was never reached
+
+
+def test_counts_reach_the_collar(tmp_path):
+    """A spent write budget must show up as a rate_limit gate in the audit."""
+    store = Store(tmp_path / "bot.db", mode="paper")
+    settings = _settings(max_writes_per_hour=1, kill_writes_per_hour=0)
+    meter = WriteMeter(store, settings)
+    meter.record(PROTECTIVE, int(time.time() * 1000))
+    hands = PaperHands(settings, store)
+    eye = FakeEye()
+    _, _, gate = run_once(
+        settings=settings, eye=eye, store=store, client=NoClient(), hands=hands,
+        budget=Budget(0, 2, ""), last_llm_ms=0, last_px=0.0,
+        think=lambda *a, **k: ThinkResult(TradeIntent("BUY", 1.0, "", "trend"), "ok"),
+        meter=meter,
+    )
+    assert gate is not None and gate.rule == "rate_limit"
