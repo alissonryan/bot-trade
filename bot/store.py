@@ -588,25 +588,28 @@ class Store:
         ).fetchone()
         return int(row[0]) if row else 0
 
-    def prune_writes(self, before_ms: int, *, after_ms: int | None = None, commit: bool = True) -> int:
+    def prune_writes(self, before_ms: int, *, commit: bool = True) -> int:
         """Delete rows older than ``before_ms``.
 
-        ``after_ms``, when given, additionally deletes rows stamped LATER than
-        it -- a row that far in the future cannot be a real write and would
-        otherwise sit in the table until real time caught up to it (never
-        pruned by the ``before_ms`` bound alone, since it is not old). The
-        caller is responsible for choosing a tolerance generous enough that
-        ordinary clock skew is never mistaken for a bogus row.
+        Age-only, deliberately one-sided: an earlier revision also deleted rows
+        stamped LATER than a tolerance around "now", to clear a row a forward
+        clock jump had stamped implausibly far in the future. That direction
+        was removed -- on a host with no RTC (the very case the tolerance's
+        own justification cites), the clock boots BEHIND real time, and the
+        boot ``reconcile()`` in ``bot/cli.py`` can be exactly the ordinary
+        write that ran this prune with ``now_ms`` still lagging: ``before_ms``
+        and the removed ``after_ms`` bound would then straddle every
+        genuinely recent row, permanently deleting the ledger on the very
+        restart this table exists to survive. A row stamped implausibly far
+        ahead is still never *counted* as recent -- see
+        ``WriteMeter.counts``/``check_storm`` and
+        ``bot.ratelimit.MAX_CLOCK_SKEW_MS`` -- it just is not deleted for
+        being that; it ages out through this same ``before_ms`` bound once
+        real time reaches it.
         """
-        if after_ms is None:
-            cur = self._conn.execute(
-                "DELETE FROM order_writes WHERE ts_ms < ?", (int(before_ms),)
-            )
-        else:
-            cur = self._conn.execute(
-                "DELETE FROM order_writes WHERE ts_ms < ? OR ts_ms > ?",
-                (int(before_ms), int(after_ms)),
-            )
+        cur = self._conn.execute(
+            "DELETE FROM order_writes WHERE ts_ms < ?", (int(before_ms),)
+        )
         if commit:
             self._conn.commit()
         return int(cur.rowcount or 0)

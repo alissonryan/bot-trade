@@ -66,7 +66,7 @@ class WriteMeter:
     def record(self, kind: str, now_ms: int) -> None:
         """Called BEFORE the POST. A write that times out may still have executed."""
         self.store.record_write(kind, now_ms)
-        self.store.prune_writes(now_ms - RETENTION_MS, after_ms=now_ms + MAX_CLOCK_SKEW_MS)
+        self.store.prune_writes(now_ms - RETENTION_MS)
 
     def counts(self, now_ms: int) -> WriteCounts:
         # An upper bound on the window, but a TOLERANT one (now_ms + skew, not a

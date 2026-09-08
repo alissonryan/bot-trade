@@ -66,26 +66,73 @@ def test_a_backward_clock_jump_still_counts_writes_made_moments_before_it(tmp_pa
     meter.check_storm(jumped_back_now)           # (kill_writes_per_hour default: no trip at 1)
 
 
-def test_record_prunes_rows_stamped_implausibly_far_in_the_future(tmp_path):
-    """The clock-skew tolerance in ``record()``'s prune must clear a bogus
-    future row once a normal-time write happens, while never touching a small,
-    plausible forward skew (a few minutes, not weeks)."""
+def test_backward_jump_just_inside_tolerance_still_counts_the_write(tmp_path):
+    """N2 boundary probe, inside edge: MAX_CLOCK_SKEW_MS is 1h, so a write
+    stamped moments ago is still within ``until_ms = now_ms + MAX_CLOCK_SKEW_MS``
+    for any backward step up to 1h. This pins the edge that
+    ``test_a_backward_clock_jump_still_counts_writes_made_moments_before_it``
+    (a 5-minute step) only demonstrates deep inside."""
+    meter = _meter(tmp_path, max_writes_per_hour=0, kill_writes_per_hour=1)
+    real_now = 10 * DAY
+    meter.record(PROTECTIVE, real_now)
+    jumped_back_now = real_now - (HOUR - 60_000)   # 59 minutes back: inside the 1h tolerance
+    counts = meter.counts(jumped_back_now)
+    assert counts.writes_1h == 1                    # still counted
+    with pytest.raises(WriteStormHalt):
+        meter.check_storm(jumped_back_now)           # the write is still visible to the hard ceiling too
+
+
+def test_backward_jump_just_outside_tolerance_silently_undercounts(tmp_path):
+    """N2 boundary probe, outside edge -- documenting the real, accepted
+    residual, not an ideal the code does not implement. Once a backward step
+    exceeds MAX_CLOCK_SKEW_MS (1h), the write's timestamp reads as further
+    ahead of the jumped-back `now` than the tolerance allows, and
+    ``until_ms = now_ms + MAX_CLOCK_SKEW_MS`` excludes it -- the same bound
+    that stops a forward-jumped row from being counted (F1) here drops a row
+    that really was written moments ago. The row itself is not deleted (see
+    ``test_record_does_not_prune_future_stamped_rows``); it is only invisible
+    to counting until real time closes the gap. That undercount reaches the
+    hard ceiling too: ``check_storm`` does not raise even though the write
+    happened and the ceiling is 1."""
+    meter = _meter(tmp_path, max_writes_per_hour=0, kill_writes_per_hour=1)
+    real_now = 10 * DAY
+    meter.record(PROTECTIVE, real_now)
+    jumped_back_now = real_now - (HOUR + 60_000)   # 61 minutes back: outside the 1h tolerance
+    counts = meter.counts(jumped_back_now)
+    assert counts.writes_1h == 0                    # undercounted -- the write is real and recent
+    meter.check_storm(jumped_back_now)               # does not raise: same undercount at the ceiling
+
+
+def test_record_does_not_prune_future_stamped_rows(tmp_path):
+    """N1: an earlier revision also had ``record()`` delete rows stamped
+    implausibly far ahead of its own ``now_ms`` (a "future prune"), on top of
+    the read-side upper bound. That delete is gone. On a host with no RTC --
+    the very environment the skew tolerance's own justification cites -- the
+    clock boots BEHIND real time, and the boot ``reconcile()`` in
+    ``bot/cli.py`` can be exactly the ordinary write that runs this prune
+    while ``now_ms`` still lags; the removed bound would then treat every
+    genuinely recent row as "future" and delete it permanently, wiping the
+    ledger on the very restart this table exists to survive. A far-future row
+    is still never *counted* as recent (see
+    ``test_a_future_stamped_row_does_not_wedge_counts_or_check_storm``); it is
+    simply no longer deleted for being far-future -- it ages out through the
+    ordinary ``before_ms`` retention prune once real time reaches it, like any
+    other row."""
     meter = _meter(tmp_path)
     now = 10 * DAY
-    meter.record(PROTECTIVE, now + 30 * DAY)    # implausible: a real clock jump
-    meter.record(PROTECTIVE, now + 30_000)      # plausible: 30s of ordinary skew
-    meter.record(PROTECTIVE, now)               # a normal write, whose own prune runs
+    meter.record(PROTECTIVE, now + 30 * DAY)    # an implausible, far-future stamp
+    meter.record(PROTECTIVE, now)               # an ordinary write; its own prune runs
     remaining = {row for (row,) in meter.store._conn.execute("SELECT ts_ms FROM order_writes")}
-    assert now + 30 * DAY not in remaining
-    assert now + 30_000 in remaining
+    assert now + 30 * DAY in remaining          # not deleted -- only ever excluded from counts
     assert now in remaining
 
 
 def test_record_prunes_only_beyond_48h(tmp_path):
-    # Recorded in chronological order deliberately: record()'s own prune now also
-    # drops rows implausibly far ahead of ITS now_ms (see the clock-skew tests
-    # below), so a later call's now_ms must not sit behind an earlier row's
-    # timestamp -- exactly the invariant a real, non-decreasing wall clock gives.
+    # Chronological order here matches how writes actually arrive, but it is
+    # not load-bearing: record() only prunes rows strictly OLDER than
+    # RETENTION_MS behind its own now_ms (N1 removed the future-side delete),
+    # so an out-of-order now_ms cannot make an earlier call's row look old by
+    # comparison the way it could before.
     meter = _meter(tmp_path)
     now = 10 * DAY
     meter.record(ENTRY, now - 49 * HOUR)
