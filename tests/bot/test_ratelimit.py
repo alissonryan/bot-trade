@@ -21,7 +21,7 @@ def _meter(tmp_path, **kwargs) -> WriteMeter:
 def test_counts_are_rolling_windows(tmp_path):
     meter = _meter(tmp_path)
     now = 10 * DAY
-    meter.record(ENTRY, now - HOUR - 1)        # outside both? no: inside 24h
+    meter.record(ENTRY, now - HOUR - 1)        # outside the 1h window, inside the 24h window
     meter.record(ENTRY, now - 1)               # inside both
     meter.record(PROTECTIVE, now - 1)
     counts = meter.counts(now)
@@ -29,11 +29,67 @@ def test_counts_are_rolling_windows(tmp_path):
     assert counts.entries_24h == 2             # both ENTRY rows are inside 24h
 
 
-def test_record_prunes_only_beyond_48h(tmp_path):
+def test_a_future_stamped_row_does_not_wedge_counts_or_check_storm(tmp_path):
+    """A forward clock jump (VM resume, a container with no RTC, an NTP step)
+    can stamp a row far in the future. Once the clock reads correctly again,
+    that row must not be counted as "in the last hour" for as long as it takes
+    real time to catch up to it -- or a single boot's writes look like a storm
+    on every subsequent boot, and the halt never self-clears (F1)."""
+    meter = _meter(tmp_path, max_writes_per_hour=0, kill_writes_per_hour=1)
+    real_now = 10 * DAY
+    skewed_future = real_now + 30 * DAY
+    meter.record(PROTECTIVE, skewed_future)     # written while the clock was 30 days ahead
+    counts = meter.counts(real_now)
+    assert counts.writes_1h == 0
+    assert counts.entries_24h == 0
+    meter.check_storm(real_now)                 # must not raise WriteStormHalt
+
+
+def test_a_backward_clock_jump_still_counts_writes_made_moments_before_it(tmp_path):
+    """The other clock direction (F6): a backward jump (an NTP correction, a
+    VM pause) must not let a genuinely recent write silently fall out of the
+    counting window -- that undercounting is exactly what would let a BUY
+    through that should have been refused. Before F1's upper bound existed,
+    the window had no ceiling at all, so a backward jump could only ever
+    widen it (the count could rise, never drop -- the property the collar
+    test `test_a_spent_budget_refuses_buy_and_still_allows_sell` exercises
+    from the collar side). The upper bound added for F1 must stay tolerant
+    enough that an ordinary backward step never reproduces the opposite bug:
+    a row written moments ago must still count even though "moments ago" now
+    reads as later than "now"."""
+    meter = _meter(tmp_path)
+    real_now = 10 * DAY
+    meter.record(PROTECTIVE, real_now)          # written right before the clock steps back
+    jumped_back_now = real_now - 5 * 60_000     # a 5-minute backward correction
+    counts = meter.counts(jumped_back_now)
+    assert counts.writes_1h == 1                # still counted, not silently dropped
+    meter.check_storm(jumped_back_now)           # (kill_writes_per_hour default: no trip at 1)
+
+
+def test_record_prunes_rows_stamped_implausibly_far_in_the_future(tmp_path):
+    """The clock-skew tolerance in ``record()``'s prune must clear a bogus
+    future row once a normal-time write happens, while never touching a small,
+    plausible forward skew (a few minutes, not weeks)."""
     meter = _meter(tmp_path)
     now = 10 * DAY
-    meter.record(ENTRY, now - 47 * HOUR)
+    meter.record(PROTECTIVE, now + 30 * DAY)    # implausible: a real clock jump
+    meter.record(PROTECTIVE, now + 30_000)      # plausible: 30s of ordinary skew
+    meter.record(PROTECTIVE, now)               # a normal write, whose own prune runs
+    remaining = {row for (row,) in meter.store._conn.execute("SELECT ts_ms FROM order_writes")}
+    assert now + 30 * DAY not in remaining
+    assert now + 30_000 in remaining
+    assert now in remaining
+
+
+def test_record_prunes_only_beyond_48h(tmp_path):
+    # Recorded in chronological order deliberately: record()'s own prune now also
+    # drops rows implausibly far ahead of ITS now_ms (see the clock-skew tests
+    # below), so a later call's now_ms must not sit behind an earlier row's
+    # timestamp -- exactly the invariant a real, non-decreasing wall clock gives.
+    meter = _meter(tmp_path)
+    now = 10 * DAY
     meter.record(ENTRY, now - 49 * HOUR)
+    meter.record(ENTRY, now - 47 * HOUR)
     meter.record(ENTRY, now)
     assert meter.store.count_writes(since_ms=0) == 2   # the 49h row is gone
 
@@ -65,7 +121,7 @@ def test_check_storm_raises_at_the_ceiling(tmp_path):
 
 
 def test_check_storm_reports_unknown_when_nothing_was_observed(tmp_path):
-    meter = _meter(tmp_path, max_writes_per_hour=1, kill_writes_per_hour=1)
+    meter = _meter(tmp_path, max_writes_per_hour=0, kill_writes_per_hour=1)
     now = 10 * DAY
     meter.record(PROTECTIVE, now)
     with pytest.raises(WriteStormHalt) as exc:

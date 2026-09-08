@@ -30,6 +30,11 @@ METERED_WRITE_METHODS = frozenset(
 HOUR_MS = 3_600_000
 DAY_MS = 86_400_000
 RETENTION_MS = 48 * HOUR_MS
+# A row stamped further ahead of "now" than this cannot be a real write -- ordinary
+# clock skew (NTP correction, a VM resume gap) is seconds to minutes, not hours. This
+# must stay well below RETENTION_MS/HOUR_MS so a small forward skew is never treated
+# as bogus and silently dropped.
+MAX_CLOCK_SKEW_MS = HOUR_MS
 
 
 class WriteStormHalt(RuntimeError):
@@ -61,12 +66,22 @@ class WriteMeter:
     def record(self, kind: str, now_ms: int) -> None:
         """Called BEFORE the POST. A write that times out may still have executed."""
         self.store.record_write(kind, now_ms)
-        self.store.prune_writes(now_ms - RETENTION_MS)
+        self.store.prune_writes(now_ms - RETENTION_MS, after_ms=now_ms + MAX_CLOCK_SKEW_MS)
 
     def counts(self, now_ms: int) -> WriteCounts:
+        # An upper bound on the window, but a TOLERANT one (now_ms + skew, not a
+        # bare now_ms): a strict "now" cutoff would fix the forward-jump wedge
+        # (F1) at the cost of breaking the opposite, pre-existing safety property
+        # -- a BACKWARD clock jump must not let genuinely recent writes silently
+        # fall out of the count, which is what refuses a BUY on a shrunk window
+        # in the first place. A row within the tolerance of "now" is always kept;
+        # only a row implausibly far ahead of it (cannot be real -- see
+        # MAX_CLOCK_SKEW_MS) is excluded. That is the only direction in which
+        # this bound is allowed to make the limiter more permissive.
+        until_ms = now_ms + MAX_CLOCK_SKEW_MS
         return WriteCounts(
-            writes_1h=self.store.count_writes(since_ms=now_ms - HOUR_MS),
-            entries_24h=self.store.count_writes(since_ms=now_ms - DAY_MS, kind=ENTRY),
+            writes_1h=self.store.count_writes(since_ms=now_ms - HOUR_MS, until_ms=until_ms),
+            entries_24h=self.store.count_writes(since_ms=now_ms - DAY_MS, kind=ENTRY, until_ms=until_ms),
         )
 
     def check_storm(self, now_ms: int, *, stop_observation: str | None = None) -> None:
@@ -74,7 +89,7 @@ class WriteMeter:
         ceiling = self.settings.kill_writes_per_hour
         if not ceiling:
             return
-        writes = self.store.count_writes(since_ms=now_ms - HOUR_MS)
+        writes = self.store.count_writes(since_ms=now_ms - HOUR_MS, until_ms=now_ms + MAX_CLOCK_SKEW_MS)
         if writes < ceiling:
             return
         raise WriteStormHalt(

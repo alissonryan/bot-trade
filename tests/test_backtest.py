@@ -360,3 +360,34 @@ def test_replay_can_trip_the_limiter_when_told_to():
     intents = [{"action": "BUY", "confidence": 1, "reason": "fixed", "regime": "trend"}] * 400
     result = replay(history, settings, fixed_policy(intents), spread_bps=0)
     assert any(d["gate"]["rule"] == "rate_limit" for d in result["decisions"])
+
+
+@pytest.mark.parametrize("exit_type,reentry_idx,expected_rule", [
+    ("gap_stop", 1, "ok_buy"),      # stop-fired exit bills 1 write: entry(2)+exit(1)=3 < ceiling(4)
+    ("llm_sell", 2, "rate_limit"),  # voluntary exit still bills 2 writes: entry(2)+exit(2)=4 >= ceiling(4)
+])
+def test_replay_a_stop_fired_exit_costs_fewer_writes_than_a_voluntary_one(exit_type, reentry_idx, expected_rule):
+    """F3: a stop firing AT THE EXCHANGE costs the live bot zero venue writes --
+    the venue executes it and reconcile() books it from a balance read. A
+    voluntary exit (LLM SELL, local TP/TTL, flatten) really does cancel the
+    resident stop first, then send an exit market order -- two writes. Replay
+    must bill the same asymmetry, not four writes for both shapes. With
+    MAX_WRITES_PER_HOUR=4: entry(2) + a stop-fired exit(1) = 3, under the
+    ceiling, so the immediate reentry is still allowed; entry(2) + a voluntary
+    exit(2) = 4, AT the ceiling, so the immediate reentry is refused."""
+    from dataclasses import replace
+    from bot.backtest import replay, fixed_policy
+    history = [Bar(1800000000 + i * 900, 100, 101, 99, 100) for i in range(27)]
+    actions = ["BUY"] * 6
+    if exit_type == "gap_stop":
+        history[22] = Bar(history[22].t, 95, 101, 95, 100)
+    else:
+        actions[1] = "SELL"
+        history[22] = Bar(history[22].t, 99, 99.5, 98.5, 99)
+    s = replace(Settings.from_env(), mode="paper", cooldown_minutes=0,
+                tp_atr_mult=0, time_limit_minutes=0,
+                max_writes_per_hour=4, max_entries_per_day=0, kill_writes_per_hour=0)
+    intents = [{"action": a, "confidence": 1, "reason": "fixed", "regime": "range"} for a in actions]
+    result = replay(history, s, fixed_policy(intents), spread_bps=0)
+    gates = [d["gate"] for d in result["decisions"]]
+    assert gates[reentry_idx]["rule"] == expected_rule

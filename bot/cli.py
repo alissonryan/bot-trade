@@ -12,9 +12,14 @@ by hand), 7 exit latch blocked (a durable EXIT-latch record, or a legacy CLOSING
 with no latch, fences every write path; this is not auto-resumable and no timeout
 resolves it -- a human must inspect the exchange directly), 8 write storm (venue writes
 in the last hour hit the kill ceiling -- a control-flow loop or a crash/restart loop;
-this process placed nothing this cycle and will NOT resume by itself -- read
-data/bot.log and the order_writes table, and if a position is open confirm protection
-on the exchange by hand before restarting).
+this process placed nothing THIS CYCLE (the barrier runs before any write in the
+cycle, not before any write ever -- a live boot's ``reconcile()`` runs earlier still
+and can itself issue one real repair write, so a supervisor restarting immediately
+still costs one write per restart) and will NOT resume itself; the count is a rolling
+window, not a latch, so it self-clears roughly an hour after the last recorded write
+-- an immediate restart will likely re-halt on the same count, a later one may not --
+read data/bot.log and the order_writes table, and if a position is open confirm
+protection on the exchange by hand before restarting).
 
 HALT CONTRACT for exit code 6 specifically (2026-09 third-round re-review corrected
 this): the barrier tick that can raise ``TerminalEvidenceUnavailable`` runs BEFORE
@@ -293,8 +298,12 @@ def _loop(once: bool, settings: Settings, client: KcexClient, store: Store, eye:
             return EXIT_SESSION_DEAD
         except WriteStormHalt as exc:
             log.critical(
-                "WRITE STORM: %s. This process placed nothing on this cycle and exits "
-                "now; it will NOT resume by itself. The counts come from the "
+                "WRITE STORM: %s. This process placed nothing THIS CYCLE (the barrier "
+                "runs before any write in the cycle -- a boot reconcile() ran earlier "
+                "still and may have written once) and exits now; it will NOT resume "
+                "itself, but the count is a rolling window, not a latch -- it self-clears "
+                "roughly an hour after the last recorded write, so restarting RIGHT NOW "
+                "will very likely re-halt on the same count. The counts come from the "
                 "order_writes table in this mode's database -- read them, and "
                 "data/bot.log, before restarting. If a position is open, the stop "
                 "observation above is the last thing reconcile() actually saw; confirm "

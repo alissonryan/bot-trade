@@ -77,10 +77,12 @@ class Settings:
         for name in ("max_writes_per_hour", "max_entries_per_day", "kill_writes_per_hour"):
             if getattr(self, name) < 0:
                 raise ValueError(f"invalid {name}: nonnegative integer required (0 disables)")
-        if 0 < self.kill_writes_per_hour < self.max_writes_per_hour:
+        if 0 < self.kill_writes_per_hour <= self.max_writes_per_hour:
             raise ValueError(
-                "invalid KILL_WRITES_PER_HOUR: a nonzero ceiling below MAX_WRITES_PER_HOUR "
-                "halts the process before the soft gate can refuse anything"
+                "invalid KILL_WRITES_PER_HOUR: a nonzero ceiling at or below MAX_WRITES_PER_HOUR "
+                "halts the process at (or before) the count where the soft gate would first "
+                "refuse, since the barrier runs before the collar each cycle -- the soft gate "
+                "can never be reached"
             )
 
     @classmethod

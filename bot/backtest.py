@@ -257,11 +257,21 @@ def replay(history: list[Bar], settings: Settings, policy, *, rules: SymbolRules
     def close(mid, t, reason, *, cooldown_t=None):
         nonlocal cash, qty, entry, stop, cost, day_pnl, entry_fee, target, last_loss_exit_ms
         exit_ms = (t if cooldown_t is None else cooldown_t) * 1000
-        # Same four writes a live trade costs: entry market + resident stop
-        # placed on entry (recorded in the BUY branch below), then here on
-        # exit the stop's cancel and the exit market order.
-        meter.record(PROTECTIVE, exit_ms)   # cancel the resident stop
-        meter.record(PROTECTIVE, exit_ms)   # then the exit market order
+        # Entry costs entry market + resident stop (recorded in the BUY branch
+        # below) either way. On exit: a voluntary exit (llm_sell, a local TP/TTL
+        # barrier, end_of_data) really does cancel the resident stop and then
+        # send an exit market order -- two writes, matching a live `_sell()`.
+        # `reason == "stop"` is the resident stop firing AT THE EXCHANGE: live
+        # sends zero writes for that (the venue executes it, reconcile() books
+        # it from a balance read -- see LiveHands._settle_closed_on_exchange).
+        # Billing one write, not the two a voluntary exit costs, keeps this
+        # replay's calibration honest without going all the way to zero, which
+        # would make replay strictly cheaper than any real exit could be (F3).
+        if reason == "stop":
+            meter.record(PROTECTIVE, exit_ms)   # the exit "market order" only
+        else:
+            meter.record(PROTECTIVE, exit_ms)   # cancel the resident stop
+            meter.record(PROTECTIVE, exit_ms)   # then the exit market order
         price = mid * sell_factor
         fee = qty * price * rules.taker_fee
         pnl = qty * (price - entry) - entry_fee - fee

@@ -562,22 +562,51 @@ class Store:
         if commit:
             self._conn.commit()
 
-    def count_writes(self, since_ms: int, kind: str | None = None) -> int:
-        if kind is None:
-            row = self._conn.execute(
-                "SELECT COUNT(*) FROM order_writes WHERE ts_ms > ?", (int(since_ms),)
-            ).fetchone()
-        else:
-            row = self._conn.execute(
-                "SELECT COUNT(*) FROM order_writes WHERE ts_ms > ? AND kind = ?",
-                (int(since_ms), str(kind)),
-            ).fetchone()
+    def count_writes(self, since_ms: int, kind: str | None = None, *, until_ms: int | None = None) -> int:
+        """Rows with ``since_ms < ts_ms``, optionally bounded above by ``until_ms``.
+
+        Without an upper bound, a row stamped while the system clock was ahead
+        (VM resume, a container with no RTC, an NTP step) counts as "in the
+        last hour" until real time catches up to it -- which can be days. The
+        caller (``WriteMeter``) passes a bound derived from its own ``now_ms``
+        (plus a tolerance for ordinary clock skew -- see
+        ``bot.ratelimit.MAX_CLOCK_SKEW_MS``), so an implausibly future-stamped
+        row can never be counted as recent, while a row within the tolerance
+        of "now" -- including one that now reads as later than "now" because
+        the clock stepped BACKWARD -- is never excluded.
+        """
+        clauses = ["ts_ms > ?"]
+        params: list[int | str] = [int(since_ms)]
+        if until_ms is not None:
+            clauses.append("ts_ms <= ?")
+            params.append(int(until_ms))
+        if kind is not None:
+            clauses.append("kind = ?")
+            params.append(str(kind))
+        row = self._conn.execute(
+            f"SELECT COUNT(*) FROM order_writes WHERE {' AND '.join(clauses)}", params
+        ).fetchone()
         return int(row[0]) if row else 0
 
-    def prune_writes(self, before_ms: int, *, commit: bool = True) -> int:
-        cur = self._conn.execute(
-            "DELETE FROM order_writes WHERE ts_ms < ?", (int(before_ms),)
-        )
+    def prune_writes(self, before_ms: int, *, after_ms: int | None = None, commit: bool = True) -> int:
+        """Delete rows older than ``before_ms``.
+
+        ``after_ms``, when given, additionally deletes rows stamped LATER than
+        it -- a row that far in the future cannot be a real write and would
+        otherwise sit in the table until real time caught up to it (never
+        pruned by the ``before_ms`` bound alone, since it is not old). The
+        caller is responsible for choosing a tolerance generous enough that
+        ordinary clock skew is never mistaken for a bogus row.
+        """
+        if after_ms is None:
+            cur = self._conn.execute(
+                "DELETE FROM order_writes WHERE ts_ms < ?", (int(before_ms),)
+            )
+        else:
+            cur = self._conn.execute(
+                "DELETE FROM order_writes WHERE ts_ms < ? OR ts_ms > ?",
+                (int(before_ms), int(after_ms)),
+            )
         if commit:
             self._conn.commit()
         return int(cur.rowcount or 0)

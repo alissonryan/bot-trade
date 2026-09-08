@@ -426,11 +426,22 @@ class PaperHands:
             self._close(px, source="paper", order_id="paper-exit")
         return self.position
 
-    def _close(self, px: float, *, source: str, order_id: str) -> None:
+    def _close(self, px: float, *, source: str, order_id: str, stop_fired: bool = False) -> None:
         if self.meter is not None:
             now = int(time.time() * 1000)
-            self.meter.record(PROTECTIVE, now)      # cancel the resident stop
-            self.meter.record(PROTECTIVE, now)      # then the exit market order
+            # A stop firing at the exchange costs the live bot ZERO venue writes --
+            # the venue executes it and reconcile() books it from a balance read,
+            # no cancel and no market order sent by us (see LiveHands._settle_
+            # closed_on_exchange). Billing it as one write, not the two a voluntary
+            # exit (LLM SELL, local TP, TTL, flatten) really does cost -- cancel the
+            # resident stop, then the exit market order -- keeps paper's calibration
+            # honest without going all the way to zero, which would make paper
+            # strictly cheaper than any real exit could ever be (F3).
+            if stop_fired:
+                self.meter.record(PROTECTIVE, now)   # the exit "market order" only
+            else:
+                self.meter.record(PROTECTIVE, now)   # cancel the resident stop
+                self.meter.record(PROTECTIVE, now)   # then the exit market order
         qty = self.position.qty
         pnl = (px - self.position.entry) * qty
         new_cash = self.cash + px * qty
@@ -463,7 +474,7 @@ class PaperHands:
                 reference = min(x for x in (snap.bid, snap.last) if x > 0)
                 px = min(reference, self.position.stop_price) * (1 - slip)
                 self.last_mark_reason = "stop"
-                self._close(px, source="paper_stop", order_id="paper-stop")
+                self._close(px, source="paper_stop", order_id="paper-stop", stop_fired=True)
         reason = local_exit_reason(self.position, snap, self.settings, now_ms if now_ms is not None else int(time.time() * 1000))
         if reason:
             self.last_mark_reason = reason

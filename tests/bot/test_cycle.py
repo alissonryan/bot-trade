@@ -504,8 +504,12 @@ def test_audit_failure_does_not_swallow_the_unprotected_halt(tmp_path):
 
 
 def test_storm_halts_before_the_llm_and_before_any_write(tmp_path):
+    # max_writes_per_hour=0 (soft gate off) isolates this test to the hard
+    # ceiling alone: a nonzero kill ceiling at or below the soft one is a
+    # config error since F5 (settings.py rejects it -- the soft gate would be
+    # dead code), which is not what this test is about.
     store = Store(tmp_path / "bot.db", mode="paper")
-    settings = _settings(max_writes_per_hour=1, kill_writes_per_hour=1)
+    settings = _settings(max_writes_per_hour=0, kill_writes_per_hour=1)
     meter = WriteMeter(store, settings)
     meter.record(PROTECTIVE, int(time.time() * 1000))
     hands = PaperHands(settings, store)

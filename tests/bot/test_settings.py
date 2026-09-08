@@ -109,6 +109,18 @@ def test_kill_ceiling_below_soft_limit_is_a_config_error(monkeypatch):
         Settings.from_env()
 
 
+def test_kill_ceiling_equal_to_soft_limit_is_also_a_config_error(monkeypatch):
+    # The barrier's check_storm runs before the collar in every cycle, so a
+    # kill ceiling equal to the soft limit halts on the very count at which
+    # the soft gate would first refuse -- the soft gate is unreachable either
+    # way, which is exactly the dead-soft-gate condition this guard exists to
+    # prevent (F5).
+    monkeypatch.setenv("MAX_WRITES_PER_HOUR", "30")
+    monkeypatch.setenv("KILL_WRITES_PER_HOUR", "30")
+    with pytest.raises(ValueError):
+        Settings.from_env()
+
+
 def test_kill_ceiling_zero_is_allowed_with_soft_limit_on(monkeypatch):
     monkeypatch.setenv("MAX_WRITES_PER_HOUR", "30")
     monkeypatch.setenv("KILL_WRITES_PER_HOUR", "0")

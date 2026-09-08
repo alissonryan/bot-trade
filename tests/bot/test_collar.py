@@ -492,9 +492,13 @@ def test_no_write_counts_means_no_limiter():
     assert gate.ok and gate.rule == "ok_buy"
 
 
-def test_a_backward_clock_jump_fails_closed_for_buy_only():
-    """A clock that jumps back shrinks the window, so the count rises. That must
-    refuse an entry and still let an exit out."""
+def test_a_spent_budget_refuses_buy_and_still_allows_sell():
+    """No clock is manipulated here (F6): this proves the collar's own gating
+    logic reads a spent ``WriteCounts`` the same way regardless of how it got
+    spent -- refuse the entry, never the exit. The clock-jump scenarios
+    themselves (backward AND forward) belong at the ``WriteMeter`` layer,
+    which is what actually takes ``now_ms`` as an input -- see
+    ``test_ratelimit.py``'s clock-skew tests."""
     spent = WriteCounts(writes_1h=10_000, entries_24h=10_000)
     settings = _settings(max_writes_per_hour=30)
     buy = decide(TradeIntent("BUY", 1.0, "", "trend"), _snap(), settings,

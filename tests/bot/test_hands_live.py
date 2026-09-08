@@ -814,3 +814,32 @@ def test_protective_writes_execute_with_the_budget_long_gone(tmp_path):
     assert hands._flatten("0.00025", _snap()) is True
 
     assert hands.cancel_if_ours(stop_id) is True
+
+
+def test_sell_executes_with_the_budget_long_gone(tmp_path):
+    """The spec's acceptance test names four protective paths that must all
+    still execute with every counter blown past every limit: `_place_stop`,
+    `_flatten`, `cancel_if_ours` (covered above) and `_sell`. `_sell` is the
+    one missing before this fix -- it is also the most safety-critical, since
+    it is the only one of the four that cancels a resident stop and then
+    sells, freeing BTC the stop was holding frozen (invariant 4)."""
+    store = Store(tmp_path / "bot-live-sell.db", mode="live")
+    meter = WriteMeter(
+        store,
+        _live_settings(max_writes_per_hour=1, max_entries_per_day=1, kill_writes_per_hour=0),
+    )
+    for _ in range(500):
+        meter.record(PROTECTIVE, int(time.time() * 1000))
+
+    _open_position(store)  # qty 0.00025, resident stop "oid-t"
+    client = FakeClient(btc=[FOREIGN_BTC + 0.00025, FOREIGN_BTC], open_ids=[set()])
+    hands = LiveHands(_live_settings(), store, client, sleep=lambda s: None, meter=meter)
+
+    pos = hands._sell(_snap(bid=81000, last=81001, ask=81002), exit_reason=None)
+
+    kinds = [c[0] for c in client.calls]
+    assert kinds.index("cancel") < kinds.index("market")   # cancel-confirm-sell, budget notwithstanding
+    assert pos.qty == 0.0
+    assert store.load_position() is None
+    fill = store.fills(1)[0]
+    assert fill["side"] == "SELL" and fill["pnl"] == pytest.approx((81000 - 80000) * 0.00025)
