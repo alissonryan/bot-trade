@@ -64,6 +64,9 @@ class Settings:
     time_limit_minutes: float = 0.0
     cooldown_minutes: float = 0.0
     journal_enabled: bool = False
+    max_writes_per_hour: int = 30
+    max_entries_per_day: int = 20
+    kill_writes_per_hour: int = 90
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.cooldown_minutes) or self.cooldown_minutes < 0:
@@ -71,6 +74,14 @@ class Settings:
         values = (self.tp_atr_mult, self.min_tp_pct, self.max_tp_pct, self.time_limit_minutes)
         if any(not math.isfinite(v) or v < 0 for v in values) or self.min_tp_pct > self.max_tp_pct:
             raise ValueError("invalid barrier configuration: finite nonnegative values and MIN_TP_PCT <= MAX_TP_PCT required")
+        for name in ("max_writes_per_hour", "max_entries_per_day", "kill_writes_per_hour"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"invalid {name}: nonnegative integer required (0 disables)")
+        if 0 < self.kill_writes_per_hour < self.max_writes_per_hour:
+            raise ValueError(
+                "invalid KILL_WRITES_PER_HOUR: a nonzero ceiling below MAX_WRITES_PER_HOUR "
+                "halts the process before the soft gate can refuse anything"
+            )
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -124,4 +135,7 @@ class Settings:
             time_limit_minutes=_f("TIME_LIMIT_MINUTES", 0.0),
             cooldown_minutes=_f("COOLDOWN_MINUTES", 0.0),
             journal_enabled=_b("JOURNAL_ENABLED", False),
+            max_writes_per_hour=_i("MAX_WRITES_PER_HOUR", 30),
+            max_entries_per_day=_i("MAX_ENTRIES_PER_DAY", 20),
+            kill_writes_per_hour=_i("KILL_WRITES_PER_HOUR", 90),
         )
