@@ -80,7 +80,7 @@ Blocking inside `KcexClient` was rejected. It would make `kcex/` depend on `bot/
 One new check in the BUY branch of `decide()`, placed immediately after `day_loss` and before `confidence`:
 
 ```python
-if write_counts is not None and _rate_limited(write_counts, settings):
+if write_counts is not None and rate_limited(write_counts, settings):
     return GateResult(False, "rate_limit", "BUY")
 ```
 

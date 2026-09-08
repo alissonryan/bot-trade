@@ -513,6 +513,20 @@ def test_no_write_counts_means_no_limiter():
     assert gate.ok and gate.rule == "ok_buy"
 
 
+def test_a_backward_clock_jump_fails_closed_for_buy_only():
+    """A clock that jumps back shrinks the window, so the count rises. That must
+    refuse an entry and still let an exit out."""
+    spent = WriteCounts(writes_1h=10_000, entries_24h=10_000)
+    settings = _settings(max_writes_per_hour=30)
+    buy = decide(TradeIntent("BUY", 1.0, "", "trend"), _flat_snap(), settings,
+                 session_ok=True, day_pnl_usdt=0.0, write_counts=spent)
+    held = replace(_flat_snap(), bot_qty=0.001, bot_avg_entry=100_000.0)
+    sell = decide(TradeIntent("SELL", 1.0, "", "trend"), held, settings,
+                  session_ok=True, day_pnl_usdt=0.0, write_counts=spent)
+    assert (buy.ok, buy.rule) == (False, "rate_limit")
+    assert sell.ok and sell.action == "SELL"
+
+
 def test_day_loss_outranks_rate_limit():
     # Ordering is observable in the audit; day_loss is the more serious fact.
     gate = decide(
@@ -753,15 +767,42 @@ and at the top of `_close`:
             self.meter.record(PROTECTIVE, now)      # then the exit market order
 ```
 
-- [ ] **Step 5: Run the suite**
+- [ ] **Step 5: Prove the protection paths still run with every counter blown**
+
+This is spec test item 3, and it is the one that matters most: the failure mode
+being designed against is a limiter that quietly stops a stop from being placed.
+Append to `tests/bot/test_hands_live.py`, reusing that file's mocked-client fixture:
+
+```python
+def test_protective_writes_execute_with_the_budget_long_gone(tmp_path):
+    store = Store(tmp_path / "bot-live.db", mode="live")
+    meter = WriteMeter(store, _settings(max_writes_per_hour=1, max_entries_per_day=1,
+                                        kill_writes_per_hour=0))
+    for _ in range(500):
+        meter.record(PROTECTIVE, int(time.time() * 1000))
+    hands = LiveHands(_settings(), store, FakeClient(), rules=_rules(), meter=meter)
+    # ... open a position through the file's existing helper, then:
+    assert hands._place_stop("0.001", 90_000.0) is not None
+    assert hands._flatten("0.001", _snap()) is True
+    assert hands.cancel_if_ours(hands.stop_order_id) is True
+```
+
+Adapt the position setup to the helpers `tests/bot/test_hands_live.py` already
+uses. The assertion that matters is that none of the three raises or returns a
+refusal because of the counter.
+
+Run: `PYTHONPATH=. python -m pytest tests/bot/test_hands_live.py -q`
+Expected: PASS.
+
+- [ ] **Step 6: Run the suite**
 
 Run: `PYTHONPATH=. python -m pytest tests -q`
 Expected: PASS. `LiveHands` tests construct without `meter`, get `None`, and behave exactly as before.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add bot/ratelimit.py bot/hands.py tests/bot/test_ratelimit.py
+git add bot/ratelimit.py bot/hands.py tests/bot/test_ratelimit.py tests/bot/test_hands_live.py
 git commit -m "feat(ratelimit,hands): meter every venue write at one choke point"
 ```
 
