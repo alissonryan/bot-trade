@@ -43,6 +43,7 @@ Python bot: OpenRouter LLM decides **BTC/USDT spot on KCEX**; a **code collar** 
 | `bot/cycle.py` | One loop step + audit row |
 | `bot/cli.py` | Loop, lock, log, exit codes |
 | `bot/store.py` | SQLite `data/bot.db` with migrations |
+| `bot/ratelimit.py` | Write meter, rolling counts, storm halt (exit 8) |
 | `kcex/client.py` | Reverse-engineered REST |
 | `kcex/login.py` | Playwright session capture |
 | `docs/kcex-spot-api.md` | Endpoint notes + confirmed public WS |
@@ -71,6 +72,10 @@ Each mode gets its own database (`bot/cli.py::db_path_for_mode`): paper keeps `d
 ## P2 cooldown
 
 `COOLDOWN_MINUTES=0` is opt-out. Positive durations gate BUY only, armed by the last persisted **losing** SELL fill (`pnl < 0`) and wall-clock decision time. A profitable exit does not arm it — blocking a continuation after a win only cancels profit, which is why Rafael Vargas retired the post-any-exit form (Apex Brief v17, Rule 3). SELL never queries cooldown history, and LLM scheduling is unchanged. No hands/live order changes. See AGENTS.md § P2 for restart, reconciliation, legacy timestamps, conservative intrabar replay timing, and the tiny-sample/no-evidence measurement limitation.
+
+## P5 rate limit
+
+Ships **on** by default: `MAX_WRITES_PER_HOUR=30`, `MAX_ENTRIES_PER_DAY=20`, `KILL_WRITES_PER_HOUR=90`; `0` disables each knob independently and all-zero reproduces pre-P5 behaviour exactly. Only BUY entries can be refused (reason `rate_limit`, after `day_loss`, before `confidence`); SELL/stop/cancel/flatten are always counted and never refused — a limiter that can block an exit can create an unprotected position. The hard ceiling halts the process at the cycle barrier, before any write, with **exit 8** (`WriteStormHalt`); it does not resume itself. Windows are rolling (1h / 24h), retention is 48h. Defaults are argued from cycle arithmetic, not measured against real write bursts — no live order has ever been sent through this client. See AGENTS.md § P5 for the full contract and the frozen-sample evidence limits.
 
 ## P4 journal
 
