@@ -61,3 +61,33 @@ def test_loop_halts_on_a_stuck_position(monkeypatch, tmp_path):
     code = cli._loop(True, settings, None, Store(tmp_path / "c.db"), FakeEye(), object())
 
     assert code == cli.EXIT_STUCK
+
+
+def test_write_storm_returns_exit_8(monkeypatch, tmp_path):
+    import bot.cli as cli
+    from bot.ratelimit import WriteStormHalt
+    from bot.settings import Settings
+    from bot.store import Store
+
+    class FakeEye:
+        rules = None
+
+        def connect_ws(self):
+            pass
+
+        def snapshot_rest(self):
+            pass
+
+    def boom(**kwargs):
+        raise WriteStormHalt("120 venue writes in the last hour (ceiling 90); "
+                             "resident stop last observed: stop_present")
+
+    monkeypatch.setattr(cli, "run_once", boom)
+    d = Settings.from_env().__dict__.copy()
+    d["mode"] = "paper"
+    settings = Settings(**d)
+
+    code = cli._loop(True, settings, None, Store(tmp_path / "c.db"), FakeEye(), object())
+
+    assert code == cli.EXIT_WRITE_STORM
+    assert cli.EXIT_WRITE_STORM == 8

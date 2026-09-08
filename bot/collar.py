@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 from decimal import Decimal, ROUND_DOWN
 
+from bot.ratelimit import WriteCounts, rate_limited
 from bot.settings import Settings
 from bot.types import GateResult, Snapshot, SymbolRules, TradeIntent
 
@@ -58,6 +59,7 @@ def decide(
     rules: SymbolRules | None = None,
     last_loss_exit_ms: int | None = None,
     now_ms: int | None = None,
+    write_counts: WriteCounts | None = None,
 ) -> GateResult:
     qty_scale = rules.qty_scale if rules else settings.qty_scale
     price_scale = rules.price_scale if rules else 2
@@ -105,6 +107,12 @@ def decide(
     # decision, not a bug fix -- do not add it here without asking the owner.
     if day_pnl_usdt + unrealized_pnl_usdt <= -abs(settings.max_day_loss_usdt):
         return GateResult(False, "day_loss", "BUY")
+    # How OFTEN we may write, not how much we may risk. Placed here so a
+    # day-loss halt still reports itself as day_loss -- the more serious fact.
+    # SELL returned above and never reads this: refusing an exit is how a
+    # rate limiter would create the unprotected position it was meant to prevent.
+    if write_counts is not None and rate_limited(write_counts, settings):
+        return GateResult(False, "rate_limit", "BUY")
     # parse_intent() already rejects a non-finite confidence, but this gate is
     # the last line of defense before an order is sized: every comparison
     # against NaN/Infinity is False, so `confidence < min_confidence` alone

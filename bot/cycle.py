@@ -13,6 +13,7 @@ from bot.collar import decide
 from bot.eye import Eye
 from bot.hands import LiveHands, PaperHands, local_exit_reason
 from bot.journal import record_decision, deferred_reflection
+from bot.ratelimit import WriteMeter
 from bot.settings import Settings
 from bot.store import Store
 from bot.types import GateResult, TradeIntent
@@ -58,6 +59,7 @@ def run_once(
     last_px: float,
     think: Callable[..., ThinkResult] | None = None,
     reflect: Callable | None = None,
+    meter: WriteMeter | None = None,
 ) -> tuple[int, float, GateResult | None]:
     eye.poll_quotes()  # never raises; a failure just leaves the quotes stale
     eye.bot_qty = hands.position.qty
@@ -71,6 +73,10 @@ def run_once(
     tick_enabled = settings.tp_atr_mult > 0 or settings.time_limit_minutes > 0
     hands.last_mark_reason = None
     try:
+        if meter is not None:
+            # Before any write and before the LLM. Never mid-write: aborting a
+            # half-finished exit is how a position ends up unprotected.
+            meter.check_storm(now, stop_observation=getattr(hands, "last_stop_observation", None))
         reason = local_exit_reason(hands.position, snap, settings, now)
         if settings.mode == "live" and reason:
             hands.last_mark_reason = reason
@@ -153,6 +159,7 @@ def run_once(
         last_loss_exit_ms=(store.last_loss_exit_ms()
                            if settings.cooldown_minutes > 0 and intent.action == "BUY" else None),
         now_ms=int(time.time() * 1000) if settings.cooldown_minutes > 0 else None,
+        write_counts=meter.counts(now) if meter is not None else None,
     )
 
     if settings.journal_enabled:

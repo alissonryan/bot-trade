@@ -112,6 +112,16 @@ class Store:
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)"
         )
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS order_writes (
+                id INTEGER PRIMARY KEY,
+                ts_ms INTEGER NOT NULL,
+                kind TEXT NOT NULL
+            )"""
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_order_writes_ts ON order_writes(ts_ms)"
+        )
         self._conn.execute("CREATE TABLE IF NOT EXISTS journal (id INTEGER PRIMARY KEY)")
         self._migrate()
         self._conn.commit()
@@ -541,6 +551,68 @@ class Store:
         )
         if commit:
             self._conn.commit()
+
+    # -- order write ledger -----------------------------------------------------
+
+    def record_write(self, kind: str, ts_ms: int, *, commit: bool = True) -> None:
+        """One row per venue write. Written BEFORE the POST is issued."""
+        self._conn.execute(
+            "INSERT INTO order_writes(ts_ms, kind) VALUES (?,?)", (int(ts_ms), str(kind))
+        )
+        if commit:
+            self._conn.commit()
+
+    def count_writes(self, since_ms: int, kind: str | None = None, *, until_ms: int | None = None) -> int:
+        """Rows with ``since_ms < ts_ms``, optionally bounded above by ``until_ms``.
+
+        Without an upper bound, a row stamped while the system clock was ahead
+        (VM resume, a container with no RTC, an NTP step) counts as "in the
+        last hour" until real time catches up to it -- which can be days. The
+        caller (``WriteMeter``) passes a bound derived from its own ``now_ms``
+        (plus a tolerance for ordinary clock skew -- see
+        ``bot.ratelimit.MAX_CLOCK_SKEW_MS``), so an implausibly future-stamped
+        row can never be counted as recent, while a row within the tolerance
+        of "now" -- including one that now reads as later than "now" because
+        the clock stepped BACKWARD -- is never excluded.
+        """
+        clauses = ["ts_ms > ?"]
+        params: list[int | str] = [int(since_ms)]
+        if until_ms is not None:
+            clauses.append("ts_ms <= ?")
+            params.append(int(until_ms))
+        if kind is not None:
+            clauses.append("kind = ?")
+            params.append(str(kind))
+        row = self._conn.execute(
+            f"SELECT COUNT(*) FROM order_writes WHERE {' AND '.join(clauses)}", params
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def prune_writes(self, before_ms: int, *, commit: bool = True) -> int:
+        """Delete rows older than ``before_ms``.
+
+        Age-only, deliberately one-sided: an earlier revision also deleted rows
+        stamped LATER than a tolerance around "now", to clear a row a forward
+        clock jump had stamped implausibly far in the future. That direction
+        was removed -- on a host with no RTC (the very case the tolerance's
+        own justification cites), the clock boots BEHIND real time, and the
+        boot ``reconcile()`` in ``bot/cli.py`` can be exactly the ordinary
+        write that ran this prune with ``now_ms`` still lagging: ``before_ms``
+        and the removed ``after_ms`` bound would then straddle every
+        genuinely recent row, permanently deleting the ledger on the very
+        restart this table exists to survive. A row stamped implausibly far
+        ahead is still never *counted* as recent -- see
+        ``WriteMeter.counts``/``check_storm`` and
+        ``bot.ratelimit.MAX_CLOCK_SKEW_MS`` -- it just is not deleted for
+        being that; it ages out through this same ``before_ms`` bound once
+        real time reaches it.
+        """
+        cur = self._conn.execute(
+            "DELETE FROM order_writes WHERE ts_ms < ?", (int(before_ms),)
+        )
+        if commit:
+            self._conn.commit()
+        return int(cur.rowcount or 0)
 
     def commit(self) -> None:
         """Public commit for callers that pass ``commit=False`` to add_fill /

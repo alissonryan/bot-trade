@@ -3,6 +3,8 @@ import os
 from pathlib import Path
 import sys
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
@@ -75,3 +77,51 @@ def test_chart_bind_defaults(monkeypatch):
     s = Settings.from_env()
     assert s.chart_port == 8765
     assert s.chart_host == "127.0.0.1"
+
+
+def test_rate_limit_defaults_are_on(monkeypatch):
+    for name in ("MAX_WRITES_PER_HOUR", "MAX_ENTRIES_PER_DAY", "KILL_WRITES_PER_HOUR"):
+        monkeypatch.delenv(name, raising=False)
+    s = Settings.from_env()
+    assert (s.max_writes_per_hour, s.max_entries_per_day, s.kill_writes_per_hour) == (30, 20, 90)
+
+
+def test_rate_limit_knobs_read_env(monkeypatch):
+    monkeypatch.setenv("MAX_WRITES_PER_HOUR", "5")
+    monkeypatch.setenv("MAX_ENTRIES_PER_DAY", "3")
+    monkeypatch.setenv("KILL_WRITES_PER_HOUR", "9")
+    s = Settings.from_env()
+    assert (s.max_writes_per_hour, s.max_entries_per_day, s.kill_writes_per_hour) == (5, 3, 9)
+
+
+def test_rate_limit_knobs_reject_negative(monkeypatch):
+    monkeypatch.setenv("MAX_WRITES_PER_HOUR", "-1")
+    with pytest.raises(ValueError):
+        Settings.from_env()
+
+
+def test_kill_ceiling_below_soft_limit_is_a_config_error(monkeypatch):
+    # A kill ceiling under the soft limit halts the process before the soft
+    # gate could ever refuse anything -- the soft gate would be dead code.
+    monkeypatch.setenv("MAX_WRITES_PER_HOUR", "30")
+    monkeypatch.setenv("KILL_WRITES_PER_HOUR", "10")
+    with pytest.raises(ValueError):
+        Settings.from_env()
+
+
+def test_kill_ceiling_equal_to_soft_limit_is_also_a_config_error(monkeypatch):
+    # The barrier's check_storm runs before the collar in every cycle, so a
+    # kill ceiling equal to the soft limit halts on the very count at which
+    # the soft gate would first refuse -- the soft gate is unreachable either
+    # way, which is exactly the dead-soft-gate condition this guard exists to
+    # prevent (F5).
+    monkeypatch.setenv("MAX_WRITES_PER_HOUR", "30")
+    monkeypatch.setenv("KILL_WRITES_PER_HOUR", "30")
+    with pytest.raises(ValueError):
+        Settings.from_env()
+
+
+def test_kill_ceiling_zero_is_allowed_with_soft_limit_on(monkeypatch):
+    monkeypatch.setenv("MAX_WRITES_PER_HOUR", "30")
+    monkeypatch.setenv("KILL_WRITES_PER_HOUR", "0")
+    assert Settings.from_env().kill_writes_per_hour == 0

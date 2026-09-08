@@ -24,6 +24,7 @@ from bot.collar import decide, stop_for_entry, take_profit_for_entry
 from bot.eye import Eye
 from bot.hands import Position, local_exit_reason
 from bot.journal import record_decision, deferred_reflection
+from bot.ratelimit import ENTRY, PROTECTIVE, WriteMeter
 from bot.settings import Settings
 from bot.store import Store
 from bot.types import Bar, GateResult, Snapshot, SymbolRules, TradeIntent
@@ -245,6 +246,9 @@ def replay(history: list[Bar], settings: Settings, policy, *, rules: SymbolRules
     trades, decisions = [], []
     journal = Store(Path(":memory:")) if settings.journal_enabled else None
     journal_ids = []
+    # Replay time, never wall clock -- the meter is fed bar.t*1000 exactly like
+    # `decide(..., now_ms=)`, so the artifact reflects the simulated timeline.
+    meter = WriteMeter(Store(Path(":memory:")), settings)
     # Research evaluates every bar; monetary authorization lives in CachedBrain.
     budget = Budget(0, settings.llm_daily_budget_usd if journal else math.inf, "")
     buy_factor = (1 + spread_bps / 20000) * (1 + slippage_bps / 10000)
@@ -253,6 +257,21 @@ def replay(history: list[Bar], settings: Settings, policy, *, rules: SymbolRules
     def close(mid, t, reason, *, cooldown_t=None):
         nonlocal cash, qty, entry, stop, cost, day_pnl, entry_fee, target, last_loss_exit_ms
         exit_ms = (t if cooldown_t is None else cooldown_t) * 1000
+        # Entry costs entry market + resident stop (recorded in the BUY branch
+        # below) either way. On exit: a voluntary exit (llm_sell, a local TP/TTL
+        # barrier, end_of_data) really does cancel the resident stop and then
+        # send an exit market order -- two writes, matching a live `_sell()`.
+        # `reason == "stop"` is the resident stop firing AT THE EXCHANGE: live
+        # sends zero writes for that (the venue executes it, reconcile() books
+        # it from a balance read -- see LiveHands._settle_closed_on_exchange).
+        # Billing one write, not the two a voluntary exit costs, keeps this
+        # replay's calibration honest without going all the way to zero, which
+        # would make replay strictly cheaper than any real exit could be (F3).
+        if reason == "stop":
+            meter.record(PROTECTIVE, exit_ms)   # the exit "market order" only
+        else:
+            meter.record(PROTECTIVE, exit_ms)   # cancel the resident stop
+            meter.record(PROTECTIVE, exit_ms)   # then the exit market order
         price = mid * sell_factor
         fee = qty * price * rules.taker_fee
         pnl = qty * (price - entry) - entry_fee - fee
@@ -300,7 +319,8 @@ def replay(history: list[Bar], settings: Settings, policy, *, rules: SymbolRules
         intent = result.intent or TradeIntent("HOLD", 0, result.reason, "unknown")
         gate = decide(intent, snap, settings, session_ok=True, day_pnl_usdt=day_pnl,
                       unrealized_pnl_usdt=qty * (snap.bid - entry), rules=rules,
-                      last_loss_exit_ms=last_loss_exit_ms, now_ms=bar.t * 1000)
+                      last_loss_exit_ms=last_loss_exit_ms, now_ms=bar.t * 1000,
+                      write_counts=meter.counts(bar.t * 1000))
         if barrier:
             gate = GateResult(False, barrier, "HOLD")
         if journal:
@@ -316,6 +336,8 @@ def replay(history: list[Bar], settings: Settings, policy, *, rules: SymbolRules
             if fill_qty * price + fee > cash:
                 raise ValueError("collar order exceeds replay cash after costs")
             qty, entry, entry_fee, entry_t = fill_qty, price, fee, bar.t
+            meter.record(ENTRY, bar.t * 1000)
+            meter.record(PROTECTIVE, bar.t * 1000)
             stop = float(stop_for_entry(entry, snap.atr, settings, rules))
             tp = take_profit_for_entry(entry, snap.atr, settings, rules)
             target = float(tp) if tp else None

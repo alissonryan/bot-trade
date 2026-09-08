@@ -134,3 +134,43 @@ def test_migrates_database_from_previous_schema(tmp_path):
     assert row["exit_reason"] is None
     store.add_fill("2026-09-04", 1.0, side="SELL", qty=0.00025, price=81000.0)
     assert store.fills(1)[0]["side"] == "SELL"
+
+
+def test_write_counts_survive_reopen(tmp_path):
+    path = tmp_path / "bot.db"
+    store = Store(path, mode="paper")
+    store.record_write("ENTRY", 1_000)
+    store.record_write("PROTECTIVE", 2_000)
+    store.close() if hasattr(store, "close") else None
+
+    reopened = Store(path, mode="paper")
+    assert reopened.count_writes(since_ms=0) == 2
+    assert reopened.count_writes(since_ms=0, kind="ENTRY") == 1
+
+
+def test_count_writes_is_a_half_open_window(tmp_path):
+    store = Store(tmp_path / "bot.db", mode="paper")
+    store.record_write("ENTRY", 1_000)
+    store.record_write("ENTRY", 2_000)
+    assert store.count_writes(since_ms=1_000) == 1  # strictly greater than
+    assert store.count_writes(since_ms=999) == 2
+
+
+def test_prune_spares_rows_inside_the_window(tmp_path):
+    store = Store(tmp_path / "bot.db", mode="paper")
+    store.record_write("ENTRY", 1_000)
+    store.record_write("ENTRY", 5_000)
+    assert store.prune_writes(before_ms=2_000) == 1
+    assert store.count_writes(since_ms=0) == 1
+
+
+def test_legacy_database_gains_the_table(tmp_path):
+    path = tmp_path / "bot.db"
+    Store(path, mode="paper")           # creates today's schema
+    import sqlite3
+    conn = sqlite3.connect(path)
+    conn.execute("DROP TABLE order_writes")
+    conn.commit()
+    conn.close()
+    reopened = Store(path, mode="paper")   # forward migration must recreate it
+    assert reopened.count_writes(since_ms=0) == 0

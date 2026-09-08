@@ -43,6 +43,7 @@ Python bot: OpenRouter LLM decides **BTC/USDT spot on KCEX**; a **code collar** 
 | `bot/cycle.py` | One loop step + audit row |
 | `bot/cli.py` | Loop, lock, log, exit codes |
 | `bot/store.py` | SQLite `data/bot.db` with migrations |
+| `bot/ratelimit.py` | Write meter, rolling counts, storm halt (exit 8) |
 | `kcex/client.py` | Reverse-engineered REST |
 | `kcex/login.py` | Playwright session capture |
 | `docs/kcex-spot-api.md` | Endpoint notes + confirmed public WS |
@@ -71,6 +72,10 @@ Each mode gets its own database (`bot/cli.py::db_path_for_mode`): paper keeps `d
 ## P2 cooldown
 
 `COOLDOWN_MINUTES=0` is opt-out. Positive durations gate BUY only, armed by the last persisted **losing** SELL fill (`pnl < 0`) and wall-clock decision time. A profitable exit does not arm it — blocking a continuation after a win only cancels profit, which is why Rafael Vargas retired the post-any-exit form (Apex Brief v17, Rule 3). SELL never queries cooldown history, and LLM scheduling is unchanged. No hands/live order changes. See AGENTS.md § P2 for restart, reconciliation, legacy timestamps, conservative intrabar replay timing, and the tiny-sample/no-evidence measurement limitation.
+
+## P5 rate limit
+
+Ships **on** by default: `MAX_WRITES_PER_HOUR=30`, `MAX_ENTRIES_PER_DAY=20`, `KILL_WRITES_PER_HOUR=90`; `0` disables each knob independently and all-zero reproduces pre-P5 behaviour exactly. Only BUY entries can be refused (reason `rate_limit`, after `day_loss`, before `confidence`); SELL/stop/cancel/flatten are always counted and never refused — a limiter that can block an exit can create an unprotected position. The hard ceiling halts the process at the cycle barrier, before any write **in the cycle**, with **exit 8** (`WriteStormHalt`); it does not resume itself, but the count is a rolling window, not a latch — it self-clears roughly an hour after the last recorded write, so an immediate restart will likely re-halt while a later one may not. The boot `reconcile()` in `bot/cli.py::_loop` runs before that barrier and can issue a real repair write, so a supervisor that restarts immediately still costs one write per restart. Windows are rolling (1h / 24h), retention is 48h; a row implausibly far in the future (a forward clock jump — VM resume, no RTC, an NTP step) is excluded from both windows by a skew-tolerant upper bound on `now_ms`, so a stale future row cannot wedge the process forever — the tolerance is generous enough that a normal backward clock step still counts writes made moments before it (F1). Pruning is age-only (`ts_ms < before_ms`): an earlier revision also deleted future-stamped rows on write, but that direction is wrong for this table — a no-RTC boot's clock lags real time, so the boot `reconcile()` write could straddle-delete a fully legitimate ledger on restart (N1). A far-future row is still never counted as recent; it just is not destroyed for being one, and ages out through the same retention bound once real time reaches it. A backward step past the tolerance still undercounts on the read side (untouched by N1) but destroys nothing. Paper/replay bill a stop-fired exit as one write (matching live's `reconcile()`-only cost) and a voluntary exit as two (cancel + exit, matching `_sell`) — not four for both. Defaults are argued from cycle arithmetic, not measured against real write bursts — no live order has ever been sent through this client. See AGENTS.md § P5 for the full contract and the frozen-sample evidence limits.
 
 ## P4 journal
 

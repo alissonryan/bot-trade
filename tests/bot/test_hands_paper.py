@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from bot.hands import PaperHands
+from bot.ratelimit import WriteMeter
 from bot.settings import Settings
 from bot.store import Store
 from bot.types import GateResult, Snapshot, Bar
@@ -360,3 +361,45 @@ def test_paper_stop_hit_fill_and_close_are_one_transaction(tmp_path, monkeypatch
     assert hands.position.qty == pytest.approx(0.00025)
     assert hands.cash == pytest.approx(cash_after_buy)
     assert store._conn.in_transaction is False
+
+
+# --- F3: a stop-out costs the meter what live actually pays, not a voluntary exit's toll ---
+
+
+def test_paper_stop_hit_bills_only_the_exit_write_not_a_cancel_too(tmp_path):
+    """A resident stop firing live costs the bot ZERO venue writes -- the
+    exchange executes it and reconcile() books it from a balance read, no
+    cancel and no market order sent by the bot (see LiveHands._settle_
+    closed_on_exchange). Paper must not bill this shape as if it had cancelled
+    a resident stop first: only the exit write is recorded, one PROTECTIVE
+    write, not two."""
+    store = Store(tmp_path / "x.db")
+    meter = WriteMeter(store, _settings(paper_starting_usdt=450.0))
+    hands = PaperHands(_settings(paper_starting_usdt=450.0), store, meter=meter)
+    hands.execute(_buy_gate(), _snap(ask=80010))
+    now = int(__import__("time").time() * 1000)
+    before = meter.counts(now).writes_1h
+
+    stopped = hands.mark(_snap(last=79100, bid=79090, ask=79110))
+
+    assert stopped.qty == 0.0
+    after = meter.counts(now).writes_1h
+    assert after - before == 1, "a stop-out exit must cost exactly one write, not the cancel+exit pair"
+
+
+def test_paper_voluntary_exit_still_bills_the_cancel_and_exit_pair(tmp_path):
+    """A voluntary exit (here: an LLM SELL via execute()) really does cancel a
+    resident stop first, then sends an exit market order live -- two writes,
+    unchanged by the F3 fix, which only carves out the stop-fired shape."""
+    store = Store(tmp_path / "x.db")
+    meter = WriteMeter(store, _settings(paper_starting_usdt=450.0))
+    hands = PaperHands(_settings(paper_starting_usdt=450.0), store, meter=meter)
+    hands.execute(_buy_gate(), _snap(ask=80010))
+    now = int(__import__("time").time() * 1000)
+    before = meter.counts(now).writes_1h
+
+    pos = hands.execute(GateResult(True, "ok_close", "SELL", qty="0.00025"), _snap(bid=81000))
+
+    assert pos.qty == 0.0
+    after = meter.counts(now).writes_1h
+    assert after - before == 2, "a voluntary exit must still cost the cancel + exit market order pair"
