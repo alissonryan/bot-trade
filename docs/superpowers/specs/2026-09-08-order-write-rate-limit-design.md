@@ -40,6 +40,8 @@ Not in this work: throttling GET/market data, per-second smoothing or sleeping t
 | --- | --- | --- | --- |
 | `MAX_WRITES_PER_HOUR` | 30 | refuse BUY | `0` |
 | `MAX_ENTRIES_PER_DAY` | 20 | refuse BUY | `0` |
+
+Both windows are **rolling**, not calendar: `writes_1h` counts the last 3,600,000 ms and `entries_24h` the last 86,400,000 ms. Neither resets at UTC midnight — a UTC-day counter would hand a loop a fresh allowance every midnight, and the day boundary is already load-bearing for `day_pnl` where it belongs.
 | `KILL_WRITES_PER_HOUR` | 90 | halt, exit 8 | `0` |
 
 `Settings.__post_init__` rejects negative or non-finite values, matching the `cooldown_minutes` guard. A `KILL_WRITES_PER_HOUR` that is nonzero and below `MAX_WRITES_PER_HOUR` is a configuration error and raises: it would halt the process before the soft gate could ever refuse anything.
