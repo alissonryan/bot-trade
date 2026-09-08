@@ -112,6 +112,16 @@ class Store:
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)"
         )
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS order_writes (
+                id INTEGER PRIMARY KEY,
+                ts_ms INTEGER NOT NULL,
+                kind TEXT NOT NULL
+            )"""
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_order_writes_ts ON order_writes(ts_ms)"
+        )
         self._conn.execute("CREATE TABLE IF NOT EXISTS journal (id INTEGER PRIMARY KEY)")
         self._migrate()
         self._conn.commit()
@@ -541,6 +551,36 @@ class Store:
         )
         if commit:
             self._conn.commit()
+
+    # -- order write ledger -----------------------------------------------------
+
+    def record_write(self, kind: str, ts_ms: int, *, commit: bool = True) -> None:
+        """One row per venue write. Written BEFORE the POST is issued."""
+        self._conn.execute(
+            "INSERT INTO order_writes(ts_ms, kind) VALUES (?,?)", (int(ts_ms), str(kind))
+        )
+        if commit:
+            self._conn.commit()
+
+    def count_writes(self, since_ms: int, kind: str | None = None) -> int:
+        if kind is None:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM order_writes WHERE ts_ms > ?", (int(since_ms),)
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM order_writes WHERE ts_ms > ? AND kind = ?",
+                (int(since_ms), str(kind)),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def prune_writes(self, before_ms: int, *, commit: bool = True) -> int:
+        cur = self._conn.execute(
+            "DELETE FROM order_writes WHERE ts_ms < ?", (int(before_ms),)
+        )
+        if commit:
+            self._conn.commit()
+        return int(cur.rowcount or 0)
 
     def commit(self) -> None:
         """Public commit for callers that pass ``commit=False`` to add_fill /
