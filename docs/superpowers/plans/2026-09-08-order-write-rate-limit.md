@@ -592,8 +592,8 @@ git commit -m "feat(collar): refuse BUY when the write budget is spent"
 **Interfaces:**
 - Consumes: `WriteMeter.record`, `ENTRY`, `PROTECTIVE` (Task 3).
 - Produces:
-  - `WriteMeter.wrap(client) -> _MeteredClient` — proxies the whole `KcexClient` surface; `place_market`, `place_trigger` and `cancel_order` record first, then delegate.
-  - `METERED_WRITE_METHODS: frozenset[str] = frozenset({"place_market", "place_trigger", "cancel_order"})`
+  - `WriteMeter.wrap(client) -> _MeteredClient` — proxies the whole `KcexClient` surface; every method in `METERED_WRITE_METHODS` records first, then delegates.
+  - `METERED_WRITE_METHODS: frozenset[str] = frozenset({"place_market", "place_limit", "place_trigger", "cancel_order"})`
   - `PaperHands(settings, store, *, meter=None)` and `LiveHands(settings, store, client, *, rules=None, sleep=time.sleep, meter=None)`.
 
 The proxy is the choke point on purpose. Recording at each call site in `bot/hands.py` works today and silently misses the write someone adds next month.
@@ -611,6 +611,10 @@ class _FakeClient:
         self.calls.append("place_market")
         return {"data": {"orderId": "1"}}
 
+    def place_limit(self, **kw):
+        self.calls.append("place_limit")
+        return {"data": {"orderId": "3"}}
+
     def place_trigger(self, **kw):
         self.calls.append("place_trigger")
         return {"data": {"orderId": "2"}}
@@ -627,8 +631,8 @@ class _FakeClient:
 def test_wrap_records_entry_and_protective(tmp_path):
     meter = _meter(tmp_path)
     client = meter.wrap(_FakeClient())
-    client.place_market(side=1)
-    client.place_trigger(price="1")
+    client.place_market(side="BUY", quantity="0.001")
+    client.place_trigger(side="SELL", price="1")
     client.cancel_order("abc")
     counts = meter.counts(now_ms=int(__import__("time").time() * 1000))
     assert counts.writes_1h == 3
@@ -638,7 +642,7 @@ def test_wrap_records_entry_and_protective(tmp_path):
 def test_a_sell_market_order_is_protective(tmp_path):
     meter = _meter(tmp_path)
     client = meter.wrap(_FakeClient())
-    client.place_market(side=2)
+    client.place_market(side="SELL", quantity="0.001")
     assert meter.counts(now_ms=int(__import__("time").time() * 1000)).entries_24h == 0
 
 
@@ -657,7 +661,7 @@ def test_the_row_is_written_even_when_the_post_raises(tmp_path):
     meter = _meter(tmp_path)
     client = meter.wrap(Boom())
     with pytest.raises(RuntimeError):
-        client.place_market(side=1)
+        client.place_market(side="BUY", quantity="0.001")
     assert meter.store.count_writes(since_ms=0) == 1
 
 
@@ -673,7 +677,9 @@ def test_every_write_method_on_the_real_client_is_metered():
         if name.startswith("_") or name in {"request", "get", "post", "delete"}:
             continue
         source = inspect.getsource(fn)
-        if "self.post(" in source or "self.delete(" in source:
+        # cancel_order calls self.request("DELETE", ...) directly, not self.delete().
+        if ("self.post(" in source or "self.delete(" in source
+                or 'self.request("POST"' in source or 'self.request("DELETE"' in source):
             writes.add(name)
     assert writes == set(METERED_WRITE_METHODS), (
         f"unmetered venue writes: {sorted(writes - set(METERED_WRITE_METHODS))}; "
@@ -695,7 +701,12 @@ Add to `bot/ratelimit.py`:
 ```python
 import time
 
-METERED_WRITE_METHODS = frozenset({"place_market", "place_trigger", "cancel_order"})
+METERED_WRITE_METHODS = frozenset(
+    # Every KcexClient method that issues a POST or DELETE, not only the ones
+    # bot/hands.py calls today. place_limit is unused by the bot right now; it is
+    # metered anyway so that using it later cannot silently bypass the counter.
+    {"place_market", "place_limit", "place_trigger", "cancel_order"}
+)
 
 
 class _MeteredClient:
