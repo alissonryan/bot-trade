@@ -331,3 +331,32 @@ def test_slippage_applies_to_quote_like_paper_hands():
     baseline = buy_and_hold(history, settings, spread_bps=20, slippage_bps=20)
     assert baseline["trades"][0]["entry_price"] == result["trades"][0]["entry_price"]
     assert baseline["trades"][0]["exit_price"] == result["trades"][0]["exit_price"]
+
+
+def test_replay_counts_writes_and_defaults_never_trip():
+    """Shipped defaults (30/hr, 20/day) must never trip on a normal sample.
+
+    400 BUY signals against a monotonically rising book means exactly one
+    real entry (everything after is refused as `already_long`); the meter
+    only ever sees the entry's own two writes, far under any default ceiling.
+    """
+    from dataclasses import replace
+    from bot.backtest import replay, fixed_policy
+
+    history = bars(400)
+    settings = replace(Settings.from_env(), mode="paper")
+    intents = [{"action": "BUY", "confidence": 1, "reason": "fixed", "regime": "trend"}] * 400
+    result = replay(history, settings, fixed_policy(intents), spread_bps=0)
+    assert not any(d["gate"]["rule"] == "rate_limit" for d in result["decisions"])
+
+
+def test_replay_can_trip_the_limiter_when_told_to():
+    """Sanity check for the previous test: the wiring can actually trip."""
+    from dataclasses import replace
+    from bot.backtest import replay, fixed_policy
+
+    history = bars(400)
+    settings = replace(Settings.from_env(), mode="paper", max_writes_per_hour=1)
+    intents = [{"action": "BUY", "confidence": 1, "reason": "fixed", "regime": "trend"}] * 400
+    result = replay(history, settings, fixed_policy(intents), spread_bps=0)
+    assert any(d["gate"]["rule"] == "rate_limit" for d in result["decisions"])
