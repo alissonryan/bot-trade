@@ -19,7 +19,7 @@ Para agentes (Claude Code, Cursor, Codex, Grok): leia [AGENTS.md](AGENTS.md) e [
 | BTC que não é do bot | O `reconcile` guarda em `foreign_btc` (kv) quanto BTC da conta não é dele. Se um stop **seu** dispara, o bot reconhece que o que saiu não é do tamanho dele e mantém a própria posição em vez de lançar uma saída fantasma. (Em 2026-09-07 a conta estava sem BTC e sem ordens abertas — a proteção continua valendo para quando voltar a ter.) |
 | Observabilidade | Cada decisão grava no audit o snapshot (preço, bid, ask, ATR), o motivo do LLM (`ok`, `llm_budget`, `llm_timeout`, …), o custo real da chamada, os ids de ordem e o estado da posição. Log em `data/bot.log`. |
 | Conta humana | O bot **não cancela** ids que não gravou. (O stop manual de 0.00064 @ 75722 citado antes aqui não existe mais: foi encerrado sem disparar; a regra vale para qualquer ordem sua.) |
-| Git | `PYTHONPATH=. python -m pytest tests -q`. |
+| Git | `./scripts/test`. |
 
 Spec: [docs/superpowers/specs/2026-09-04-kcex-llm-spot-bot-design.md](docs/superpowers/specs/2026-09-04-kcex-llm-spot-bot-design.md) (ver o adendo no fim)  
 APIs: [docs/kcex-spot-api.md](docs/kcex-spot-api.md)
@@ -144,7 +144,7 @@ Opcional: `KCEX_EMAIL` e `KCEX_PASSWORD` só preenchem o form. Captcha e 2FA con
 ## Testes
 
 ```bash
-PYTHONPATH=. python -m pytest tests -q
+./scripts/test
 ```
 
 Nenhuma ordem live nos testes. O cliente KCEX e o socket são simulados.

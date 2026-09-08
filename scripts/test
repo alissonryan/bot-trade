@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Run the test suite under an interpreter that actually has this project's
+# dependencies.
+#
+# Why this exists: `python -m pytest` picks up whatever `python` means in the
+# caller's PATH. On this machine the system interpreter has neither
+# `websockets` nor `playwright`, so the chart-server tests fail with an import
+# error that reads exactly like a pre-existing gap in the project. A whole
+# session of agent-written reports repeated "2 pre-existing failures" that way
+# before anyone ran the suite under .venv and saw it green.
+#
+# A git worktree has no .venv of its own (it is gitignored), so this also looks
+# in the main checkout the worktree belongs to.
+set -euo pipefail
+
+find_python() {
+  if [[ -n "${VIRTUAL_ENV:-}" && -x "$VIRTUAL_ENV/bin/python" ]]; then
+    echo "$VIRTUAL_ENV/bin/python"; return
+  fi
+  local root main
+  root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+  if [[ -x "$root/.venv/bin/python" ]]; then
+    echo "$root/.venv/bin/python"; return
+  fi
+  # In a worktree, .git is a file and the real repo lives elsewhere.
+  main=$(git rev-parse --git-common-dir 2>/dev/null || echo "")
+  if [[ -n "$main" && -x "$(dirname "$main")/.venv/bin/python" ]]; then
+    echo "$(dirname "$main")/.venv/bin/python"; return
+  fi
+  return 1
+}
+
+if ! PY=$(find_python); then
+  cat >&2 <<'MSG'
+No project virtualenv found.
+
+Looked at: $VIRTUAL_ENV, ./.venv, and the main checkout's .venv.
+
+Create one, then re-run:
+
+    python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+Do NOT fall back to a bare `python -m pytest`: the system interpreter is
+missing this project's dependencies, and the resulting import errors look
+like project failures rather than an environment mistake.
+MSG
+  exit 1
+fi
+
+echo "interpreter: $PY" >&2
+PYTHONPATH=. exec "$PY" -m pytest "${@:-tests}" -q

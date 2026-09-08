@@ -51,7 +51,7 @@ Python bot: OpenRouter LLM decides **BTC/USDT spot on KCEX**; a **code collar** 
 ## Run
 
 ```bash
-PYTHONPATH=. python -m pytest tests -q
+./scripts/test                                  # the whole suite, under the project venv
 PYTHONPATH=. python -m bot run --once          # paper, one LLM cycle
 PYTHONPATH=. python -m bot run                 # paper loop
 PYTHONPATH=. python -m bot run --chart         # paper loop + local chart at http://127.0.0.1:8765/

@@ -125,7 +125,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python -m playwright install chrome
 
-PYTHONPATH=. python -m pytest tests -q
+./scripts/test
 PYTHONPATH=. python -m kcex.cli login
 PYTHONPATH=. python -m kcex.cli ticker BTC_USDT
 PYTHONPATH=. python -m kcex.cli balances
@@ -137,7 +137,10 @@ Audit: `sqlite3 data/bot.db "select ts, action, rule, json_extract(payload,'$.ll
 
 ## Tests
 
-- `PYTHONPATH=. .venv/bin/python -m pytest tests -q`
+- `./scripts/test` — resolves the project virtualenv ($VIRTUAL_ENV, ./.venv, or the main checkout's,
+  since a worktree has none) and refuses to run under an interpreter missing a requirement. Never run
+  `python -m pytest` directly: the system interpreter lacks `websockets` and `playwright`, and the
+  import errors that produces read like project failures. `tests/conftest.py` enforces this.
 - No live orders in CI. The socket is never opened in tests (`connect` is injected).
 - TDD for new collar/risk/hands behavior. Regression tests to keep: ATR gap-to-prev-close; day-loss still allows SELL; stale still allows SELL; every live invariant above; schema migration from the previous `bot.db`.
 
