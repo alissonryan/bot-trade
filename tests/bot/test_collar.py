@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from bot.collar import _round_qty, decide, stop_for_entry
+from bot.ratelimit import WriteCounts
 from bot.settings import Settings
 from bot.types import Bar, Snapshot, SymbolRules, TradeIntent
 
@@ -459,3 +460,58 @@ def test_unrealized_day_loss_cannot_change_a_buy_outcome():
     without = decide(buy, _snap(bot_qty=0.0002), s, session_ok=True, day_pnl_usdt=0.0, unrealized_pnl_usdt=0.0)
     assert held.ok is False and without.ok is False
     assert held.rule == "day_loss" and without.rule == "already_long"
+
+
+def test_buy_refused_when_writes_exhausted():
+    gate = decide(
+        TradeIntent("BUY", 1.0, "", "trend"), _snap(),
+        _settings(max_writes_per_hour=2),
+        session_ok=True, day_pnl_usdt=0.0,
+        write_counts=WriteCounts(writes_1h=2, entries_24h=0),
+    )
+    assert (gate.ok, gate.rule) == (False, "rate_limit")
+
+
+def test_sell_is_never_rate_limited():
+    snap = _snap(bot_qty=0.001, bot_avg_entry=100_000.0)
+    gate = decide(
+        TradeIntent("SELL", 1.0, "", "trend"), snap,
+        _settings(max_writes_per_hour=1),
+        session_ok=True, day_pnl_usdt=0.0,
+        write_counts=WriteCounts(writes_1h=10_000, entries_24h=10_000),
+    )
+    assert gate.ok and gate.action == "SELL"
+
+
+def test_no_write_counts_means_no_limiter():
+    gate = decide(
+        TradeIntent("BUY", 1.0, "", "trend"), _snap(),
+        _settings(max_writes_per_hour=1),
+        session_ok=True, day_pnl_usdt=0.0,
+    )
+    assert gate.ok and gate.rule == "ok_buy"
+
+
+def test_a_backward_clock_jump_fails_closed_for_buy_only():
+    """A clock that jumps back shrinks the window, so the count rises. That must
+    refuse an entry and still let an exit out."""
+    spent = WriteCounts(writes_1h=10_000, entries_24h=10_000)
+    settings = _settings(max_writes_per_hour=30)
+    buy = decide(TradeIntent("BUY", 1.0, "", "trend"), _snap(), settings,
+                 session_ok=True, day_pnl_usdt=0.0, write_counts=spent)
+    held = _snap(bot_qty=0.001, bot_avg_entry=100_000.0)
+    sell = decide(TradeIntent("SELL", 1.0, "", "trend"), held, settings,
+                  session_ok=True, day_pnl_usdt=0.0, write_counts=spent)
+    assert (buy.ok, buy.rule) == (False, "rate_limit")
+    assert sell.ok and sell.action == "SELL"
+
+
+def test_day_loss_outranks_rate_limit():
+    # Ordering is observable in the audit; day_loss is the more serious fact.
+    gate = decide(
+        TradeIntent("BUY", 1.0, "", "trend"), _snap(),
+        _settings(max_writes_per_hour=1, max_day_loss_usdt=10.0),
+        session_ok=True, day_pnl_usdt=-50.0,
+        write_counts=WriteCounts(writes_1h=10_000, entries_24h=0),
+    )
+    assert gate.rule == "day_loss"
