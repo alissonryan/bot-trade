@@ -71,7 +71,7 @@ def test_reflection_reserves_decision_budget_and_charges_real_cost():
         'The range thesis failed. Wait for confirmation next time.'}}], 'usage': {'cost': .003}}
     reflected = reflect_result({'outcome': {'kind': 'closed'}}, s, budget, http_post=post)
     assert reflected.reason == 'reflection_ok'
-    assert budget.spent_usd == .003
+    assert budget.spent_usd == pytest.approx(.003)
     assert post.call_args.kwargs['json']['max_tokens'] == 160
 
 
@@ -163,7 +163,8 @@ def test_reflection_format_failures_are_named_and_charged(content, finish, expec
     budget = Budget(0,1,'day')
     result = reflect_result({},settings,budget,http_post=post)
     assert result.reason == expected
-    assert result.cost_usd == budget.spent_usd == .002
+    assert result.cost_usd == pytest.approx(.002)
+    assert budget.spent_usd == pytest.approx(.002)
 
 
 def test_prompt_smoke_with_five_lessons_uses_real_parser_and_bounded_text():
@@ -206,6 +207,6 @@ def test_reflection_storage_failure_keeps_paid_cost_in_audit(tmp_path, monkeypat
     monkeypatch.setattr(store,'journal_reflect',fail)
     audit = deferred_reflection(store,Settings.from_env(),Budget(0,2,'day'),as_of_ms=2,
                                 completed_ms=lambda:3,
-                                reflect=lambda *args:ReflectionResult('First. Second.','reflection_ok',.003,'usage'))
+                                reflect=lambda *args, **kwargs: ReflectionResult('First. Second.','reflection_ok',.003,'usage'))
     assert audit['reason'] == 'reflection_store_error'
     assert audit['cost_usd'] == .003

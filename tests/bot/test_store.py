@@ -136,24 +136,80 @@ def test_migrates_database_from_previous_schema(tmp_path):
     assert store.fills(1)[0]["side"] == "SELL"
 
 
-def test_budget_roundtrip_survives_restart(tmp_path):
-    db = tmp_path / "budget.db"
-    store = Store(db)
-    assert store.budget_load() is None
-    store.budget_save(day="2026-09-08", spent_usd=1.23, calls=4)
-    assert store.budget_load() == {"day": "2026-09-08", "spent_usd": 1.23, "calls": 4}
-    # A restart (fresh connection on the same file) must see the same state.
-    reopened = Store(db)
-    assert reopened.budget_load() == {"day": "2026-09-08", "spent_usd": 1.23, "calls": 4}
-    reopened.budget_save(day="2026-09-08", spent_usd=1.50, calls=5)
-    assert store.budget_load() == {"day": "2026-09-08", "spent_usd": 1.50, "calls": 5}
-
-
-def test_budget_load_tolerates_corrupt_or_missing_data(tmp_path):
+def test_budget_load_returns_none_only_when_never_written(tmp_path):
     store = Store(tmp_path / "budget.db")
-    store.kv_set("llm_budget", "not json")
     assert store.budget_load() is None
-    store.kv_set("llm_budget", '{"day": "2026-09-08"}')  # missing spent_usd
-    assert store.budget_load() is None
-    store.kv_set("llm_budget", '{"day": "2026-09-08", "spent_usd": "nope"}')
-    assert store.budget_load() is None
+    store.reserve_budget(today="2026-09-08", cap_usd=10, reserve_usd=1.0)
+    assert store.budget_load() == {"day": "2026-09-08", "spent_usd": 1.0, "calls": 1}
+
+
+def test_budget_load_raises_on_corrupt_or_invalid_row(tmp_path):
+    """Finding 1 (re-review): a corrupt/unreadable row must never be
+    silently read as a fresh zero budget -- that is exactly how a spend cap
+    gets bypassed. Every unreadable shape raises BudgetStateCorrupt."""
+    from bot.store import BudgetStateCorrupt
+    store = Store(tmp_path / "budget.db")
+    for bad in (
+        "not json",
+        '{"day": "2026-09-08"}',                                    # missing spent_usd
+        '{"day": "2026-09-08", "spent_usd": "nope"}',               # wrong type
+        '{"day": "2026-09-08", "spent_usd": -1}',                   # negative
+        '{"day": "2026-09-08", "spent_usd": NaN}',                  # non-finite
+        "[]",                                                        # not an object
+    ):
+        store.kv_set("llm_budget", bad)
+        with pytest.raises(BudgetStateCorrupt):
+            store.budget_load()
+
+
+def test_reserve_budget_commits_before_dispatch_and_respects_cap(tmp_path):
+    store = Store(tmp_path / "budget.db")
+    assert store.reserve_budget(today="2026-09-08", cap_usd=0.05, reserve_usd=0.02) is True
+    assert store.budget_load() == {"day": "2026-09-08", "spent_usd": 0.02, "calls": 1}
+    assert store.reserve_budget(today="2026-09-08", cap_usd=0.05, reserve_usd=0.02) is True
+    assert store.budget_load()["spent_usd"] == pytest.approx(0.04)
+    # A third reservation would exceed the cap (0.04 + 0.02 > 0.05): refused,
+    # and refusing must not write anything -- the persisted state is unchanged.
+    assert store.reserve_budget(today="2026-09-08", cap_usd=0.05, reserve_usd=0.02) is False
+    assert store.budget_load()["spent_usd"] == pytest.approx(0.04)
+    assert store.budget_load()["calls"] == 2
+
+
+def test_reserve_budget_resumes_same_day_and_resets_new_day(tmp_path):
+    store = Store(tmp_path / "budget.db")
+    store.reserve_budget(today="2026-09-08", cap_usd=10, reserve_usd=1.0)
+    # A restart on the SAME day resumes from what was already spent.
+    reopened = Store(tmp_path / "budget.db")
+    assert reopened.reserve_budget(today="2026-09-08", cap_usd=1.5, reserve_usd=0.4) is True
+    assert reopened.budget_load()["spent_usd"] == pytest.approx(1.4)
+    # A genuinely later UTC day starts at zero -- ordinary rollover, not a bug.
+    assert reopened.reserve_budget(today="2026-09-09", cap_usd=1.0, reserve_usd=0.9) is True
+    assert reopened.budget_load() == {"day": "2026-09-09", "spent_usd": 0.9, "calls": 1}
+
+
+def test_reserve_budget_refuses_backward_clock_instead_of_minting_fresh_budget(tmp_path):
+    """A persisted day AFTER 'today' (system clock moved backward, or a
+    corrupted/future stored day) must never be read as 'a new day, start at
+    zero' -- that would let a clock rollback bypass the cap entirely."""
+    from bot.store import BudgetStateCorrupt
+    store = Store(tmp_path / "budget.db")
+    store.reserve_budget(today="2026-09-10", cap_usd=10, reserve_usd=1.0)
+    with pytest.raises(BudgetStateCorrupt):
+        store.reserve_budget(today="2026-09-08", cap_usd=10, reserve_usd=1.0)
+    # Refusing must not have written anything for the earlier "today".
+    assert store.budget_load() == {"day": "2026-09-10", "spent_usd": 1.0, "calls": 1}
+
+
+def test_settle_budget_trues_up_reservation_to_real_cost(tmp_path):
+    store = Store(tmp_path / "budget.db")
+    store.reserve_budget(today="2026-09-08", cap_usd=10, reserve_usd=0.02)
+    store.settle_budget(day="2026-09-08", delta_usd=0.001 - 0.02)  # real cost 0.001
+    assert store.budget_load()["spent_usd"] == pytest.approx(0.001)
+
+
+def test_settle_budget_ignores_a_day_that_already_rolled_over(tmp_path):
+    store = Store(tmp_path / "budget.db")
+    store.reserve_budget(today="2026-09-08", cap_usd=10, reserve_usd=0.02)
+    store.reserve_budget(today="2026-09-09", cap_usd=10, reserve_usd=0.5)  # new day supersedes it
+    store.settle_budget(day="2026-09-08", delta_usd=-0.019)  # stale settlement for the old day
+    assert store.budget_load() == {"day": "2026-09-09", "spent_usd": 0.5, "calls": 1}

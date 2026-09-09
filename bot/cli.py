@@ -53,7 +53,13 @@ from kcex.session import SESSION_DAYS, token_age_days
 
 log = logging.getLogger("bot")
 
-DATA_DIR = Path("data")
+# Relative to this checkout's own location, not the process's cwd: invoking
+# the same installed module (e.g. python -m bot run) from a different
+# working directory must resolve the exact same ledger/lock, never a second
+# one silently created next to wherever the process happened to be launched.
+# A genuinely separate worktree/checkout has its own bot/cli.py at a
+# different path, so its data/ stays genuinely separate too.
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DB_PATH = DATA_DIR / "bot.db"
 
 
@@ -158,20 +164,34 @@ class InstanceLock:
             self._fh = None
 
 
-def setup_logging(level: str, log_path: Path | None = LOG_PATH) -> None:
+def setup_logging(level: str, log_path: Path | None = None) -> None:
+    """Console (stderr) only. Failures before the instance lock is held
+    (bad MODE, a stuck lock) must still be visible without ever touching
+    disk state pre-lock -- see add_file_logging() for the on-disk handler,
+    added only once the lock is actually acquired."""
     root = logging.getLogger()
-    if root.handlers:
-        return
-    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    stream = logging.StreamHandler(sys.stderr)
-    stream.setFormatter(fmt)
-    root.addHandler(stream)
-    if log_path is not None:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(log_path)
-        file_handler.setFormatter(fmt)
-        root.addHandler(file_handler)
+    if not root.handlers:
+        fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        stream = logging.StreamHandler(sys.stderr)
+        stream.setFormatter(fmt)
+        root.addHandler(stream)
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
+    if log_path is not None:
+        add_file_logging(log_path)
+
+
+def add_file_logging(log_path: Path) -> None:
+    """Adds the on-disk log handler; idempotent. Called from main() only
+    after the instance lock is held, so a process that never gets the lock
+    (or fails validation before trying) never creates/touches bot.log."""
+    root = logging.getLogger()
+    if any(isinstance(h, logging.FileHandler) for h in root.handlers):
+        return
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    file_handler = logging.FileHandler(log_path)
+    file_handler.setFormatter(fmt)
+    root.addHandler(file_handler)
 
 
 def warn_token_age(token_at: str | None) -> float | None:
@@ -212,6 +232,11 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         with InstanceLock(LOCK_PATH):
+            # File logging only starts once the lock is held: a process that
+            # loses the race to AlreadyRunning (or fails MODE validation
+            # above) must never create/touch bot.log at all. Console logging
+            # from setup_logging() above already covers pre-lock failures.
+            add_file_logging(LOG_PATH)
             # Every initializer below has a side effect -- opening/migrating
             # the database, starting the KCEX WS thread, a REST call for
             # symbol rules, binding the chart's HTTP/WS server, LiveHands'
@@ -260,16 +285,22 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _loop(once: bool, settings: Settings, client: KcexClient, store: Store, eye: Eye, hands: PaperHands | LiveHands) -> int:
-    # Finding 3: a fresh in-memory Budget(spent_usd=0.0, ...) on every process
-    # start silently re-authorized the full daily cap on a same-day restart.
-    # Reuse whatever was last persisted for THIS store (already scoped one
-    # database per mode, per db_path_for_mode) when it is still today's UTC
-    # day; a stale persisted day is correctly a fresh budget, not a bug.
+    # The durable admission gate lives at the real request boundary now
+    # (bot.brain.think_result/reflect_result, via store.reserve_budget/
+    # settle_budget) -- this seed is only the in-memory fast-path/logging
+    # view, seeded from what is durably known so a same-day restart does not
+    # visually look like a full re-authorized cap. An unreadable/corrupt kv
+    # row must not crash boot (the fatal-halt precedence -- stop monitoring,
+    # session checks -- is not a budget concern), but it must also not be
+    # silently treated as "resume at zero": reserve_budget() will keep
+    # raising the same BudgetStateCorrupt on every real attempt to spend,
+    # so every LLM cycle correctly refuses with REASON_BUDGET_STATE while
+    # the rest of the loop (barriers, stop monitoring) keeps running.
     today = utc_day()
     try:
         persisted = store.budget_load()
-    except Exception as exc:  # noqa: BLE001 - a corrupt/unreadable kv row degrades, it never blocks boot
-        log.warning("budget state unreadable, starting at zero for today: %s", exc)
+    except Exception as exc:  # noqa: BLE001 - any read failure degrades boot, never crashes it
+        log.error("budget state unreadable at boot; new LLM spend will refuse until fixed: %s", exc)
         persisted = None
     if persisted and persisted["day"] == today:
         budget = Budget(spent_usd=persisted["spent_usd"], cap_usd=settings.llm_daily_budget_usd,
@@ -304,30 +335,17 @@ def _loop(once: bool, settings: Settings, client: KcexClient, store: Store, eye:
     while True:
         budget.roll_day(utc_day())
         try:
-            try:
-                last_llm_ms, last_px, gate = run_once(
-                    settings=settings,
-                    eye=eye,
-                    store=store,
-                    client=client,
-                    hands=hands,
-                    budget=budget,
-                    last_llm_ms=last_llm_ms,
-                    last_px=last_px,
-                )
-                backoff = 1.0
-            finally:
-                # Persisted whether run_once() returned or raised: a charge
-                # (decision or reflection) that happened right before a fatal
-                # halt (UnprotectedPosition, etc.) must not be lost on restart.
-                # A write failure here must never replace/mask whatever
-                # run_once() itself raised (or a real halt reason above it) --
-                # it only degrades this restart's budget accuracy, it is not
-                # itself a reason to halt.
-                try:
-                    store.budget_save(day=budget.day, spent_usd=budget.spent_usd, calls=budget.calls)
-                except Exception as exc:  # noqa: BLE001
-                    log.error("budget persistence failed: %s", exc)
+            last_llm_ms, last_px, gate = run_once(
+                settings=settings,
+                eye=eye,
+                store=store,
+                client=client,
+                hands=hands,
+                budget=budget,
+                last_llm_ms=last_llm_ms,
+                last_px=last_px,
+            )
+            backoff = 1.0
         except SessionDead as exc:
             log.critical("session dead: %s. Run: python -m kcex.cli login", exc)
             return EXIT_SESSION_DEAD

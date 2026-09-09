@@ -140,7 +140,7 @@ def run_once(
         except Exception:
             journal_error = "journal_read_error"
             log.exception("journal read failed; decision proceeds without lessons")
-    result = thinker(snap, settings, budget, **context)
+    result = thinker(snap, settings, budget, store=store, **context)
     intent = result.intent or TradeIntent("HOLD", 0.0, result.reason, "unknown")
     gate = decide(
         intent,

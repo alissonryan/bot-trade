@@ -32,7 +32,7 @@ def deferred_reflection(store: Store, settings: Settings, budget: Budget, *, as_
     evidence = {key: lesson[key] for key in ("decision_ms", "action", "confidence", "regime", "reason",
                                             "snapshot", "outcome", "outcome_known_ms")}
     try:
-        result = (reflect(evidence, settings, budget) if reflect else
+        result = (reflect(evidence, settings, budget, store=store) if reflect else
                   ReflectionResult(None, REASON_REFLECTION_OFFLINE))
     except Exception:
         result = ReflectionResult(None, "reflection_internal")

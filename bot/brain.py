@@ -18,6 +18,7 @@ from typing import Any, Callable
 import requests
 
 from bot.settings import Settings
+from bot.store import Store
 from bot.types import Snapshot, TradeIntent
 
 log = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ REASON_EMPTY = "llm_empty"
 REASON_TRUNCATED = "llm_truncated"
 REASON_PARSE = "llm_parse"
 REASON_REFLECTION_BUDGET = "reflection_budget"
+REASON_BUDGET_STATE = "llm_budget_state_unreadable"
 REASON_REFLECTION_OFFLINE = "reflection_offline"
 
 
@@ -62,6 +64,17 @@ class Budget:
     def spend(self, usd: float) -> None:
         self.spent_usd += max(0.0, float(usd))
         self.calls += 1
+
+    def settle(self, delta_usd: float) -> None:
+        """True up a provisional reservation to the real provider cost once
+        known: `delta_usd` = actual - reserved, and may be negative (the
+        actual cost is usually below the conservative reserve). Unlike
+        spend(), this never increments `calls` -- the call was already
+        counted at reservation time -- and never clamps a negative delta to
+        zero on its own; the floor at 0.0 only guards against spent_usd ever
+        going negative overall.
+        """
+        self.spent_usd = max(0.0, self.spent_usd + float(delta_usd))
 
     def roll_day(self, day: str) -> None:
         if day != self.day:
@@ -229,9 +242,11 @@ def _cost_from(payload: Any, settings: Settings) -> tuple[float, str]:
     usage = payload.get("usage") if isinstance(payload, dict) else None
     if isinstance(usage, dict) and usage.get("cost") is not None:
         try:
-            return float(usage["cost"]), "usage"
+            cost = float(usage["cost"])
         except (TypeError, ValueError):
-            pass
+            cost = None
+        if cost is not None and math.isfinite(cost) and cost >= 0:
+            return cost, "usage"
     return settings.llm_fallback_cost_usd, "fallback"
 
 
@@ -243,12 +258,44 @@ def think_result(
     http_post: Callable[..., Any] | None = None,
     lessons: list[dict] | None = None,
     as_of_ms: int | None = None,
+    store: Store | None = None,
 ) -> ThinkResult:
+    """`store`, when given, makes the reservation durable at the real
+    request boundary: committed to Store BEFORE `post()` is ever called, so
+    a crash mid-request still leaves it on disk. Without a store (offline
+    replay/tests), the exact same reserve/settle arithmetic runs purely
+    in-memory against `budget`.
+    """
     model = settings.llm_model
     if budget.remaining() <= 0:
         return ThinkResult(None, REASON_BUDGET, model=model)
     if not settings.openrouter_api_key or not model:
         return ThinkResult(None, REASON_CONFIG, model=model)
+
+    reserve = settings.llm_fallback_cost_usd
+    reserve = reserve if math.isfinite(reserve) and reserve > 0 else 0.0
+    reserved_durably = False
+    if store is not None:
+        try:
+            admitted = store.reserve_budget(today=budget.day, cap_usd=budget.cap_usd, reserve_usd=reserve)
+        except Exception as exc:  # noqa: BLE001 - any unreadable/failed reservation blocks spend, never resets to zero
+            log.error("budget state untrustworthy or unreachable, refusing new spend: %s", exc)
+            return ThinkResult(None, REASON_BUDGET_STATE, model=model)
+        if not admitted:
+            return ThinkResult(None, REASON_BUDGET, model=model)
+        reserved_durably = True
+    budget.spend(reserve)  # in-memory mirror of the reservation, store or not
+
+
+    def settle(actual_cost: float) -> None:
+        delta = actual_cost - reserve
+        budget.settle(delta)
+        if reserved_durably:
+            try:
+                store.settle_budget(day=budget.day, delta_usd=delta)
+            except Exception as exc:  # noqa: BLE001 - bookkeeping must never mask a known result
+                log.error("budget settlement failed: %s", exc)
+
     post = http_post or requests.post
     url = f"{settings.openrouter_base_url}/chat/completions"
     headers = {
@@ -260,19 +307,12 @@ def think_result(
         resp = post(url, headers=headers, json=body, timeout=45)
     except requests.Timeout as exc:
         log.warning("llm timeout: %s", exc)
-        # The request may have already reached and been billed by the
-        # provider even though this process never saw the response --
-        # charging exactly $0 would be an optimistic assumption, not a known
-        # fact. Reserve the same conservative fallback an unparseable-but-
-        # received response already gets.
-        cost = settings.llm_fallback_cost_usd
-        budget.spend(cost)
-        return ThinkResult(None, REASON_TIMEOUT, cost, "fallback_uncertain", model=model, request=body)
+        # Outcome genuinely unknown -- the reservation already committed IS
+        # the charge; nothing to settle.
+        return ThinkResult(None, REASON_TIMEOUT, reserve, "fallback_uncertain", model=model, request=body)
     except Exception as exc:  # noqa: BLE001 - network layer; named in the audit
         log.warning("llm network error: %s: %s", type(exc).__name__, exc)
-        cost = settings.llm_fallback_cost_usd
-        budget.spend(cost)
-        return ThinkResult(None, REASON_NETWORK, cost, "fallback_uncertain", model=model, request=body)
+        return ThinkResult(None, REASON_NETWORK, reserve, "fallback_uncertain", model=model, request=body)
 
     status = getattr(resp, "status_code", None)
     try:
@@ -281,16 +321,28 @@ def think_result(
         status = None
     if status is not None and status >= 400:
         log.warning("llm http %s", status)
-        return ThinkResult(None, f"llm_http_{status}", http_status=status, model=model, request=body)
+        settle(0.0)  # a rejected request is not typically billed
+        return ThinkResult(None, f"llm_http_{status}", 0.0, "none", status, model, request=body)
     try:
         payload = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("llm bad response: %s: %s", type(exc).__name__, exc)
+        # A 200 whose body is not even valid JSON is anomalous, not a known
+        # $0 outcome -- there is no usage field to read a real cost from, so
+        # the reservation stays the charge, same as a timeout.
+        return ThinkResult(None, REASON_BAD_RESPONSE, reserve, "fallback_uncertain", status, model, request=body)
+
+    # Settle the real/valid usage cost BEFORE ever touching `choices` -- a
+    # malformed shape (e.g. an empty choices list) must not swallow a real
+    # charge that already arrived in `usage`.
+    cost, source = _cost_from(payload, settings)
+    settle(cost)
+    try:
         text = payload["choices"][0]["message"]["content"]
     except Exception as exc:  # noqa: BLE001
         log.warning("llm bad response: %s: %s", type(exc).__name__, exc)
-        return ThinkResult(None, REASON_BAD_RESPONSE, http_status=status, model=model, request=body)
+        return ThinkResult(None, REASON_BAD_RESPONSE, cost, source, status, model, request=body)
 
-    cost, source = _cost_from(payload, settings)
-    budget.spend(cost)
     if not isinstance(text, str) or not text.strip():
         finish = None
         try:
@@ -335,18 +387,43 @@ class ReflectionResult:
 
 
 def reflect_result(lesson: dict, settings: Settings, budget: Budget, *,
-                   http_post: Callable[..., Any] | None = None) -> ReflectionResult:
+                   http_post: Callable[..., Any] | None = None, store: Store | None = None) -> ReflectionResult:
     """Deferred luxury, never a judge. Reserve one next decision plus this call.
 
     Provider charges arrive afterwards: the reserve is an estimate, not a hard
     monetary guarantee. Call only AFTER this cycle's decision and execution.
+    `store`, when given, makes the reservation durable the same way
+    think_result() does -- see there for the crash-safety rationale.
     """
     model = settings.llm_model
     reserve = settings.llm_fallback_cost_usd
-    if not math.isfinite(reserve) or reserve <= 0 or budget.remaining() < 2 * reserve:
+    reserve = reserve if math.isfinite(reserve) and reserve > 0 else 0.0
+    if reserve <= 0 or budget.remaining() < 2 * reserve:
         return ReflectionResult(None, REASON_REFLECTION_BUDGET, model=model)
     if not settings.openrouter_api_key or not model:
         return ReflectionResult(None, "reflection_config", model=model)
+
+    reserved_durably = False
+    if store is not None:
+        try:
+            admitted = store.reserve_budget(today=budget.day, cap_usd=budget.cap_usd, reserve_usd=reserve)
+        except Exception as exc:  # noqa: BLE001
+            log.error("budget state untrustworthy or unreachable, refusing new spend: %s", exc)
+            return ReflectionResult(None, "reflection_budget_state", model=model)
+        if not admitted:
+            return ReflectionResult(None, REASON_REFLECTION_BUDGET, model=model)
+        reserved_durably = True
+    budget.spend(reserve)
+
+    def settle(actual_cost: float) -> None:
+        delta = actual_cost - reserve
+        budget.settle(delta)
+        if reserved_durably:
+            try:
+                store.settle_budget(day=budget.day, delta_usd=delta)
+            except Exception as exc:  # noqa: BLE001
+                log.error("budget settlement failed: %s", exc)
+
     body = {"model": model, "temperature": 0, "max_tokens": 160, "usage": {"include": True},
             "messages": [
                 {"role": "system", "content": "Review this past BTC spot decision and its recorded outcome. "
@@ -359,25 +436,23 @@ def reflect_result(lesson: dict, settings: Settings, budget: Budget, *,
             headers={"Authorization": f"Bearer {settings.openrouter_api_key}", "Content-Type": "application/json"},
             json=body, timeout=10)
     except requests.Timeout:
-        # Same reasoning as think_result(): the outcome is genuinely unknown,
-        # not zero-cost by default. The pre-check above already reserved
-        # headroom for exactly this amount.
-        budget.spend(reserve)
+        # Outcome genuinely unknown -- the reservation already committed IS
+        # the charge; nothing to settle.
         return ReflectionResult(None, "reflection_timeout", reserve, "fallback_uncertain", model=model, request=body)
     except Exception:
-        budget.spend(reserve)
         return ReflectionResult(None, "reflection_network", reserve, "fallback_uncertain", model=model, request=body)
     status = getattr(resp, "status_code", None)
     if isinstance(status, int) and status >= 400:
-        return ReflectionResult(None, f"reflection_http_{status}", http_status=status, model=model, request=body)
+        settle(0.0)
+        return ReflectionResult(None, f"reflection_http_{status}", 0.0, "none", status, model, request=body)
     try:
         payload = resp.json()
     except Exception:
-        payload = None
+        # Same reasoning as think_result(): a 200 with a non-JSON body has no
+        # usage field to settle from -- keep the reservation as the charge.
+        return ReflectionResult(None, "reflection_bad_response", reserve, "fallback_uncertain", status, model, request=body)
     cost, source = _cost_from(payload, settings)
-    if not math.isfinite(cost) or cost < 0:
-        cost, source = reserve, "fallback"
-    budget.spend(cost)  # charge malformed/empty/truncated successful responses too
+    settle(cost)
     def result(text, reason):
         return ReflectionResult(text, reason, cost, source, status, model, request=body)
     try:

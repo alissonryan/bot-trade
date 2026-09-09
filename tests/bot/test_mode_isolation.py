@@ -73,10 +73,12 @@ def test_reopening_with_the_same_mode_keeps_working(tmp_path):
 # --- layer 1: separate files -------------------------------------------------
 
 def test_cli_never_hands_the_same_file_to_both_modes():
-    from bot.cli import db_path_for_mode
+    from bot.cli import DB_PATH, db_path_for_mode
     assert db_path_for_mode("paper") != db_path_for_mode("live")
     # The existing paper history must keep its home; live is the new file.
-    assert db_path_for_mode("paper") == Path("data") / "bot.db"
+    # DB_PATH is stable to the checkout, not the process cwd (Finding 3) --
+    # compare against it directly rather than a cwd-relative literal.
+    assert db_path_for_mode("paper") == DB_PATH
 
 
 # --- layer 3: provenance of the row itself -----------------------------------

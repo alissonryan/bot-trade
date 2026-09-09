@@ -96,7 +96,7 @@ def test_journal_budget_skip_is_audited_after_decision_and_execution(tmp_path):
         called.append("decision")
         assert context['lessons'][0]['id'] == jid
         return ThinkResult(TradeIntent("BUY", 1, "new thesis", "range"), "ok")
-    def reflect(lesson, settings, budget):
+    def reflect(lesson, settings, budget, **kwargs):
         assert hands.position.qty > 0  # execution is already complete
         called.append("reflection")
         return reflect_result(lesson, settings, budget,
@@ -169,7 +169,7 @@ def test_cooldown_survives_process_restart(tmp_path, monkeypatch):
     _, _, gate = run_once(
         settings=settings, eye=FakeEye(), store=store, client=NoClient(), hands=hands,  # type: ignore[arg-type]
         budget=Budget(0, 2, ""), last_llm_ms=0, last_px=0,
-        think=lambda *args: ThinkResult(TradeIntent("BUY", 1, "go", "range"), "ok"),
+        think=lambda *args, **kwargs: ThinkResult(TradeIntent("BUY", 1, "go", "range"), "ok"),
     )
     assert gate is not None and gate.rule == "cooldown" and not gate.ok
     assert hands.position.qty == 0
@@ -188,7 +188,7 @@ def test_exit_and_optout_never_query_cooldown_store(tmp_path, action, minutes):
     _, _, gate = run_once(
         settings=settings, eye=eye, store=store, client=NoClient(), hands=hands,  # type: ignore[arg-type]
         budget=Budget(0, 2, ""), last_llm_ms=0, last_px=0,
-        think=lambda *args: ThinkResult(TradeIntent(action, 1, "go", "range"), "ok"),
+        think=lambda *args, **kwargs: ThinkResult(TradeIntent(action, 1, "go", "range"), "ok"),
     )
     assert gate is not None and gate.ok
     store.last_loss_exit_ms.assert_not_called()
@@ -217,7 +217,7 @@ def test_real_losing_paper_exit_arms_next_cycle_cooldown(tmp_path, exit_type, mo
     _, _, gate = run_once(
         settings=settings, eye=eye, store=store, client=NoClient(), hands=hands,  # type: ignore[arg-type]
         budget=Budget(0, 2, ""), last_llm_ms=0, last_px=0,
-        think=lambda *args: ThinkResult(TradeIntent("BUY", 1, "go", "range"), "ok"),
+        think=lambda *args, **kwargs: ThinkResult(TradeIntent("BUY", 1, "go", "range"), "ok"),
     )
     assert gate is not None and gate.rule == "cooldown" and not gate.ok
 
@@ -242,7 +242,7 @@ def test_a_winning_take_profit_does_not_arm_the_cooldown(tmp_path):
     _, _, gate = run_once(
         settings=settings, eye=eye, store=store, client=NoClient(), hands=hands,  # type: ignore[arg-type]
         budget=Budget(0, 2, ""), last_llm_ms=0, last_px=0,
-        think=lambda *args: ThinkResult(TradeIntent("BUY", 1, "go", "range"), "ok"),
+        think=lambda *args, **kwargs: ThinkResult(TradeIntent("BUY", 1, "go", "range"), "ok"),
     )
     assert gate is not None and gate.rule != "cooldown"
 
@@ -262,7 +262,7 @@ def test_truncated_buy_below_minimum_never_reaches_exchange(tmp_path, cap, last,
     _, _, gate = run_once(
         settings=settings, eye=eye, store=store, client=client, hands=hands,  # type: ignore[arg-type]
         budget=Budget(0, 2, ""), last_llm_ms=0, last_px=0,
-        think=lambda *args: ThinkResult(TradeIntent("BUY", 1, "go", "trend"), "ok"),
+        think=lambda *args, **kwargs: ThinkResult(TradeIntent("BUY", 1, "go", "trend"), "ok"),
     )
     assert gate is not None and not gate.ok and gate.rule == rule
     client.place_market.assert_not_called()
@@ -381,7 +381,7 @@ def test_buy_intent_executes_and_records_order_id(tmp_path):
     store = Store(tmp_path / "c.db")
     hands = PaperHands(s, store)
 
-    def think(snap, settings, budget):
+    def think(snap, settings, budget, **kwargs):
         return ThinkResult(TradeIntent("BUY", 0.9, "go", "trend"), "ok", cost_usd=0.001, cost_source="usage")
 
     _, _, gate = run_once(
@@ -418,8 +418,8 @@ def test_audit_row_carries_the_full_request_used_by_the_decision(tmp_path):
         "usage": {"cost": 0.0005},
     }))
 
-    def think(snap, settings, budget):
-        return think_result(snap, settings, budget, http_post=post)
+    def think(snap, settings, budget, **kwargs):
+        return think_result(snap, settings, budget, http_post=post, store=kwargs.get("store"))
 
     run_once(
         settings=s, eye=eye, store=store, client=NoClient(), hands=hands,
@@ -447,7 +447,7 @@ def test_exec_error_is_audited_then_raised(tmp_path):
 
     hands = BoomHands(s, store)
 
-    def think(snap, settings, budget):
+    def think(snap, settings, budget, **kwargs):
         return ThinkResult(TradeIntent("BUY", 0.9, "go", "trend"), "ok")
 
     with pytest.raises(UnprotectedPosition):
@@ -543,7 +543,7 @@ def test_audit_failure_does_not_swallow_the_unprotected_halt(tmp_path):
 
     store.append_audit = boom_audit
 
-    def think(snap, settings, budget):
+    def think(snap, settings, budget, **kwargs):
         return ThinkResult(TradeIntent("BUY", 0.9, "go", "trend"), "ok")
 
     with pytest.raises(UnprotectedPosition):
