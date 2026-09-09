@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+import subprocess
 import sys
 
 import pytest
@@ -426,3 +427,57 @@ def test_reservation_survives_a_fatal_hands_error_in_the_same_cycle(tmp_path):
     assert persisted is not None
     assert persisted["day"] == utc_day()
     assert persisted["spent_usd"] == pytest.approx(0.001)
+
+
+def test_reservation_survives_a_subprocess_crash_inside_the_real_http_dispatch(tmp_path):
+    """The strongest form of the crash regression: drives the REAL,
+    unmodified `bot.cli._loop` -> `bot.cycle.run_once` -> `bot.brain.
+    think_result` path (no fake run_once bypassing the production wiring),
+    with `requests.post` itself crashing the process mid-dispatch. The
+    reservation committed by think_result() before calling post() must
+    already be durable on disk when a fresh process reopens the database."""
+    from bot.store import Store
+    db_path = tmp_path / "crash.db"
+    child = f'''
+import os, sys
+sys.path.insert(0, {str(ROOT)!r})
+from pathlib import Path
+from dataclasses import replace
+from bot import cli
+from bot.settings import Settings
+from bot.types import Bar, Snapshot
+
+settings = replace(Settings.from_env(), mode="paper", openrouter_api_key="synthetic",
+                   llm_model="synthetic", llm_fallback_cost_usd=0.02)
+store = cli.Store(Path({str(db_path)!r}), mode="paper")
+
+class FakeEye:
+    bot_qty = 0.0
+    bot_avg_entry = None
+    last_intent_action = None
+    last_bot_pnl_usdt = 0.0
+    rules = None
+    def connect_ws(self): pass
+    def snapshot_rest(self): pass
+    def poll_quotes(self): return True
+    def poll_heavy(self): pass
+    def snapshot(self):
+        return Snapshot(ts_ms=1, last=100.0, bid=99.0, ask=101.0, spread=2,
+                        bars_15m=[Bar(t=i, o=100, h=101, l=99, c=100) for i in range(20)],
+                        atr=1.0, free_usdt=450.0, bot_qty=0.0, bot_avg_entry=None,
+                        ws_ok=True, stale=False)
+
+def crash(*a, **kw):
+    os._exit(0)
+
+import requests
+requests.post = crash
+
+hands = cli.PaperHands(settings, store)
+cli._loop(True, settings, None, store, FakeEye(), hands)
+'''
+    subprocess.run([sys.executable, "-c", child], check=True, cwd=ROOT)
+    reopened = Store(db_path, mode="paper")
+    persisted = reopened.budget_load()
+    assert persisted is not None, "the crash lost the reservation -- not durable at the dispatch boundary"
+    assert persisted["spent_usd"] == pytest.approx(0.02)
