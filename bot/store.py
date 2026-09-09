@@ -715,12 +715,21 @@ class Store:
         actual - reserved (usually negative). Same atomicity/refusal rules
         as reserve_budget() (an open caller transaction raises
         BudgetTransactionConflict before touching anything; a non-canonical
-        ``day`` or non-finite ``delta_usd`` raises ValueError). If the
-        persisted day has already rolled over past ``day``, or the row was
-        genuinely never written, the new/absent state is left untouched --
-        there is nothing left of the old reservation to correct, and that is
-        not an error. A row that IS present for ``day`` but unreadable
-        (BudgetStateCorrupt) is NOT swallowed here: settlement genuinely
+        ``day`` or non-finite ``delta_usd`` raises ValueError).
+
+        A prior reserve_budget() for ``day`` must already have committed a
+        row -- settle_budget() is only ever called after a reservation it
+        is truing up. So an ABSENT row, or a persisted day strictly BEFORE
+        ``day``, is not a legitimate "nothing to settle": it means the
+        reservation this call is correcting is itself missing or was
+        somehow undone, which is exactly the kind of silent ledger
+        understatement that must block further spend, not be swallowed as
+        a no-op. Both now raise BudgetStateCorrupt. The ONLY legitimate
+        no-op is a persisted day strictly AFTER ``day``: a genuine UTC
+        rollover already superseded this row with a newer reservation, and
+        there is nothing left of the old one to correct. A row that IS
+        present for ``day`` but unreadable (BudgetStateCorrupt from
+        _parse_budget_row) is likewise NOT swallowed: settlement genuinely
         failed and the caller (bot.brain.think_result/reflect_result) must
         block further spend in this process rather than silently losing a
         real cost correction."""
@@ -736,13 +745,27 @@ class Store:
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             persisted = self._parse_budget_row(self.kv_get(BUDGET_KEY))
-            if persisted is not None and persisted["day"] == day:
+            if persisted is None:
+                raise BudgetStateCorrupt(
+                    f"settle_budget() found no persisted row for day {day!r}: a prior "
+                    "reserve_budget() must already have written one -- a missing row "
+                    "here is not a legitimate 'nothing to settle'"
+                )
+            if persisted["day"] == day:
                 new_spent = max(0.0, persisted["spent_usd"] + delta_usd)
                 self.kv_set(
                     BUDGET_KEY,
                     json.dumps({"day": day, "spent_usd": new_spent, "calls": persisted["calls"]}),
                     commit=False,
                 )
+            elif persisted["day"] < day:
+                raise BudgetStateCorrupt(
+                    f"persisted budget day {persisted['day']!r} is BEFORE the day being "
+                    f"settled {day!r}: settle_budget() must never run before the "
+                    "reservation it corrects was durably written"
+                )
+            # else: persisted["day"] > day -- a genuine rollover already
+            # superseded this row; nothing left of the old reservation.
             self.commit()
         except Exception:
             self.rollback()

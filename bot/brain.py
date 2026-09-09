@@ -79,6 +79,15 @@ class Budget:
     def remaining(self) -> float:
         return self.cap_usd - self.spent_usd
 
+    def is_valid(self) -> bool:
+        """False when cap_usd/spent_usd is non-finite or negative -- e.g. a
+        NaN cap makes `remaining() <= 0` always False (NaN comparisons are
+        never True), so a corrupt in-memory Budget would otherwise slip
+        past every admission check and still dispatch. Callers must refuse
+        with a named reason instead of coercing either field to 0."""
+        return (math.isfinite(self.cap_usd) and self.cap_usd >= 0
+                and math.isfinite(self.spent_usd) and self.spent_usd >= 0)
+
     def spend(self, usd: float) -> None:
         self.spent_usd += max(0.0, float(usd))
         self.calls += 1
@@ -270,11 +279,12 @@ def _cost_from(payload: Any, settings: Settings) -> tuple[float, str]:
 
 def _cost_from_http_error(resp: Any) -> float | None:
     """A >=400 response body IS sometimes still valid JSON with a real
-    ``usage.cost`` -- "not typically billed" is an assumption about the
-    common case, not proof for THIS response. Returns the real cost when
-    the body actually supplies one, else None so the caller decides the
-    conservative fallback (settle 0 only for a well-understood 4xx; keep
-    the reservation for a 5xx or any other unreadable case)."""
+    ``usage.cost`` (including an explicit 0). Returns that real cost when
+    the body actually supplies one, else None -- there is no status code
+    for which "not billed" is a fact rather than a guess, so an unreadable/
+    absent usage field is never coerced to $0 here; the caller must keep
+    the reservation as the charge instead (see think_result/reflect_result:
+    every >=400 with no real usage figure now behaves like a timeout)."""
     try:
         payload = resp.json()
     except Exception:  # noqa: BLE001
@@ -310,6 +320,11 @@ def think_result(
     model = settings.llm_model
     if budget.blocked_reason:
         return ThinkResult(None, budget.blocked_reason, model=model)
+    if not budget.is_valid():
+        # A NaN/negative cap or spend makes remaining()<=0 always False
+        # (NaN comparisons are never True) -- a corrupt in-memory Budget
+        # would otherwise slip past the check below and still dispatch.
+        return ThinkResult(None, REASON_BUDGET_STATE, model=model)
     if budget.remaining() <= 0:
         return ThinkResult(None, REASON_BUDGET, model=model)
     if not settings.openrouter_api_key or not model:
@@ -375,14 +390,9 @@ def think_result(
         if real_cost is not None:
             settle(real_cost)
             return ThinkResult(None, f"llm_http_{status}", real_cost, "usage", status, model, request=body)
-        if status < 500:
-            # A well-understood client error (bad key, malformed request) is
-            # not typically billed -- an assumption, not proof, but the
-            # narrowest case where settling to zero is defensible.
-            settle(0.0)
-            return ThinkResult(None, f"llm_http_{status}", 0.0, "none", status, model, request=body)
-        # 5xx or any other case with no real usage figure: do not fabricate
-        # a $0 outcome -- keep the reservation as the charge.
+        # No status code makes "not billed" a fact rather than a guess --
+        # ANY >=400 with no real usage figure keeps the reservation as the
+        # charge, the same treatment as a timeout, never a fabricated $0.
         return ThinkResult(None, f"llm_http_{status}", reserve, "fallback_uncertain", status, model, request=body)
     try:
         payload = resp.json()
@@ -462,6 +472,8 @@ def reflect_result(lesson: dict, settings: Settings, budget: Budget, *,
     model = settings.llm_model
     if budget.blocked_reason:
         return ReflectionResult(None, budget.blocked_reason, model=model)
+    if not budget.is_valid():
+        return ReflectionResult(None, "reflection_budget_state", model=model)
     reserve = settings.llm_fallback_cost_usd
     if not math.isfinite(reserve) or reserve <= 0:
         return ReflectionResult(None, REASON_REFLECTION_INVALID_RESERVE, model=model)
@@ -516,9 +528,6 @@ def reflect_result(lesson: dict, settings: Settings, budget: Budget, *,
         if real_cost is not None:
             settle(real_cost)
             return ReflectionResult(None, f"reflection_http_{status}", real_cost, "usage", status, model, request=body)
-        if status < 500:
-            settle(0.0)
-            return ReflectionResult(None, f"reflection_http_{status}", 0.0, "none", status, model, request=body)
         return ReflectionResult(None, f"reflection_http_{status}", reserve, "fallback_uncertain", status, model, request=body)
     try:
         payload = resp.json()

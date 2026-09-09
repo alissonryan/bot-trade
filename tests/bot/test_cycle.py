@@ -427,6 +427,11 @@ def test_audit_row_carries_the_full_request_used_by_the_decision(tmp_path):
     )
     row = store.recent_audit(1)[0]
     request = row["payload"]["llm"]["request"]
+    # The PERSISTED request (round-tripped through the real SQLite audit
+    # row, not the in-memory object) must equal the exact body actually
+    # handed to post() -- not just a few cherry-picked fields, which could
+    # silently diverge from a real reconstruction bug.
+    assert request == post.call_args.kwargs["json"], "persisted audit request diverges from the exact body posted"
     assert request["model"] == "test-model-x"
     assert request["messages"][0]["role"] == "system"
     user_payload = json.loads(request["messages"][1]["content"])

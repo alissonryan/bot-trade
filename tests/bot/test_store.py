@@ -319,3 +319,28 @@ def test_settle_budget_raises_instead_of_swallowing_a_corrupt_same_day_row(tmp_p
     store.kv_set("llm_budget", '{"day": "2026-09-08", "spent_usd": "not-a-number"}')
     with pytest.raises(BudgetStateCorrupt):
         store.settle_budget(day="2026-09-08", delta_usd=-0.01)
+
+
+def test_settle_budget_raises_when_the_row_is_missing_after_a_reservation(tmp_path):
+    """A prior reserve_budget() for the day being settled must already have
+    committed a row -- an ABSENT row at settle time is not a legitimate
+    'nothing to settle', it means the reservation itself was somehow lost."""
+    from bot.store import BudgetStateCorrupt
+    store = Store(tmp_path / "budget.db")
+    store.reserve_budget(today="2026-09-08", cap_usd=10, reserve_usd=0.02)
+    store._conn.execute("DELETE FROM kv WHERE key='llm_budget'")
+    store._conn.commit()
+    with pytest.raises(BudgetStateCorrupt):
+        store.settle_budget(day="2026-09-08", delta_usd=-0.01)
+
+
+def test_settle_budget_raises_when_persisted_day_is_before_the_settle_day(tmp_path):
+    """A persisted day strictly BEFORE the day being settled is backwards --
+    the reservation this settle corrects should already have written at
+    least that day. Only a persisted day AFTER is a legitimate rollover
+    no-op (see test_settle_budget_ignores_a_day_that_already_rolled_over)."""
+    from bot.store import BudgetStateCorrupt
+    store = Store(tmp_path / "budget.db")
+    store.reserve_budget(today="2026-09-07", cap_usd=10, reserve_usd=0.02)
+    with pytest.raises(BudgetStateCorrupt):
+        store.settle_budget(day="2026-09-08", delta_usd=-0.01)

@@ -396,6 +396,68 @@ def test_settlement_failure_blocks_every_subsequent_call_in_this_process():
     assert reflection.reason == "llm_budget_settlement_failed"
     assert calls == []
 
+def test_4xx_without_usage_preserves_reservation_not_a_fabricated_zero():
+    """Removed the status<500 exception: no status code makes 'not billed'
+    a fact rather than a guess for THIS response. ANY >=400 with no real
+    usage figure now keeps the reservation as the charge, matching a 5xx/
+    timeout, never settling to a fabricated $0."""
+    s = _settings(llm_fallback_cost_usd=0.02)
+    budget = Budget(0.0, 2.0, "d")
+    res = think_result(_snap(), s, budget,
+                       http_post=lambda *a, **k: FakeResp({"error": "bad request"}, status=400))
+    assert res.reason == "llm_http_400"
+    assert res.cost_source == "fallback_uncertain"
+    assert res.cost_usd == pytest.approx(0.02)
+    assert budget.spent_usd == pytest.approx(0.02)
+
+    from bot.brain import reflect_result
+    budget2 = Budget(0.0, 2.0, "d")
+    res2 = reflect_result({"outcome": {"kind": "closed"}}, s, budget2,
+                          http_post=lambda *a, **k: FakeResp({"error": "bad request"}, status=422))
+    assert res2.reason == "reflection_http_422"
+    assert res2.cost_source == "fallback_uncertain"
+    assert res2.cost_usd == pytest.approx(0.02)
+
+
+def test_4xx_with_explicit_zero_usage_settles_to_that_real_zero():
+    """An explicit usage.cost=0 IS a real, provider-reported fact -- unlike
+    an absent usage field, it must be trusted and settled exactly, not
+    treated as 'no real figure available'."""
+    s = _settings(llm_fallback_cost_usd=0.02)
+    budget = Budget(0.0, 2.0, "d")
+    res = think_result(_snap(), s, budget,
+                       http_post=lambda *a, **k: FakeResp({"usage": {"cost": 0.0}, "error": "bad key"}, status=401))
+    assert res.reason == "llm_http_401"
+    assert res.cost_source == "usage"
+    assert res.cost_usd == pytest.approx(0.0)
+    assert budget.spent_usd == pytest.approx(0.0)
+
+
+def test_invalid_budget_cap_or_spent_refuses_without_store_and_without_http():
+    """A NaN/negative cap or spent makes remaining()<=0 always False (NaN
+    comparisons are never True) -- a corrupt in-memory Budget must refuse
+    via Budget.is_valid(), not slip through the admission checks and still
+    dispatch an HTTP call."""
+    calls = []
+
+    def post(*a, **kw):
+        calls.append(1)
+        return FakeResp(_ok_payload())
+
+    s = _settings()
+    for budget in (Budget(0.0, float("nan"), "d"), Budget(0.0, -1.0, "d"),
+                   Budget(float("nan"), 2.0, "d"), Budget(-0.5, 2.0, "d")):
+        res = think_result(_snap(), s, budget, http_post=post)
+        assert res.reason == "llm_budget_state_unreadable"
+        assert res.intent is None
+    assert calls == []
+
+    from bot.brain import reflect_result
+    res = reflect_result({"outcome": {"kind": "closed"}}, s, Budget(0.0, float("nan"), "d"), http_post=post)
+    assert res.reason == "reflection_budget_state"
+    assert calls == []
+
+
 def test_budget_rolls_over_at_new_day():
     b = Budget(1.5, 2.0, "2026-09-04", calls=7)
     b.roll_day("2026-09-04")
