@@ -17,8 +17,15 @@ def _print(payload: object) -> None:
 
 
 def build_client() -> KcexClient:
+    """Client for the public commands (ping/ticker/depth/kline): no token, ever.
+
+    ``KcexClient()`` with no explicit token falls back to reading KCEX_TOKEN
+    from the environment -- harmless for auth-required commands, but these
+    commands need only public market data and must not load a secret just to
+    fetch a price.
+    """
     load_dotenv()
-    return KcexClient()
+    return KcexClient(token="")
 
 
 def build_private_client() -> KcexClient:

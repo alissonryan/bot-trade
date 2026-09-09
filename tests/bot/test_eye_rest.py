@@ -20,6 +20,7 @@ class FakeKcex:
         self.fail_quotes = fail_quotes
         self.fail_balances = fail_balances
         self.forming_bar = forming_bar
+        self.balances_calls = 0
         self.ticker_calls = 0
         self.depth_calls = 0
 
@@ -54,6 +55,7 @@ class FakeKcex:
         return {"data": {"t": t, "o": [100] * 20, "h": [102] * 20, "l": [99] * 20, "c": [101] * 20, "v": [1] * 20}}
 
     def balances(self, currencies="BTC,USDT"):
+        self.balances_calls += 1
         if self.fail_balances:
             raise ConnectionError("login required")
         return {"data": [{"currency": "USDT", "available": "450.0", "total": "450.0", "frozen": "0"}]}
@@ -245,7 +247,20 @@ def test_live_balance_failure_is_an_error_not_zero():
         eye.poll_heavy()
 
 
-def test_paper_balance_failure_uses_virtual_cash():
-    eye = Eye(FakeKcex(fail_balances=True), _settings(mode="paper", paper_starting_usdt=450.0))
+def test_paper_never_calls_the_private_balances_endpoint():
+    """Finding 2: paper must never read a real balance -- not tolerate a
+    failure, never attempt the call at all. Even a healthy client must see
+    zero balances() calls; free_usdt comes from PAPER_STARTING_USDT."""
+    client = FakeKcex()
+    eye = Eye(client, _settings(mode="paper", paper_starting_usdt=450.0))
     eye.poll_heavy()
+    assert client.balances_calls == 0
+    assert eye.free_usdt == 450.0
+
+
+def test_paper_balance_failure_uses_virtual_cash():
+    client = FakeKcex(fail_balances=True)
+    eye = Eye(client, _settings(mode="paper", paper_starting_usdt=450.0))
+    eye.poll_heavy()
+    assert client.balances_calls == 0, "paper never attempts the call, so failure mode is moot"
     assert eye.free_usdt == 450.0

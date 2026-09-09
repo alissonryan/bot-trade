@@ -200,7 +200,12 @@ def main(argv: list[str] | None = None) -> int:
     if settings.mode == "live":
         token = require_live_token()
         warn_token_age(os.getenv("KCEX_TOKEN_AT"))
-    client = KcexClient(token=token or None)
+    # `token` is already the empty string in paper mode -- pass it explicitly
+    # rather than `token or None`, which collapses "" to None and makes
+    # KcexClient() fall back to reading KCEX_TOKEN from the environment. Paper
+    # must never authenticate, even when a stale KCEX_TOKEN from a prior live
+    # login is still sitting in .env/the shell.
+    client = KcexClient(token=token)
     store = Store(db_path_for_mode(settings.mode), mode=settings.mode)
     eye = Eye(client, settings)
     eye.start_ws_thread()

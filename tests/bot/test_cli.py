@@ -61,3 +61,37 @@ def test_loop_halts_on_a_stuck_position(monkeypatch, tmp_path):
     code = cli._loop(True, settings, None, Store(tmp_path / "c.db"), FakeEye(), object())
 
     assert code == cli.EXIT_STUCK
+
+
+def test_paper_mode_never_authenticates_even_with_a_leaked_token(tmp_path, monkeypatch):
+    """Finding 2: bot/cli.py built `KcexClient(token=token or None)`. In paper
+    mode `token` starts as `""`, and `"" or None` collapses to `None` --
+    KcexClient(token=None) then falls back to reading KCEX_TOKEN from the
+    environment. A stale token left over from a prior live login (or any
+    KCEX_TOKEN in .env) must never reach paper's client."""
+    import bot.cli as cli
+
+    monkeypatch.setenv("MODE", "paper")
+    monkeypatch.setenv("KCEX_TOKEN", "leaked-live-token")
+    monkeypatch.setenv("WS_ENABLED", "false")
+    monkeypatch.chdir(tmp_path)
+
+    captured: dict = {}
+
+    class FakeEye:
+        rules = None
+
+        def __init__(self, client, settings):
+            captured["client"] = client
+
+        def start_ws_thread(self):
+            pass
+
+        def load_rules(self):
+            return None
+
+    monkeypatch.setattr(cli, "Eye", FakeEye)
+    monkeypatch.setattr(cli, "_loop", lambda *a, **kw: 0)
+
+    assert cli.main(["run", "--once"]) == 0
+    assert captured["client"].token == "", "paper must never carry an authorization token"

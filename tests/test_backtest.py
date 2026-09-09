@@ -248,6 +248,7 @@ def test_exhausted_budget_is_error_not_a_fabricated_hold(tmp_path):
 
 
 def test_snapshot_parity_through_real_eye_poll_heavy():
+    from dataclasses import replace
     from bot.backtest import replay_snapshot
 
     history = bars(21)
@@ -255,11 +256,14 @@ def test_snapshot_parity_through_real_eye_poll_heavy():
     forming = Bar(t, 126, 999999, 1, 2)
     client = Mock()
     client.kline.return_value = {"data": {k: [getattr(b, k) for b in history + [forming]] for k in "tohlcv"}}
-    client.balances.return_value = {"data": [{"currency": "USDT", "available": "430"}]}
-    settings = Settings.from_env()
+    # Paper never calls balances() (Finding 2); its cash comes from
+    # PAPER_STARTING_USDT, so that is what must match `replay_snapshot`'s
+    # modeled `cash` for parity here -- the balances mock is unused in paper.
+    settings = replace(Settings.from_env(), paper_starting_usdt=430.0)
     eye = Eye(client, settings)
     eye._now_ms = lambda: t * 1000
     eye.poll_heavy()
+    assert client.balances.call_count == 0
     snap = replay_snapshot(history, t, forming.o, settings, cash=430)
     eye.last, eye.bid, eye.ask = forming.o, snap.bid, snap.ask
     eye.last_update_ms = t * 1000

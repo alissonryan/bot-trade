@@ -285,8 +285,12 @@ class Eye:
         return True
 
     def poll_heavy(self) -> None:
-        """Klines and balances for the LLM cycle. Raises EyeError in live mode when the
-        balance cannot be read."""
+        """Klines for every mode; a real balance read only in live mode.
+
+        Paper never calls the private balances endpoint at all -- it sets
+        free_usdt from PAPER_STARTING_USDT and returns; PaperHands.cash is the
+        actual source of truth once cycle.run_once overwrites it. Live raises
+        EyeError when the balance cannot be read."""
         end = self._now_ms()
         start = end - 21 * BAR_SECONDS * 1000
         kl = self.client.kline(
@@ -315,18 +319,24 @@ class Eye:
             bars.pop()
         self.bars = bars
 
-        free = 0.0
+        if self.settings.mode == "paper":
+            # Paper never authenticates or reads a real balance: the ledger
+            # (PaperHands.cash, applied by cycle.run_once after this call) is
+            # the only source of truth for free cash here. Calling balances()
+            # anyway would be an unnecessary -- and, with a stale KCEX_TOKEN
+            # sitting in the environment, unintentionally authenticated --
+            # private request for a number paper never uses.
+            self.free_usdt = self.settings.paper_starting_usdt
+            return
+
         try:
             bals = self.client.balances("USDT")
+            free = 0.0
             for row in bals.get("data") or []:
                 if row.get("currency") == "USDT":
                     free = float(row.get("available") or 0)
         except Exception as exc:  # noqa: BLE001
-            if self.settings.mode == "live":
-                raise EyeError(f"balances unavailable: {exc}") from exc
-            free = 0.0
-        if self.settings.mode == "paper" and free <= 0:
-            free = self.settings.paper_starting_usdt
+            raise EyeError(f"balances unavailable: {exc}") from exc
         self.free_usdt = free
 
     def snapshot(self) -> Snapshot:
