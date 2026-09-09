@@ -174,12 +174,12 @@ def test_cached_brain_reuses_response_and_budget_without_network(tmp_path):
     with CachedBrain(tmp_path / "cache.db", settings, allow_network=True, max_cost_usd=1, http_post=post) as brain:
         budget = Budget(0, 2, "day")
         first = brain(snap, budget)
-        assert budget.spent_usd == 0.003
+        assert budget.spent_usd == pytest.approx(0.003)
         assert brain.paid_usd == 0.003
     with CachedBrain(tmp_path / "cache.db", settings) as brain:
         budget = Budget(0, 2, "day")
         assert brain(snap, budget) == first
-        assert budget.spent_usd == 0.003
+        assert budget.spent_usd == pytest.approx(0.003)
         assert brain.paid_usd == 0
         with pytest.raises(RuntimeError, match="cache miss"):
             brain(replace(snap, free_usdt=429), budget)
@@ -338,3 +338,23 @@ def test_slippage_applies_to_quote_like_paper_hands():
     baseline = buy_and_hold(history, settings, spread_bps=20, slippage_bps=20)
     assert baseline["trades"][0]["entry_price"] == result["trades"][0]["entry_price"]
     assert baseline["trades"][0]["exit_price"] == result["trades"][0]["exit_price"]
+
+
+def test_replay_sizing_stays_within_cap_at_nonzero_slippage():
+    """Finding 4/item1 in replay: decide() sizes against the SAME
+    ask+slippage basis buy_factor fills at (spread_bps/slippage_bps forwarded
+    as entry_slippage_bps), so a nonzero slippage scenario -- the same shape
+    as the Terra-blocker reproduction -- must never let the real cost exceed
+    the declared order cap inside replay() either, not just in PaperHands."""
+    from dataclasses import replace
+    from bot.backtest import replay
+    from bot.brain import ThinkResult
+    from bot.types import TradeIntent
+
+    settings = replace(Settings.from_env(), mode="paper", max_order_usdt=20, max_portfolio_pct=1.0)
+    history = [Bar(1800000000 + i * 900, 100, 101, 99, 100) for i in range(22)]
+    result = replay(history, settings, lambda s, b: ThinkResult(TradeIntent("BUY", 1, "", "trend"), "ok"),
+                    spread_bps=20, slippage_bps=500)  # 5% slippage, Terra-blocker order of magnitude
+    trade = result["trades"][0]
+    actual_cost = trade["qty"] * trade["entry_price"]
+    assert actual_cost <= settings.max_order_usdt + 1e-9, "replay debited more than the declared cap"

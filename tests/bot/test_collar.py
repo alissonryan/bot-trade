@@ -485,14 +485,19 @@ def test_buy_sizing_matches_paper_fill_terra_blocker_reproduction():
     """GPT-5.6-Terra's reproduction: last=100/ask=110 at 5 bps slippage let a
     nominal 20 USDT gate debit 22.011 USDT, because sizing used `last` while
     PaperHands filled at `ask*(1+slippage)`. The gate's own declared notional
-    -- and PaperHands' real fill -- must both stay at or under the cap now."""
+    -- and PaperHands' real fill -- must both stay at or under the cap now.
+    `stop_price < entry` alone is too weak: the OLD incoherent stop (priced
+    off `last`=100, not the real fill=110.055) also happens to sit below
+    entry, so this asserts the actual stop/TP contract -- computed from the
+    CONFIRMED paper entry, with the real ATR clamps -- not just an ordering."""
     from pathlib import Path
     from tempfile import TemporaryDirectory
 
+    from bot.collar import stop_for_entry, take_profit_for_entry
     from bot.hands import PaperHands
     from bot.store import Store
 
-    settings = _settings(max_order_usdt=20, max_portfolio_pct=1.0, paper_slippage_bps=5.0)
+    settings = _settings(max_order_usdt=20, max_portfolio_pct=1.0, paper_slippage_bps=5.0, tp_atr_mult=1.0)
     snap = _snap(last=100.0, ask=110.0, bid=99.5, free_usdt=450.0, atr=5.0)
     gate = decide(TradeIntent("BUY", 1, "go", "trend"), snap, settings,
                   session_ok=True, day_pnl_usdt=0.0)
@@ -504,9 +509,29 @@ def test_buy_sizing_matches_paper_fill_terra_blocker_reproduction():
         pos = hands.execute(gate, snap)
         actual_cost = pos.entry * pos.qty
         assert actual_cost <= 20.0 + 1e-9, "PaperHands debited more than the declared cap"
-        # Stop is priced off the same executable entry the fill actually used,
-        # not the raw `last` the old code sized against.
-        assert pos.stop_price < pos.entry
+        # The confirmed paper entry is the real fill (ask*(1+slippage)), NOT
+        # the raw last=100 the old bug sized/stopped/targeted against.
+        assert pos.entry == pytest.approx(110.0 * 1.0005)
+        assert pos.stop_price == pytest.approx(float(stop_for_entry(pos.entry, snap.atr, settings)))
+        assert pos.stop_price != pytest.approx(float(stop_for_entry(100.0, snap.atr, settings))), \
+            "stop must not be the OLD last-based price"
+        assert pos.take_profit_price == pytest.approx(
+            float(take_profit_for_entry(pos.entry, snap.atr, settings)))
+
+
+def test_buy_rejects_a_non_finite_entry_price_before_qty_math():
+    """Finding 4 (re-review): a pathological slippage config (NaN, or <=
+    -10000 bps inverting/zeroing the price) must be rejected at the domain
+    boundary -- BEFORE `notional / entry_price` (division by zero/NaN) or
+    Decimal(str(nan)).quantize() (InvalidOperation) ever run."""
+    settings = _settings(max_order_usdt=20, max_portfolio_pct=1.0)
+    snap = _snap(last=100.0, ask=110.0, atr=5.0, free_usdt=450.0)
+    for bad_slippage_bps in (-10_000.0, -50_000.0, float("nan"), float("inf")):
+        gate = decide(TradeIntent("BUY", 1, "go", "trend"), snap, settings,
+                      session_ok=True, day_pnl_usdt=0.0, entry_slippage_bps=bad_slippage_bps)
+        assert gate.ok is False
+        assert gate.rule == "no_price"
+        assert gate.qty is None
 
 
 def test_buy_sizing_falls_back_to_last_when_ask_is_missing():

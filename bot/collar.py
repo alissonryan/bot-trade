@@ -151,6 +151,14 @@ def decide(
         # price while filling off another reopens the debit-over-cap bug.
         slip_bps = settings.paper_slippage_bps if settings.mode == "paper" else 0.0
     entry_price = executable_entry_price(snap.ask, snap.last, slip_bps)
+    # A pathological slippage config (NaN, or <= -10000 bps inverting/
+    # zeroing the price) must never reach qty/Decimal math: `notional /
+    # entry_price` would divide by zero or NaN, and Decimal(str(nan))
+    # raises InvalidOperation on quantize(). snap.last/snap.atr are already
+    # validated above, so the only way entry_price goes bad here is a broken
+    # slippage input -- refuse the same way an invalid quote is refused.
+    if not math.isfinite(entry_price) or entry_price <= 0:
+        return GateResult(False, "no_price", "BUY")
 
     cap_pct = settings.max_portfolio_pct * snap.free_usdt
     notional = min(settings.max_order_usdt, cap_pct)

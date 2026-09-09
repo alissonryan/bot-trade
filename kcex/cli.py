@@ -5,8 +5,6 @@ import json
 import sys
 import time
 
-from dotenv import load_dotenv
-
 from .client import KcexClient
 from .login import login_interactive, require_live_token
 from .session import token_preview
@@ -22,9 +20,12 @@ def build_client() -> KcexClient:
     ``KcexClient()`` with no explicit token falls back to reading KCEX_TOKEN
     from the environment -- harmless for auth-required commands, but these
     commands need only public market data and must not load a secret just to
-    fetch a price.
+    fetch a price. Loading .env at all (even to pick up a non-secret override
+    like KCEX_BASE_URL) would populate os.environ with whatever secrets sit
+    in .env for the rest of this process's lifetime; public commands run
+    with only the ambient shell environment, nothing added. require_live_token()
+    (kcex/login.py) loads .env itself, scoped to when a real token is needed.
     """
-    load_dotenv()
     return KcexClient(token="")
 
 
