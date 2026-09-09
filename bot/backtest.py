@@ -19,7 +19,7 @@ from pathlib import Path
 
 import requests
 
-from bot.brain import Budget, ThinkResult, request_body, think_result
+from bot.brain import Budget, ThinkResult, request_body, parse_llm_response
 from bot.collar import decide, stop_for_entry, take_profit_for_entry
 from bot.eye import Eye
 from bot.hands import Position, local_exit_reason
@@ -61,6 +61,16 @@ class CachedBrain:
         self.db.close()
 
     def __call__(self, snap: Snapshot, budget: Budget, *, lessons=None, as_of_ms=None) -> ThinkResult:
+        """`budget` is the caller's HISTORICAL/research accounting Budget
+        (see replay(): unbounded -- math.inf -- outside journal mode), a
+        distinct concept from this cache's own REAL paid-spend ceiling
+        (self.spending/max_cost_usd, enforced below on every actual
+        provider call). Parsing an already-obtained response (cache hit OR
+        a response this call just paid for) is not the same operation as
+        admitting a NEW paid request: it goes through the same shared
+        parse_llm_response() the live path uses to build the ThinkResult,
+        never through think_result()'s admission gate, which requires a
+        finite validated cap/API key that offline replay has neither."""
         if budget.remaining() <= 0:
             raise RuntimeError("historical LLM budget exhausted; incomplete replay")
         body = request_body(snap, self.settings, lessons=lessons, as_of_ms=as_of_ms)
@@ -100,11 +110,17 @@ class CachedBrain:
             def json(self):
                 return payload
 
-        # The placeholder allows offline cache replay without retaining credentials.
-        from dataclasses import replace
-        settings = replace(self.settings, openrouter_api_key="cached")
-        return think_result(snap, settings, budget, http_post=lambda *a, **kw: Response(),
-                            lessons=lessons, as_of_ms=as_of_ms)
+        result = parse_llm_response(Response(), settings=self.settings, body=body,
+                                    reserve=self.settings.llm_fallback_cost_usd)
+        # Charge the caller's historical/research Budget with the real,
+        # already-known cost -- no reserve-then-settle two-step needed
+        # (unlike the live path, there is no uncertain HTTP round trip left
+        # to protect against: the request above, if any, already completed
+        # synchronously). budget.spend() increments both spent_usd and
+        # calls in one step, exactly matching what think_result()'s
+        # reserve()+settle() used to leave behind.
+        budget.spend(result.cost_usd)
+        return result
 
 
 class History:

@@ -301,6 +301,82 @@ def _cost_from_http_error(resp: Any) -> float | None:
     return cost if math.isfinite(cost) and cost >= 0 else None
 
 
+def parse_llm_response(resp: Any, *, settings: Settings, body: dict[str, Any],
+                       reserve: float) -> ThinkResult:
+    """Parse an already-received HTTP response into a ThinkResult: extract
+    the real usage.cost when the body supplies one (else `reserve` as a
+    conservative estimate), decode the completion, and classify every
+    failure mode (http error, bad response, truncated, empty, parse) with
+    its own named reason. Shared by think_result()'s live dispatch and
+    bot.backtest.CachedBrain's replay of an already-cached provider
+    response -- parsing a response the caller already has in hand is not
+    the same operation as admitting a NEW paid request, and must not
+    require a live Budget/Store or a real API key to run.
+
+    Pure parsing: never touches a Budget or a Store, never raises, and
+    never settles anything itself. `result.cost_source != "fallback_
+    uncertain"` tells a caller that owns a reservation whether this result
+    should be settled against it (an offline replay that owns no live
+    reservation settles nothing at all)."""
+    model = settings.llm_model
+    status = getattr(resp, "status_code", None)
+    try:
+        status = int(status) if status is not None else None
+    except (TypeError, ValueError):
+        status = None
+    if status is not None and status >= 400:
+        log.warning("llm http %s", status)
+        real_cost = _cost_from_http_error(resp)
+        if real_cost is not None:
+            return ThinkResult(None, f"llm_http_{status}", real_cost, "usage", status, model, request=body)
+        # No status code makes "not billed" a fact rather than a guess --
+        # ANY >=400 with no real usage figure keeps the reservation as the
+        # charge, the same treatment as a timeout, never a fabricated $0.
+        return ThinkResult(None, f"llm_http_{status}", reserve, "fallback_uncertain", status, model, request=body)
+    try:
+        payload = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("llm bad response: %s: %s", type(exc).__name__, exc)
+        # A 200 whose body is not even valid JSON is anomalous, not a known
+        # $0 outcome -- there is no usage field to read a real cost from, so
+        # the reservation stays the charge, same as a timeout.
+        return ThinkResult(None, REASON_BAD_RESPONSE, reserve, "fallback_uncertain", status, model, request=body)
+
+    # The real/valid usage cost is known BEFORE ever touching `choices` --
+    # a malformed shape (e.g. an empty choices list) must not swallow a
+    # real charge that already arrived in `usage`.
+    cost, source = _cost_from(payload, settings)
+    try:
+        text = payload["choices"][0]["message"]["content"]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("llm bad response: %s: %s", type(exc).__name__, exc)
+        return ThinkResult(None, REASON_BAD_RESPONSE, cost, source, status, model, request=body)
+
+    if not isinstance(text, str) or not text.strip():
+        finish = None
+        try:
+            finish = payload["choices"][0].get("finish_reason")
+        except Exception:  # noqa: BLE001
+            pass
+        if finish == "length":
+            # A reasoning model spends max_tokens on its reasoning before any
+            # content, so every cycle would degrade to a forced HOLD while still
+            # being charged. Say so loudly instead of looking like a decision.
+            log.error(
+                "llm returned no content and stopped at max_tokens=%d; raise LLM_MAX_TOKENS "
+                "or pick a non-reasoning model (every cycle is a forced HOLD and still costs)",
+                settings.llm_max_tokens,
+            )
+            return ThinkResult(None, REASON_TRUNCATED, cost, source, status, model, request=body)
+        log.warning("llm returned an empty completion")
+        return ThinkResult(None, REASON_EMPTY, cost, source, status, model, request=body)
+    intent = parse_intent(text)
+    if intent is None:
+        log.warning("llm parse failed: %r", text[:200])
+        return ThinkResult(None, REASON_PARSE, cost, source, status, model, raw=text[:500], request=body)
+    return ThinkResult(intent, REASON_OK, cost, source, status, model, raw=text[:500], request=body)
+
+
 def think_result(
     snap: Snapshot,
     settings: Settings,
@@ -379,64 +455,14 @@ def think_result(
         log.warning("llm network error: %s: %s", type(exc).__name__, exc)
         return ThinkResult(None, REASON_NETWORK, reserve, "fallback_uncertain", model=model, request=body)
 
-    status = getattr(resp, "status_code", None)
-    try:
-        status = int(status) if status is not None else None
-    except (TypeError, ValueError):
-        status = None
-    if status is not None and status >= 400:
-        log.warning("llm http %s", status)
-        real_cost = _cost_from_http_error(resp)
-        if real_cost is not None:
-            settle(real_cost)
-            return ThinkResult(None, f"llm_http_{status}", real_cost, "usage", status, model, request=body)
-        # No status code makes "not billed" a fact rather than a guess --
-        # ANY >=400 with no real usage figure keeps the reservation as the
-        # charge, the same treatment as a timeout, never a fabricated $0.
-        return ThinkResult(None, f"llm_http_{status}", reserve, "fallback_uncertain", status, model, request=body)
-    try:
-        payload = resp.json()
-    except Exception as exc:  # noqa: BLE001
-        log.warning("llm bad response: %s: %s", type(exc).__name__, exc)
-        # A 200 whose body is not even valid JSON is anomalous, not a known
-        # $0 outcome -- there is no usage field to read a real cost from, so
-        # the reservation stays the charge, same as a timeout.
-        return ThinkResult(None, REASON_BAD_RESPONSE, reserve, "fallback_uncertain", status, model, request=body)
-
-    # Settle the real/valid usage cost BEFORE ever touching `choices` -- a
-    # malformed shape (e.g. an empty choices list) must not swallow a real
-    # charge that already arrived in `usage`.
-    cost, source = _cost_from(payload, settings)
-    settle(cost)
-    try:
-        text = payload["choices"][0]["message"]["content"]
-    except Exception as exc:  # noqa: BLE001
-        log.warning("llm bad response: %s: %s", type(exc).__name__, exc)
-        return ThinkResult(None, REASON_BAD_RESPONSE, cost, source, status, model, request=body)
-
-    if not isinstance(text, str) or not text.strip():
-        finish = None
-        try:
-            finish = payload["choices"][0].get("finish_reason")
-        except Exception:  # noqa: BLE001
-            pass
-        if finish == "length":
-            # A reasoning model spends max_tokens on its reasoning before any
-            # content, so every cycle would degrade to a forced HOLD while still
-            # being charged. Say so loudly instead of looking like a decision.
-            log.error(
-                "llm returned no content and stopped at max_tokens=%d; raise LLM_MAX_TOKENS "
-                "or pick a non-reasoning model (every cycle is a forced HOLD and still costs)",
-                settings.llm_max_tokens,
-            )
-            return ThinkResult(None, REASON_TRUNCATED, cost, source, status, model, request=body)
-        log.warning("llm returned an empty completion")
-        return ThinkResult(None, REASON_EMPTY, cost, source, status, model, request=body)
-    intent = parse_intent(text)
-    if intent is None:
-        log.warning("llm parse failed: %r", text[:200])
-        return ThinkResult(None, REASON_PARSE, cost, source, status, model, raw=text[:500], request=body)
-    return ThinkResult(intent, REASON_OK, cost, source, status, model, raw=text[:500], request=body)
+    result = parse_llm_response(resp, settings=settings, body=body, reserve=reserve)
+    if result.cost_source != "fallback_uncertain":
+        # A real (or well-understood fallback) cost is known -- true up the
+        # reservation. "fallback_uncertain" means the outcome is genuinely
+        # unknown: the reservation already committed IS the charge, and
+        # settling further would either double-count or fabricate a number.
+        settle(result.cost_usd)
+    return result
 
 
 @dataclass

@@ -247,6 +247,36 @@ def test_exhausted_budget_is_error_not_a_fabricated_hold(tmp_path):
             brain(replay_snapshot(bars(), bars()[-1].t+900, 126, settings), Budget(1, 1, "day"))
 
 
+def test_cached_brain_accepts_the_unbounded_research_budget_replay_uses(tmp_path):
+    """Root cause of the trades=0 regression: replay() deliberately builds
+    Budget(0, math.inf, '') for non-journal historical replay (real paid
+    authorization is separately bounded by CachedBrain.spending/
+    max_cost_usd, enforced on every actual provider call). Budget.is_valid()
+    correctly rejects a non-finite cap for a LIVE admission gate, but
+    CachedBrain must never route an already-cached/already-paid-for
+    response through that gate at all -- parsing a response already in
+    hand is not admitting a new paid request. An infinite-cap Budget must
+    still work end to end: a real BUY intent parsed, and the Budget's own
+    accounting (spent_usd, calls) still updated with the real cost."""
+    import math
+    from dataclasses import replace
+    from bot.backtest import CachedBrain, replay_snapshot
+    from bot.brain import Budget
+
+    settings = replace(Settings.from_env(), llm_model="test/model", openrouter_api_key="test")
+    snap = replay_snapshot(bars(), bars()[-1].t + 900, 126, settings)
+    response = {"choices": [{"message": {"content": '{"action":"BUY","confidence":1,"reason":"t","regime":"trend"}'}}],
+               "usage": {"cost": 0.001}}
+    post = Mock(return_value=Mock(status_code=200, json=lambda: response))
+    with CachedBrain(tmp_path / "cache.db", settings, allow_network=True, max_cost_usd=1, http_post=post) as brain:
+        budget = Budget(0, math.inf, "")
+        result = brain(snap, budget)
+    assert result.intent is not None and result.intent.action == "BUY"
+    assert result.reason == "ok"
+    assert budget.spent_usd == pytest.approx(0.001)
+    assert budget.calls == 1
+
+
 def test_snapshot_parity_through_real_eye_poll_heavy():
     from dataclasses import replace
     from bot.backtest import replay_snapshot
