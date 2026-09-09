@@ -29,6 +29,7 @@ class StoreIdentityMismatch(RuntimeError):
     closed and never migrates a database from one mode to the other.
     """
 JOURNAL_ENTRY_KEY = "journal_active_entry"
+BUDGET_KEY = "llm_budget"
 log = logging.getLogger(__name__)
 _JOURNAL_COLUMNS = (
     ("decision_ms", "INTEGER"), ("action", "TEXT"), ("confidence", "REAL"),
@@ -541,6 +542,51 @@ class Store:
         )
         if commit:
             self._conn.commit()
+
+
+    # -- LLM daily budget ---------------------------------------------------
+    #
+    # Finding 3: bot/cli.py used to construct a fresh in-memory Budget on every
+    # process start (`Budget(spent_usd=0.0, ...)`), so a restart on the SAME
+    # UTC day silently re-authorized the full daily cap regardless of what had
+    # already been spent. This reuses the existing kv table -- the same
+    # mode/database-scoped persistence PAPER_CASH_KEY and MODE_KEY already
+    # rely on -- rather than a second convention: paper and live already get
+    # separate Store files (bot/cli.py::db_path_for_mode), so their budgets
+    # are separate for free. Reads/writes here never touch the network or
+    # perform an LLM call; they only persist numbers the caller already has.
+
+    def budget_load(self) -> dict[str, Any] | None:
+        """The last persisted ``{day, spent_usd, calls}``, or None if never
+        written or unreadable. The caller decides whether ``day`` still
+        matches today's UTC day; a stale day is a new budget, not a bug."""
+        raw = self.kv_get(BUDGET_KEY)
+        if raw is None:
+            return None
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(data, dict) or "day" not in data or "spent_usd" not in data:
+            return None
+        try:
+            return {
+                "day": str(data["day"]),
+                "spent_usd": float(data["spent_usd"]),
+                "calls": int(data.get("calls", 0)),
+            }
+        except (TypeError, ValueError):
+            return None
+
+    def budget_save(self, *, day: str, spent_usd: float, calls: int) -> None:
+        """Durable snapshot of the runtime Budget, called after every cycle
+        (including ones with no LLM call, which is a cheap no-op overwrite).
+        This is the entire contract: it stores exactly the caller's own
+        numbers -- it never rederives, retries or double-counts spend, so a
+        caller that itself avoids double-charging (single locked process,
+        no automatic retry of a billed request) cannot have this layer
+        introduce a double-spend on top of it."""
+        self.kv_set(BUDGET_KEY, json.dumps({"day": day, "spent_usd": float(spent_usd), "calls": int(calls)}))
 
     def commit(self) -> None:
         """Public commit for callers that pass ``commit=False`` to add_fill /

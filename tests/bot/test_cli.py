@@ -153,3 +153,137 @@ def test_lock_is_acquired_before_any_initializer_with_side_effects(tmp_path, mon
     monkeypatch.setattr(cli, "_loop", lambda *a, **kw: 0)
     assert cli.main(["run", "--once"]) == 0
     assert called["eye"] is True
+
+
+def test_loop_restart_resumes_spend_instead_of_re_authorizing_the_full_cap(tmp_path):
+    """Finding 3: `_loop` used to construct `Budget(spent_usd=0.0, ...)` on
+    every process start, so a same-day restart silently re-authorized the
+    full daily cap regardless of what had already been spent. The budget
+    handed to the first cycle after a restart must start from what was
+    persisted for today, not from zero."""
+    import bot.cli as cli
+    from bot.cycle import utc_day
+    from bot.settings import Settings
+    from bot.store import Store
+    from bot.types import GateResult
+
+    store = Store(tmp_path / "c.db", mode="paper")
+    store.budget_save(day=utc_day(), spent_usd=1.5, calls=3)
+
+    d = Settings.from_env().__dict__.copy()
+    d["mode"] = "paper"
+    d["llm_daily_budget_usd"] = 2.0
+    settings = Settings(**d)
+
+    captured = {}
+
+    def fake_run_once(*, budget, **kw):
+        captured["spent_usd"] = budget.spent_usd
+        captured["calls"] = budget.calls
+        return 0, 0.0, GateResult(False, "hold", "HOLD")
+
+    class FakeEye:
+        rules = None
+
+        def connect_ws(self):
+            pass
+
+        def snapshot_rest(self):
+            pass
+
+    import bot.cli as cli_module
+    cli_module.run_once = fake_run_once
+    try:
+        code = cli._loop(True, settings, object(), store, FakeEye(), object())
+    finally:
+        from bot.cycle import run_once as real_run_once
+        cli_module.run_once = real_run_once
+
+    assert code == cli.EXIT_OK
+    assert captured["spent_usd"] == pytest.approx(1.5)
+    assert captured["calls"] == 3
+
+
+def test_loop_restart_on_a_new_utc_day_starts_at_zero(tmp_path):
+    """The control: a persisted budget from a PRIOR UTC day must not carry
+    over -- that is a fresh day's authorization, not a bug to work around."""
+    import bot.cli as cli
+    from bot.settings import Settings
+    from bot.store import Store
+    from bot.types import GateResult
+
+    store = Store(tmp_path / "c.db", mode="paper")
+    store.budget_save(day="2000-01-01", spent_usd=1.9, calls=9)
+
+    d = Settings.from_env().__dict__.copy()
+    d["mode"] = "paper"
+    settings = Settings(**d)
+
+    captured = {}
+
+    def fake_run_once(*, budget, **kw):
+        captured["spent_usd"] = budget.spent_usd
+        return 0, 0.0, GateResult(False, "hold", "HOLD")
+
+    class FakeEye:
+        rules = None
+
+        def connect_ws(self):
+            pass
+
+        def snapshot_rest(self):
+            pass
+
+    import bot.cli as cli_module
+    cli_module.run_once = fake_run_once
+    try:
+        cli._loop(True, settings, object(), store, FakeEye(), object())
+    finally:
+        from bot.cycle import run_once as real_run_once
+        cli_module.run_once = real_run_once
+
+    assert captured["spent_usd"] == 0.0
+
+
+def test_budget_persists_through_a_fatal_halt_not_only_on_clean_return(tmp_path):
+    """A charge (decision or reflection) right before a fatal halt
+    (UnprotectedPosition, etc.) must still be persisted -- the finally block
+    around run_once() must not be skipped just because it raised."""
+    import bot.cli as cli
+    from bot.cycle import utc_day
+    from bot.hands import UnprotectedPosition
+    from bot.settings import Settings
+    from bot.store import Store
+
+    store = Store(tmp_path / "c.db", mode="paper")
+
+    d = Settings.from_env().__dict__.copy()
+    d["mode"] = "paper"
+    settings = Settings(**d)
+
+    def charges_then_raises(*, budget, **kw):
+        budget.spend(0.02)
+        raise UnprotectedPosition("no stop")
+
+    class FakeEye:
+        rules = None
+
+        def connect_ws(self):
+            pass
+
+        def snapshot_rest(self):
+            pass
+
+    import bot.cli as cli_module
+    cli_module.run_once = charges_then_raises
+    try:
+        code = cli._loop(True, settings, object(), store, FakeEye(), object())
+    finally:
+        from bot.cycle import run_once as real_run_once
+        cli_module.run_once = real_run_once
+
+    assert code == cli.EXIT_UNPROTECTED
+    persisted = store.budget_load()
+    assert persisted is not None
+    assert persisted["day"] == utc_day()
+    assert persisted["spent_usd"] == pytest.approx(0.02)

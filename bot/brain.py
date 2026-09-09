@@ -251,10 +251,19 @@ def think_result(
                     json=request_body(snap, settings, lessons=lessons, as_of_ms=as_of_ms), timeout=45)
     except requests.Timeout as exc:
         log.warning("llm timeout: %s", exc)
-        return ThinkResult(None, REASON_TIMEOUT, model=model)
+        # The request may have already reached and been billed by the
+        # provider even though this process never saw the response --
+        # charging exactly $0 would be an optimistic assumption, not a known
+        # fact. Reserve the same conservative fallback an unparseable-but-
+        # received response already gets.
+        cost = settings.llm_fallback_cost_usd
+        budget.spend(cost)
+        return ThinkResult(None, REASON_TIMEOUT, cost, "fallback_uncertain", model=model)
     except Exception as exc:  # noqa: BLE001 - network layer; named in the audit
         log.warning("llm network error: %s: %s", type(exc).__name__, exc)
-        return ThinkResult(None, REASON_NETWORK, model=model)
+        cost = settings.llm_fallback_cost_usd
+        budget.spend(cost)
+        return ThinkResult(None, REASON_NETWORK, cost, "fallback_uncertain", model=model)
 
     status = getattr(resp, "status_code", None)
     try:
@@ -337,9 +346,14 @@ def reflect_result(lesson: dict, settings: Settings, budget: Budget, *,
             headers={"Authorization": f"Bearer {settings.openrouter_api_key}", "Content-Type": "application/json"},
             json=body, timeout=10)
     except requests.Timeout:
-        return ReflectionResult(None, "reflection_timeout", model=model)
+        # Same reasoning as think_result(): the outcome is genuinely unknown,
+        # not zero-cost by default. The pre-check above already reserved
+        # headroom for exactly this amount.
+        budget.spend(reserve)
+        return ReflectionResult(None, "reflection_timeout", reserve, "fallback_uncertain", model=model)
     except Exception:
-        return ReflectionResult(None, "reflection_network", model=model)
+        budget.spend(reserve)
+        return ReflectionResult(None, "reflection_network", reserve, "fallback_uncertain", model=model)
     status = getattr(resp, "status_code", None)
     if isinstance(status, int) and status >= 400:
         return ReflectionResult(None, f"reflection_http_{status}", http_status=status, model=model)

@@ -134,3 +134,26 @@ def test_migrates_database_from_previous_schema(tmp_path):
     assert row["exit_reason"] is None
     store.add_fill("2026-09-04", 1.0, side="SELL", qty=0.00025, price=81000.0)
     assert store.fills(1)[0]["side"] == "SELL"
+
+
+def test_budget_roundtrip_survives_restart(tmp_path):
+    db = tmp_path / "budget.db"
+    store = Store(db)
+    assert store.budget_load() is None
+    store.budget_save(day="2026-09-08", spent_usd=1.23, calls=4)
+    assert store.budget_load() == {"day": "2026-09-08", "spent_usd": 1.23, "calls": 4}
+    # A restart (fresh connection on the same file) must see the same state.
+    reopened = Store(db)
+    assert reopened.budget_load() == {"day": "2026-09-08", "spent_usd": 1.23, "calls": 4}
+    reopened.budget_save(day="2026-09-08", spent_usd=1.50, calls=5)
+    assert store.budget_load() == {"day": "2026-09-08", "spent_usd": 1.50, "calls": 5}
+
+
+def test_budget_load_tolerates_corrupt_or_missing_data(tmp_path):
+    store = Store(tmp_path / "budget.db")
+    store.kv_set("llm_budget", "not json")
+    assert store.budget_load() is None
+    store.kv_set("llm_budget", '{"day": "2026-09-08"}')  # missing spent_usd
+    assert store.budget_load() is None
+    store.kv_set("llm_budget", '{"day": "2026-09-08", "spent_usd": "nope"}')
+    assert store.budget_load() is None

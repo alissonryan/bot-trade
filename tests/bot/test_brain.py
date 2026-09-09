@@ -169,6 +169,36 @@ def test_think_names_config_http_timeout_network_and_parse_failures():
     assert res.reason == "llm_bad_response"
 
 
+def test_timeout_and_network_reserve_a_conservative_fallback_charge():
+    """Finding 3: a timeout or network error leaves the actual provider outcome
+    genuinely unknown -- the request may have already reached and been billed
+    by OpenRouter even though this process never saw the response. Charging
+    exactly $0 there is an optimistic assumption, not a fact; it must reserve
+    the same conservative fallback cost an unparseable-but-received response
+    already gets (see llm_parse above), so a run of timeouts cannot silently
+    look free while draining a real daily budget on the provider's side."""
+    s = _settings(llm_fallback_cost_usd=0.02)
+
+    def timeout(*a, **k):
+        raise requests.Timeout("slow")
+
+    budget = Budget(0, 2, "d")
+    res = think_result(_snap(), s, budget, http_post=timeout)
+    assert res.reason == "llm_timeout"
+    assert res.cost_usd == pytest.approx(0.02)
+    assert budget.spent_usd == pytest.approx(0.02)
+    assert budget.calls == 1
+
+    def network(*a, **k):
+        raise requests.ConnectionError("dns")
+
+    budget = Budget(0, 2, "d")
+    res = think_result(_snap(), s, budget, http_post=network)
+    assert res.reason == "llm_network"
+    assert res.cost_usd == pytest.approx(0.02)
+    assert budget.spent_usd == pytest.approx(0.02)
+
+
 def test_request_body_has_token_cap_usage_and_optional_json_mode():
     body = request_body(_snap(), _settings(llm_max_tokens=150))
     assert body["max_tokens"] == 150

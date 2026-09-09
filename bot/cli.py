@@ -260,8 +260,24 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _loop(once: bool, settings: Settings, client: KcexClient, store: Store, eye: Eye, hands: PaperHands | LiveHands) -> int:
-    budget = Budget(spent_usd=0.0, cap_usd=settings.llm_daily_budget_usd, day=utc_day())
-    log.info("mode=%s symbol=%s cycle=%dmin ws=%s", settings.mode, settings.symbol, settings.cycle_minutes, settings.ws_enabled)
+    # Finding 3: a fresh in-memory Budget(spent_usd=0.0, ...) on every process
+    # start silently re-authorized the full daily cap on a same-day restart.
+    # Reuse whatever was last persisted for THIS store (already scoped one
+    # database per mode, per db_path_for_mode) when it is still today's UTC
+    # day; a stale persisted day is correctly a fresh budget, not a bug.
+    today = utc_day()
+    try:
+        persisted = store.budget_load()
+    except Exception as exc:  # noqa: BLE001 - a corrupt/unreadable kv row degrades, it never blocks boot
+        log.warning("budget state unreadable, starting at zero for today: %s", exc)
+        persisted = None
+    if persisted and persisted["day"] == today:
+        budget = Budget(spent_usd=persisted["spent_usd"], cap_usd=settings.llm_daily_budget_usd,
+                        day=today, calls=persisted["calls"])
+    else:
+        budget = Budget(spent_usd=0.0, cap_usd=settings.llm_daily_budget_usd, day=today)
+    log.info("mode=%s symbol=%s cycle=%dmin ws=%s budget=%.4f/%.2f", settings.mode, settings.symbol,
+             settings.cycle_minutes, settings.ws_enabled, budget.spent_usd, budget.cap_usd)
     try:
         if settings.mode == "live":
             log.info("boot reconcile: %s", hands.reconcile())
@@ -288,17 +304,30 @@ def _loop(once: bool, settings: Settings, client: KcexClient, store: Store, eye:
     while True:
         budget.roll_day(utc_day())
         try:
-            last_llm_ms, last_px, gate = run_once(
-                settings=settings,
-                eye=eye,
-                store=store,
-                client=client,
-                hands=hands,
-                budget=budget,
-                last_llm_ms=last_llm_ms,
-                last_px=last_px,
-            )
-            backoff = 1.0
+            try:
+                last_llm_ms, last_px, gate = run_once(
+                    settings=settings,
+                    eye=eye,
+                    store=store,
+                    client=client,
+                    hands=hands,
+                    budget=budget,
+                    last_llm_ms=last_llm_ms,
+                    last_px=last_px,
+                )
+                backoff = 1.0
+            finally:
+                # Persisted whether run_once() returned or raised: a charge
+                # (decision or reflection) that happened right before a fatal
+                # halt (UnprotectedPosition, etc.) must not be lost on restart.
+                # A write failure here must never replace/mask whatever
+                # run_once() itself raised (or a real halt reason above it) --
+                # it only degrades this restart's budget accuracy, it is not
+                # itself a reason to halt.
+                try:
+                    store.budget_save(day=budget.day, spent_usd=budget.spent_usd, calls=budget.calls)
+                except Exception as exc:  # noqa: BLE001
+                    log.error("budget persistence failed: %s", exc)
         except SessionDead as exc:
             log.critical("session dead: %s. Run: python -m kcex.cli login", exc)
             return EXIT_SESSION_DEAD
