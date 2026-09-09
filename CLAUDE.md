@@ -9,13 +9,13 @@ Python bot: OpenRouter LLM decides **BTC/USDT spot on KCEX**; a **code collar** 
 ## Do
 
 - Keep `kcex/` as the **only** exchange client (no CCXT). GET may retry; **POST/DELETE never retry**.
-- Keep LLM output as `{action, confidence, reason, regime}` only. Size and stop live in `bot/collar.py`.
+- Keep LLM output as `{action, confidence, reason, regime}` only. Size and stop live in `bot/collar.py`, keyed off `executable_entry_price()` (best ask, or `last` when ask is missing/invalid, marked up by slippage) — the same price `PaperHands` actually fills at.
 - Keep the six live invariants in `bot/hands.py` (persist before stop, confirm by balance, never quietly unprotected, cancel-confirm-sell, reconcile, only own ids). Add a test for any change there. Invariant 5's balance-delta attribution is corroboration, not identification — an offsetting owner deposit/withdrawal or a lagging balance read can fool it; keep it (it is the only autonomous-stop-fill detector) but do not present it as sound (see AGENTS.md § Live invariants, point 5).
 - Never `cancel_order` unless `store.is_bot_order(id)`.
 - Default paper. Live is an explicit `MODE=live` **plus** `python -m kcex.cli login`. Do not flip live unless the human asks.
 - **Do not re-implement login.** `python -m kcex.cli login` already opens Chrome, waits for captcha+2FA, and writes `KCEX_TOKEN` + `KCEX_TOKEN_AT` to `.env`.
 - On live 401: halt (`SessionDead`, exit 1). On `UnprotectedPosition`: halt (exit 2) and tell the human to fix the exchange by hand.
-- Every audit row keeps the snapshot and the LLM reason/cost. Do not remove that.
+- Every audit row keeps the snapshot, the LLM reason/cost, and the exact sanitized request body a decision actually used. Do not remove that.
 - Follow [docs/kcex-spot-api.md](docs/kcex-spot-api.md) for endpoints and the socket. If a path was not captured, say so — do not guess.
 
 ## Do not
@@ -33,12 +33,12 @@ Python bot: OpenRouter LLM decides **BTC/USDT spot on KCEX**; a **code collar** 
 
 | Path | Job |
 | --- | --- |
-| `bot/eye.py` | Socket first (via `bot/hub.py::Hub`), REST fallback, klines, balances, symbol rules |
+| `bot/eye.py` | Socket first (via `bot/hub.py::Hub`), REST fallback, klines, balances (live only), symbol rules |
 | `bot/hub.py` | Shared in-process holder of the latest WS tick |
 | `kcex/ws.py` | Public WS client — parses frames, ping, `DEFAULT_WS_URL` (the only WS client) |
 | `bot/chart_server.py` | Loopback-only local chart HTTP+WS server (`--chart`) |
 | `bot/brain.py` | OpenRouter, one model, named failure reasons, real cost |
-| `bot/collar.py` | Risk gate (20 USDT, 5%, ATR, 1 position, venue minimum, day-loss incl. unrealized) |
+| `bot/collar.py` | Risk gate (20 USDT, 5%, ATR, 1 position, venue minimum, day-loss incl. unrealized); sizes/stops off the executable entry price, not raw `last` |
 | `bot/hands.py` | PaperHands / LiveHands (live invariants) |
 | `bot/cycle.py` | One loop step + audit row |
 | `bot/cli.py` | Loop, lock, log, exit codes |
@@ -66,7 +66,7 @@ TDD is mandatory for collar/hands changes. See AGENTS.md § P1 for the canonical
 
 ## Paper/live isolation
 
-Each mode gets its own database (`bot/cli.py::db_path_for_mode`): paper keeps `data/bot.db`, live gets `data/bot-live.db`. `Store(path, mode=...)` stamps the owning mode and raises `StoreIdentityMismatch` on a mismatched open; `LiveHands` additionally refuses any position row with `paper` provenance. An unstamped legacy database may be adopted by paper, never by live. **Account switching is not covered** — the token rotates weekly and no account id is captured, so treat one live database as belonging to one account by hand. See AGENTS.md § Paper/live isolation.
+Each mode gets its own database (`bot/cli.py::db_path_for_mode`): paper keeps `data/bot.db`, live gets `data/bot-live.db`. `Store(path, mode=...)` stamps the owning mode and raises `StoreIdentityMismatch` on a mismatched open; `LiveHands` additionally refuses any position row with `paper` provenance. An unstamped legacy database may be adopted by paper, never by live. **Account switching is not covered** — the token rotates weekly and no account id is captured, so treat one live database as belonging to one account by hand. `bot/cli.py::main` holds `data/bot.lock` (shared by both modes) BEFORE constructing anything with a side effect; a platform with no `fcntl` fails closed instead of running unlocked. See AGENTS.md § Paper/live isolation.
 
 ## P2 cooldown
 
@@ -74,7 +74,7 @@ Each mode gets its own database (`bot/cli.py::db_path_for_mode`): paper keeps `d
 
 ## P4 journal
 
-`JOURNAL_ENABLED=0` is opt-out. See AGENTS.md § P4: persistent BUY/fill linkage, null-PnL non-execution, independent outcome/reflection knowledge timestamps and mandatory final prompt `as_of` filter. At most five lessons/400-char reflections; one 160-token reflection after decision AND execution shares the daily Budget with an estimated next-decision reserve. No reflection is a judge or order controller. P0 offline skips reflection explicitly; fixed cached intents cannot measure learning, and changed lesson payloads must miss old cache keys. Anti-look-ahead, migration, budget-priority and isolated-process opt-out tests are required.
+`JOURNAL_ENABLED=0` is opt-out. See AGENTS.md § P4: persistent BUY/fill linkage, null-PnL non-execution, independent outcome/reflection knowledge timestamps and mandatory final prompt `as_of` filter. At most five lessons/400-char reflections; one 160-token reflection after decision AND execution shares the daily Budget with an estimated next-decision reserve. The daily Budget itself is persisted per mode/database in `Store`'s kv table and resumed on a same-day restart (a stale persisted day still rolls to zero); a timeout/network failure also reserves the fallback cost instead of charging $0. No reflection is a judge or order controller. P0 offline skips reflection explicitly; fixed cached intents cannot measure learning, and changed lesson payloads must miss old cache keys. Anti-look-ahead, migration, budget-priority and isolated-process opt-out tests are required.
 
 ## Resume (2026-09-04, safety revision)
 
