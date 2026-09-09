@@ -300,7 +300,8 @@ def replay(history: list[Bar], settings: Settings, policy, *, rules: SymbolRules
         intent = result.intent or TradeIntent("HOLD", 0, result.reason, "unknown")
         gate = decide(intent, snap, settings, session_ok=True, day_pnl_usdt=day_pnl,
                       unrealized_pnl_usdt=qty * (snap.bid - entry), rules=rules,
-                      last_loss_exit_ms=last_loss_exit_ms, now_ms=bar.t * 1000)
+                      last_loss_exit_ms=last_loss_exit_ms, now_ms=bar.t * 1000,
+                      entry_slippage_bps=slippage_bps)
         if barrier:
             gate = GateResult(False, barrier, "HOLD")
         if journal:
@@ -498,7 +499,7 @@ def markdown_report(comparison, metadata):
     lines += ["", f"Primeiro spread testado não positivo: {min(losses)} bps (não é raiz exata)." if losses else "Nenhum cruzamento de zero nos spreads testados; não extrapolar fora da faixa.", "",
               "## Convenções", "",
               "- Só 21 barras anteriores fechadas no Eye/ATR; execução imediata no open assume latência zero.",
-              "- Stops intrabar pelo low, gaps no min(open, stop); TP não implementado; futura colisão stop/TP deve assumir stop primeiro.",
+              "- Stops intrabar pelo low, gaps no min(open, stop); TP opt-in (TP_ATR_MULT) amostra só o open de cada Min15 -- um cruzamento intrabar sem toque no open não gera fill; colisão no mesmo open assume stop primeiro.",
               "- Equity marcada a bid líquido de slippage/taxa de saída em cada close; DD close-a-close não mede excursão intrabar.",
               "- Sharpe anualizado Min15 (365×96), taxa livre de risco zero; N/A se variância zero. PF=N/A sem perdas (inclusive sem trades).",
               "- Net trading inclui spread/slippage/taxas; LLM separado para comparação de execução; liquidação final explícita, sem posição escondida.",

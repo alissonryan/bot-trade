@@ -208,8 +208,11 @@ def test_replay_twice_is_identical_with_cache_and_real_collar(tmp_path):
     assert first == second
     assert first["metrics"]["trades"] == 1
     assert first["metrics"]["exit_types"]["llm_sell"] == 1
-    assert first["metrics"]["net_pnl_usdt"] == pytest.approx(-0.004)
-    assert first["metrics"]["execution_cost_usdt"] == pytest.approx(0.004)
+    # Sized off the executable ask (100.01 at 2 bps spread), not the raw open
+    # (100): qty truncates to 0.19998 instead of 0.2, so the 20 USDT order cap
+    # is actually respected (0.2 * 100.01 = 20.002 would have overspent it).
+    assert first["metrics"]["net_pnl_usdt"] == pytest.approx(-0.0039996)
+    assert first["metrics"]["execution_cost_usdt"] == pytest.approx(0.0039996)
     assert len(seen) == 4
     assert all(__import__("json").loads(req["messages"][1]["content"])["last"] == history[21+i].o
                for i, req in enumerate(seen))

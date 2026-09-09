@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
 from typing import Any, Callable, NoReturn
 
-from bot.collar import stop_for_entry, take_profit_for_entry
+from bot.collar import executable_entry_price, stop_for_entry, take_profit_for_entry
 from bot.settings import Settings
 from bot.store import Store, StoreIdentityMismatch
 from bot.types import GateResult, Snapshot, SymbolRules
@@ -370,7 +370,7 @@ class PaperHands:
     def execute(self, gate: GateResult, snap: Snapshot) -> Position:
         slip = self.settings.paper_slippage_bps / 10_000.0
         if gate.action == "BUY" and gate.qty:
-            px = (snap.ask or snap.last) * (1 + slip)
+            px = executable_entry_price(snap.ask, snap.last, self.settings.paper_slippage_bps)
             qty = float(gate.qty)
             cost = px * qty
             if cost > self.cash + 1e-9:

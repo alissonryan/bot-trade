@@ -15,18 +15,27 @@ from bot.types import Bar, Snapshot, SymbolRules, TradeIntent
 def _settings(**kwargs) -> Settings:
     base = Settings.from_env()
     data = base.__dict__.copy()
+    # Collar tests exercise sizing/stop/TP rules against a hand-picked `last`;
+    # zeroing the slippage buffer by default keeps the entry-price basis equal
+    # to `last` unless a test opts into slippage explicitly (see
+    # test_executable_entry_price_unifies_sizing_and_fill below).
+    data["paper_slippage_bps"] = 0.0
     data.update(kwargs)
     return Settings(**data)
 
 
 def _snap(**kwargs) -> Snapshot:
     bars = [Bar(t=i, o=100, h=101, l=99, c=100) for i in range(20)]
+    # `ask`/`bid` default to `last` (zero synthetic spread) so tests that
+    # override only `last` keep sizing against exactly that price, matching
+    # `executable_entry_price()` with a zero slippage buffer.
+    last = kwargs.get("last", 100_000.0)
     fields = dict(
         ts_ms=1,
-        last=100_000.0,
-        bid=99_999.0,
-        ask=100_001.0,
-        spread=2.0,
+        last=last,
+        bid=last,
+        ask=last,
+        spread=0.0,
         bars_15m=bars,
         atr=500.0,
         free_usdt=450.0,
@@ -459,3 +468,52 @@ def test_unrealized_day_loss_cannot_change_a_buy_outcome():
     without = decide(buy, _snap(bot_qty=0.0002), s, session_ok=True, day_pnl_usdt=0.0, unrealized_pnl_usdt=0.0)
     assert held.ok is False and without.ok is False
     assert held.rule == "day_loss" and without.rule == "already_long"
+
+
+def test_executable_entry_price_prefers_ask_and_applies_slippage():
+    from bot.collar import executable_entry_price
+
+    assert executable_entry_price(110.0, 100.0, 500.0) == pytest.approx(110 * 1.05)
+    # Missing/invalid ask falls back to `last` instead of poisoning the price
+    # with a falsy-but-nonzero or negative value.
+    assert executable_entry_price(0.0, 100.0, 0.0) == 100.0
+    assert executable_entry_price(-5.0, 100.0, 0.0) == 100.0
+    assert executable_entry_price(float("nan"), 100.0, 0.0) == 100.0
+
+
+def test_buy_sizing_matches_paper_fill_terra_blocker_reproduction():
+    """GPT-5.6-Terra's reproduction: last=100/ask=110 at 5 bps slippage let a
+    nominal 20 USDT gate debit 22.011 USDT, because sizing used `last` while
+    PaperHands filled at `ask*(1+slippage)`. The gate's own declared notional
+    -- and PaperHands' real fill -- must both stay at or under the cap now."""
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    from bot.hands import PaperHands
+    from bot.store import Store
+
+    settings = _settings(max_order_usdt=20, max_portfolio_pct=1.0, paper_slippage_bps=5.0)
+    snap = _snap(last=100.0, ask=110.0, bid=99.5, free_usdt=450.0, atr=5.0)
+    gate = decide(TradeIntent("BUY", 1, "go", "trend"), snap, settings,
+                  session_ok=True, day_pnl_usdt=0.0)
+    assert gate.ok
+    assert gate.notional <= 20.0 + 1e-9
+    with TemporaryDirectory() as tmp:
+        store = Store(Path(tmp) / "x.db")
+        hands = PaperHands(settings, store)
+        pos = hands.execute(gate, snap)
+        actual_cost = pos.entry * pos.qty
+        assert actual_cost <= 20.0 + 1e-9, "PaperHands debited more than the declared cap"
+        # Stop is priced off the same executable entry the fill actually used,
+        # not the raw `last` the old code sized against.
+        assert pos.stop_price < pos.entry
+
+
+def test_buy_sizing_falls_back_to_last_when_ask_is_missing():
+    settings = _settings(max_order_usdt=20, max_portfolio_pct=1.0, paper_slippage_bps=0.0)
+    gate = decide(TradeIntent("BUY", 1, "go", "trend"),
+                  _snap(last=80_000.0, ask=0.0, atr=400.0, free_usdt=450.0), settings,
+                  session_ok=True, day_pnl_usdt=0.0)
+    assert gate.ok
+    assert gate.qty == "0.00025"
+    assert gate.notional == pytest.approx(20.0)

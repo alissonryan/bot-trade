@@ -16,6 +16,20 @@ from bot.types import GateResult, Snapshot, SymbolRules, TradeIntent
 ALLOWED_ACTIONS = {"BUY", "SELL", "HOLD"}
 
 
+def executable_entry_price(ask: float, last: float, slippage_bps: float = 0.0) -> float:
+    """The price a BUY should be sized, stopped and targeted against.
+
+    Mirrors the price PaperHands actually pays: the best ask, or ``last`` when
+    the ask is missing/non-finite/non-positive, marked up by slippage. This is
+    the single source of truth for both sides -- sizing off ``last`` while
+    filling off ``ask*(1+slippage)`` is exactly what let a nominal 20 USDT gate
+    debit 22.011 USDT when last=100/ask=110 at 5 bps slippage (the reproduced
+    Terra-review blocker). Callers that do not model slippage pass 0.
+    """
+    base = ask if math.isfinite(ask) and ask > 0 else last
+    return base * (1 + slippage_bps / 10_000.0)
+
+
 def _round_qty(qty: float, scale: int) -> str:
     # Never add a venue tick to a balance or capped order. Convert via str so
     # an exact decimal tick (e.g. 0.00023) is not lost to binary float noise.
@@ -58,6 +72,7 @@ def decide(
     rules: SymbolRules | None = None,
     last_loss_exit_ms: int | None = None,
     now_ms: int | None = None,
+    entry_slippage_bps: float | None = None,
 ) -> GateResult:
     qty_scale = rules.qty_scale if rules else settings.qty_scale
     price_scale = rules.price_scale if rules else 2
@@ -128,20 +143,29 @@ def decide(
     if snap.atr is None or snap.atr <= 0 or snap.last <= 0:
         return GateResult(False, "atr", "BUY")
 
+    slip_bps = entry_slippage_bps
+    if slip_bps is None:
+        # Live has no modeled slippage buffer of its own -- the confirmed fill
+        # recomputes stop/TP for real anyway (see LiveHands._buy). Paper's
+        # buffer must match PaperHands.execute() exactly, or sizing off one
+        # price while filling off another reopens the debit-over-cap bug.
+        slip_bps = settings.paper_slippage_bps if settings.mode == "paper" else 0.0
+    entry_price = executable_entry_price(snap.ask, snap.last, slip_bps)
+
     cap_pct = settings.max_portfolio_pct * snap.free_usdt
     notional = min(settings.max_order_usdt, cap_pct)
     if rules and rules.max_amount:
         notional = min(notional, rules.max_amount)
     if notional <= 0:
         return GateResult(False, "no_cash", "BUY")
-    qty = notional / snap.last
+    qty = notional / entry_price
     qty_s = _round_qty(qty, qty_scale)
     if float(qty_s) <= 0:
         return GateResult(False, "dust", "BUY")
-    notional = float(qty_s) * snap.last
+    notional = float(qty_s) * entry_price
     if rules and rules.min_amount and notional < rules.min_amount:
         return GateResult(False, "min_notional", "BUY")
-    stop = _stop_price(snap.last, snap.atr, settings, price_scale)
-    target = take_profit_for_entry(snap.last, snap.atr, settings, rules)
+    stop = _stop_price(entry_price, snap.atr, settings, price_scale)
+    target = take_profit_for_entry(entry_price, snap.atr, settings, rules)
     return GateResult(True, "ok_buy", "BUY", qty=qty_s, notional=notional, stop_price=stop,
                       take_profit_price=target)

@@ -110,14 +110,25 @@ def test_journal_budget_skip_is_audited_after_decision_and_execution(tmp_path):
 
 
 def test_journal_known_unexecuted_paper_buy_has_no_return(tmp_path):
+    """Wiring test: run_once must mark the journal entry not_executed whenever
+    the gate approves a BUY but hands.execute() still leaves the bot flat --
+    for any reason. The reason itself (insufficient cash, a race, ...) is
+    PaperHands'/LiveHands' own concern (see test_hands_paper.py); a declining
+    subclass keeps this test from depending on a specific pricing/slippage
+    scenario ever actually producing that decline."""
     settings = _settings(mode='paper', journal_enabled=True, paper_starting_usdt=20,
-                         max_portfolio_pct=1, paper_slippage_bps=500)
+                         max_portfolio_pct=1)
     store = Store(tmp_path / 'cash.db', mode='paper')
-    hands = PaperHands(settings, store)
+
+    class DecliningHands(PaperHands):
+        def execute(self, gate, snap):
+            return self.position
+
+    hands = DecliningHands(settings, store)
     _, _, gate = run_once(settings=settings, eye=FakeEye(), store=store, client=NoClient(), hands=hands,  # type: ignore[arg-type]
                          budget=Budget(0,2,''), last_llm_ms=0, last_px=0,
                          think=lambda *a, **kw: ThinkResult(TradeIntent('BUY',1,'go','range'),'ok'))
-    assert gate is not None and gate.ok  # executable cash check declines due to slippage
+    assert gate is not None and gate.ok
     assert hands.position.qty == 0
     row = store.journal_get(store.recent_audit(1)[0]['payload']['journal_id'])
     assert row['outcome']['kind'] == 'not_executed'
@@ -365,8 +376,8 @@ def test_llm_cycle_without_key_audits_the_reason(tmp_path):
 
 
 def test_buy_intent_executes_and_records_order_id(tmp_path):
-    s = _settings(paper_starting_usdt=450.0)
-    eye = FakeEye(last=80_000.0)
+    s = _settings(paper_starting_usdt=450.0, paper_slippage_bps=0.0)
+    eye = FakeEye(last=80_000.0)  # FakeEye.snapshot() sets ask = last + 1
     store = Store(tmp_path / "c.db")
     hands = PaperHands(s, store)
 
@@ -378,8 +389,11 @@ def test_buy_intent_executes_and_records_order_id(tmp_path):
         budget=Budget(0, 2, "2026-09-04"), last_llm_ms=0, last_px=0.0, think=think,
     )
     assert gate is not None and gate.ok and gate.rule == "ok_buy"
-    assert hands.position.qty == 0.00025
-    assert eye.bot_qty == 0.00025
+    # Sized off the executable ask (80001), not the raw last (80000): 20/80001
+    # truncates to 0.00024, and PaperHands fills at that exact same ask.
+    assert hands.position.qty == 0.00024
+    assert eye.bot_qty == 0.00024
+    assert hands.position.entry == 80_001.0
     row = store.recent_audit(1)[0]
     assert row["payload"]["order_id"] == "paper-entry"
     assert row["payload"]["llm"]["cost_usd"] == 0.001
