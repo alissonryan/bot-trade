@@ -17,7 +17,7 @@ Para agentes (Claude Code, Cursor, Codex, Grok): leia [AGENTS.md](AGENTS.md) e [
 | Coleira | 20 USDT por ordem, ~5 % do caixa, 1 posição, stop ATR na exchange (live), halt diário com PnL realizado **+ não realizado**, mínimo e escalas lidos da exchange. |
 | Segurança live | Posição gravada **antes** do stop; fill confirmado por **saldo**; a linha só é apagada com **prova** de que a ordem não encheu (senão fica `PENDING` para o `reconcile`); a venda que falha re-lê o saldo antes de repor o stop; reconciliação com a exchange no boot e a cada ciclo, inclusive quando o bot se acha zerado; posição sem stop irrecuperável vira `UNPROTECTED` e para com exit 2; posição que o bot não consegue sair (stop não é do bot) vira exit 5; saída discricionária ao vivo (LLM SELL, take-profit, limite de tempo) sem evidência terminal capturada é recusada antes de qualquer escrita e para com exit 6, sem tentar de novo. |
 | BTC que não é do bot | O `reconcile` guarda em `foreign_btc` (kv) quanto BTC da conta não é dele. Se um stop **seu** dispara, o bot reconhece que o que saiu não é do tamanho dele e mantém a própria posição em vez de lançar uma saída fantasma. (Em 2026-09-07 a conta estava sem BTC e sem ordens abertas — a proteção continua valendo para quando voltar a ter.) |
-| Observabilidade | Cada decisão grava no audit o snapshot (preço, bid, ask, ATR), o motivo do LLM (`ok`, `llm_budget`, `llm_timeout`, …), o custo real da chamada, os ids de ordem e o estado da posição. Log em `data/bot.log`. |
+| Observabilidade | Cada decisão grava no audit o snapshot (preço, bid, ask, ATR), o motivo do LLM (`ok`, `llm_budget`, `llm_timeout`, …), o custo real da chamada, o **request completo enviado ao provedor** (model, opções, todas as candles — sem header/token), os ids de ordem e o estado da posição. Log em `data/bot.log`, escrito só depois que o lock de instância é adquirido. |
 | Conta humana | O bot **não cancela** ids que não gravou. (O stop manual de 0.00064 @ 75722 citado antes aqui não existe mais: foi encerrado sem disparar; a regra vale para qualquer ordem sua.) |
 | Git | `./scripts/test`. |
 
@@ -74,7 +74,7 @@ Nunca commite `.env`.
 | `MAX_DAY_LOSS_USDT` | `20` | Para **compras** novas no dia (realizado + não realizado) |
 | `MIN_CONFIDENCE` | `0` | Bloqueia BUY abaixo disso; nunca bloqueia SELL |
 | `PAPER_STARTING_USDT` | `450` | Caixa virtual inicial do paper |
-| `LLM_DAILY_BUDGET_USD` | `2` | Para novas chamadas OpenRouter (UTC); cobrado pelo custo real da resposta |
+| `LLM_DAILY_BUDGET_USD` | `2` | Teto diário **por modo/banco** (paper e live têm bancos separados, não é identidade de conta nem teto do provedor). Persistido em `Store` (kv), retomado em restart no mesmo dia UTC; timeout/erro de rede reserva o custo de fallback em vez de custar zero. Não garante o valor real cobrado pelo provedor. |
 | `LLM_FALLBACK_COST_USD` | `0.02` | Custo por chamada quando a resposta não traz `usage.cost` |
 | `LLM_MAX_TOKENS` | `200` | Teto de tokens por resposta |
 | `LLM_JSON_MODE` | `0` | `1` pede `response_format: json_object` (nem todo modelo aceita) |
@@ -106,7 +106,7 @@ sqlite3 data/bot.db "select ts, side, qty, price, pnl, source from fills order b
 sqlite3 data/bot.db "select * from position;"
 ```
 
-Só um loop por `data/`: o segundo processo sai com código 3 (`data/bot.lock`).
+Só um loop por `data/`: o segundo processo sai com código 3 (`data/bot.lock`). O caminho de `data/` é fixo à instalação (não muda com o diretório de onde o comando é chamado), então rodar o mesmo módulo de outro cwd nunca escolhe silenciosamente um banco/lock diferente.
 
 ### Medir o modelo
 
@@ -153,7 +153,7 @@ Nenhuma ordem live nos testes. O cliente KCEX e o socket são simulados.
 
 | Path | Função |
 | --- | --- |
-| `bot/eye.py` | Preço (socket primeiro via `Hub`, REST fallback), klines, saldo, regras do símbolo |
+| `bot/eye.py` | Preço (socket primeiro via `Hub`, REST fallback), klines, saldo (**só live**; paper nunca lê saldo real), regras do símbolo |
 | `bot/hub.py` | Guarda em processo do último tick do WS, compartilhada pelo `Eye` e pelo gráfico |
 | `bot/brain.py` | OpenRouter; motivo e custo de cada chamada |
 | `bot/collar.py` | Coleira: regras puras |
@@ -172,6 +172,8 @@ Nenhuma ordem live nos testes. O cliente KCEX e o socket são simulados.
 ## Histórico
 
 **2026-09-04, revisão de segurança do live e observabilidade.** Posição persistida antes do stop; fill confirmado por saldo; stop restaurado se a venda falhar; reconciliação com a exchange; estado `UNPROTECTED` com parada; orçamento do LLM pelo custo real (o contador fixo esgotava às ~08:20 UTC); motivos distintos para falha do LLM; loop resiliente a erro de rede; WebSocket real no lugar do poll de 1 s; barra em formação fora do ATR; regras do símbolo; PnL não realizado no halt; caixa do paper como ledger; audit com snapshot; User-Agent explícito; `.env` com `chmod 600`; lock de instância; log em arquivo.
+
+**2026-09-09, correção de pré-requisitos de harness.** Coleira/`PaperHands`/replay agora dimensionam, param e alvejam TP a partir do mesmo preço executável (ask+slippage) que o fill realmente usa, em vez de `last` cru (evitava debitar acima do teto declarado). Paper nunca mais autentica nem lê saldo real (cliente sem token, `poll_heavy` pula `balances()`); comandos públicos do `kcex.cli` não carregam `.env`. Orçamento diário do LLM passou a ser durável por modo/banco (reserva confirmada em `Store` antes de cada chamada paga, não só depois do ciclo), com timeout/erro de rede reservando o custo de fallback em vez de custar zero, e um estado de orçamento corrompido/ilegível bloqueia gasto novo em vez de reiniciar em zero. Audit passou a guardar o request completo enviado ao LLM, não só a contagem de candles. `data/bot.db`/`bot.lock`/`bot.log` ficaram fixos à instalação (não ao diretório de onde o comando é chamado), e o lock de instância passou a ser adquirido antes de qualquer inicialização com efeito colateral (banco, socket, arquivo de log).
 
 ## Próxima sessão
 
