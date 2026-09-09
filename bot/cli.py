@@ -225,11 +225,6 @@ def main(argv: list[str] | None = None) -> int:
         log.error("MODE must be paper or live, got %r", settings.mode)
         return EXIT_CYCLE_FAILED
 
-    token = ""
-    if settings.mode == "live":
-        token = require_live_token()
-        warn_token_age(os.getenv("KCEX_TOKEN_AT"))
-
     try:
         with InstanceLock(LOCK_PATH):
             # File logging only starts once the lock is held: a process that
@@ -237,6 +232,16 @@ def main(argv: list[str] | None = None) -> int:
             # above) must never create/touch bot.log at all. Console logging
             # from setup_logging() above already covers pre-lock failures.
             add_file_logging(LOG_PATH)
+            # The live token preflight (require_live_token()) validates the
+            # session REMOTELY and, on a missing/expired token, can open a
+            # real browser (login_interactive(), Playwright) and write .env
+            # -- side effects at least as significant as the initializers
+            # below. It must also wait for the lock: a second instance that
+            # loses AlreadyRunning must never trigger a browser login at all.
+            token = ""
+            if settings.mode == "live":
+                token = require_live_token()
+                warn_token_age(os.getenv("KCEX_TOKEN_AT"))
             # Every initializer below has a side effect -- opening/migrating
             # the database, starting the KCEX WS thread, a REST call for
             # symbol rules, binding the chart's HTTP/WS server, LiveHands'

@@ -164,6 +164,33 @@ def test_lock_is_acquired_before_any_initializer_with_side_effects(tmp_path, mon
     assert called["eye"] is True
 
 
+def test_live_token_preflight_is_acquired_after_the_lock_too(tmp_path, monkeypatch):
+    """require_live_token() validates the session REMOTELY and, on a missing/
+    expired token, can open a real browser (login_interactive()) and write
+    .env -- a side effect at least as significant as Store/Eye/KcexClient.
+    With another instance already holding the lock, MODE=live must fail
+    closed via AlreadyRunning before require_live_token() is ever called;
+    no network/browser call may happen on the losing side of the race."""
+    import bot.cli as cli
+
+    monkeypatch.setenv("MODE", "live")
+    monkeypatch.setattr(cli, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(cli, "DB_PATH", tmp_path / "bot.db")
+    monkeypatch.setattr(cli, "LOCK_PATH", tmp_path / "bot.lock")
+    monkeypatch.setattr(cli, "LOG_PATH", tmp_path / "bot.log")
+
+    def boom(*a, **kw):
+        raise AssertionError("require_live_token() ran despite the lock already being held")
+
+    monkeypatch.setattr(cli, "require_live_token", boom)
+    monkeypatch.setattr(cli, "Store", boom)
+    monkeypatch.setattr(cli, "Eye", boom)
+    monkeypatch.setattr(cli, "KcexClient", boom)
+
+    with InstanceLock(cli.LOCK_PATH):
+        assert cli.main(["run", "--once"]) == cli.EXIT_ALREADY_RUNNING
+
+
 
 def test_paths_are_stable_across_cwd_not_relative_to_it(monkeypatch, tmp_path):
     """Finding 3: DATA_DIR/DB_PATH/LOCK_PATH used to be `Path("data")`,

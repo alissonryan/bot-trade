@@ -150,6 +150,13 @@ def decide(
         # buffer must match PaperHands.execute() exactly, or sizing off one
         # price while filling off another reopens the debit-over-cap bug.
         slip_bps = settings.paper_slippage_bps if settings.mode == "paper" else 0.0
+    # Negative slippage is not a real market condition for a market BUY (it
+    # would mean paying LESS than ask on a worse fill) -- a computed
+    # entry_price can still land positive (e.g. -1 bps -> factor 0.9999) and
+    # slip past the finite/positive check below, so the CONFIGURED value is
+    # rejected here, before it ever reaches the price computation.
+    if not math.isfinite(slip_bps) or slip_bps < 0:
+        return GateResult(False, "no_price", "BUY")
     entry_price = executable_entry_price(snap.ask, snap.last, slip_bps)
     # A pathological slippage config (NaN, or <= -10000 bps inverting/
     # zeroing the price) must never reach qty/Decimal math: `notional /

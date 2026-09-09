@@ -534,6 +534,20 @@ def test_buy_rejects_a_non_finite_entry_price_before_qty_math():
         assert gate.qty is None
 
 
+def test_buy_rejects_small_negative_slippage_that_still_computes_positive():
+    """A small negative slippage (e.g. -1 bps) still yields a positive
+    entry_price (factor 0.9999) and would slip past the finite/positive
+    check above -- the CONFIGURED value itself must be rejected, not just
+    the resulting price. Negative slippage means paying LESS than ask,
+    which never happens on a real market BUY."""
+    settings = _settings(max_order_usdt=20, max_portfolio_pct=1.0)
+    snap = _snap(last=100.0, ask=110.0, atr=5.0, free_usdt=450.0)
+    gate = decide(TradeIntent("BUY", 1, "go", "trend"), snap, settings,
+                  session_ok=True, day_pnl_usdt=0.0, entry_slippage_bps=-1.0)
+    assert gate.ok is False
+    assert gate.rule == "no_price"
+    assert gate.qty is None
+
 def test_buy_sizing_falls_back_to_last_when_ask_is_missing():
     settings = _settings(max_order_usdt=20, max_portfolio_pct=1.0, paper_slippage_bps=0.0)
     gate = decide(TradeIntent("BUY", 1, "go", "trend"),
