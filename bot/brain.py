@@ -79,15 +79,24 @@ class ThinkResult:
     http_status: int | None = None
     model: str = ""
     raw: str | None = None
+    # The exact sanitized request body actually sent (model/options/messages,
+    # including the full candle/position/lessons payload the LLM saw) -- set
+    # only once a request was truly dispatched (never on a budget/config
+    # short-circuit that sent nothing). No headers/API key/.env ever reach
+    # this: request_body() never puts the key in the body, only in headers.
+    request: dict[str, Any] | None = None
 
     def as_audit(self) -> dict[str, Any]:
-        return {
+        audit: dict[str, Any] = {
             "reason": self.reason,
             "cost_usd": round(self.cost_usd, 6),
             "cost_source": self.cost_source,
             "http_status": self.http_status,
             "model": self.model,
         }
+        if self.request is not None:
+            audit["request"] = self.request
+        return audit
 
 
 def _first_json_object(raw: str) -> str | None:
@@ -246,9 +255,9 @@ def think_result(
         "Authorization": f"Bearer {settings.openrouter_api_key}",
         "Content-Type": "application/json",
     }
+    body = request_body(snap, settings, lessons=lessons, as_of_ms=as_of_ms)
     try:
-        resp = post(url, headers=headers,
-                    json=request_body(snap, settings, lessons=lessons, as_of_ms=as_of_ms), timeout=45)
+        resp = post(url, headers=headers, json=body, timeout=45)
     except requests.Timeout as exc:
         log.warning("llm timeout: %s", exc)
         # The request may have already reached and been billed by the
@@ -258,12 +267,12 @@ def think_result(
         # received response already gets.
         cost = settings.llm_fallback_cost_usd
         budget.spend(cost)
-        return ThinkResult(None, REASON_TIMEOUT, cost, "fallback_uncertain", model=model)
+        return ThinkResult(None, REASON_TIMEOUT, cost, "fallback_uncertain", model=model, request=body)
     except Exception as exc:  # noqa: BLE001 - network layer; named in the audit
         log.warning("llm network error: %s: %s", type(exc).__name__, exc)
         cost = settings.llm_fallback_cost_usd
         budget.spend(cost)
-        return ThinkResult(None, REASON_NETWORK, cost, "fallback_uncertain", model=model)
+        return ThinkResult(None, REASON_NETWORK, cost, "fallback_uncertain", model=model, request=body)
 
     status = getattr(resp, "status_code", None)
     try:
@@ -272,13 +281,13 @@ def think_result(
         status = None
     if status is not None and status >= 400:
         log.warning("llm http %s", status)
-        return ThinkResult(None, f"llm_http_{status}", http_status=status, model=model)
+        return ThinkResult(None, f"llm_http_{status}", http_status=status, model=model, request=body)
     try:
         payload = resp.json()
         text = payload["choices"][0]["message"]["content"]
     except Exception as exc:  # noqa: BLE001
         log.warning("llm bad response: %s: %s", type(exc).__name__, exc)
-        return ThinkResult(None, REASON_BAD_RESPONSE, http_status=status, model=model)
+        return ThinkResult(None, REASON_BAD_RESPONSE, http_status=status, model=model, request=body)
 
     cost, source = _cost_from(payload, settings)
     budget.spend(cost)
@@ -297,14 +306,14 @@ def think_result(
                 "or pick a non-reasoning model (every cycle is a forced HOLD and still costs)",
                 settings.llm_max_tokens,
             )
-            return ThinkResult(None, REASON_TRUNCATED, cost, source, status, model)
+            return ThinkResult(None, REASON_TRUNCATED, cost, source, status, model, request=body)
         log.warning("llm returned an empty completion")
-        return ThinkResult(None, REASON_EMPTY, cost, source, status, model)
+        return ThinkResult(None, REASON_EMPTY, cost, source, status, model, request=body)
     intent = parse_intent(text)
     if intent is None:
         log.warning("llm parse failed: %r", text[:200])
-        return ThinkResult(None, REASON_PARSE, cost, source, status, model, raw=text[:500])
-    return ThinkResult(intent, REASON_OK, cost, source, status, model, raw=text[:500])
+        return ThinkResult(None, REASON_PARSE, cost, source, status, model, raw=text[:500], request=body)
+    return ThinkResult(intent, REASON_OK, cost, source, status, model, raw=text[:500], request=body)
 
 
 @dataclass
@@ -315,10 +324,14 @@ class ReflectionResult:
     cost_source: str = "none"
     http_status: int | None = None
     model: str = ""
+    request: dict[str, Any] | None = None
 
     def as_audit(self) -> dict[str, Any]:
-        return {"reason": self.reason, "cost_usd": self.cost_usd,
+        audit: dict[str, Any] = {"reason": self.reason, "cost_usd": self.cost_usd,
                 "cost_source": self.cost_source, "http_status": self.http_status, "model": self.model}
+        if self.request is not None:
+            audit["request"] = self.request
+        return audit
 
 
 def reflect_result(lesson: dict, settings: Settings, budget: Budget, *,
@@ -350,13 +363,13 @@ def reflect_result(lesson: dict, settings: Settings, budget: Budget, *,
         # not zero-cost by default. The pre-check above already reserved
         # headroom for exactly this amount.
         budget.spend(reserve)
-        return ReflectionResult(None, "reflection_timeout", reserve, "fallback_uncertain", model=model)
+        return ReflectionResult(None, "reflection_timeout", reserve, "fallback_uncertain", model=model, request=body)
     except Exception:
         budget.spend(reserve)
-        return ReflectionResult(None, "reflection_network", reserve, "fallback_uncertain", model=model)
+        return ReflectionResult(None, "reflection_network", reserve, "fallback_uncertain", model=model, request=body)
     status = getattr(resp, "status_code", None)
     if isinstance(status, int) and status >= 400:
-        return ReflectionResult(None, f"reflection_http_{status}", http_status=status, model=model)
+        return ReflectionResult(None, f"reflection_http_{status}", http_status=status, model=model, request=body)
     try:
         payload = resp.json()
     except Exception:
@@ -366,7 +379,7 @@ def reflect_result(lesson: dict, settings: Settings, budget: Budget, *,
         cost, source = reserve, "fallback"
     budget.spend(cost)  # charge malformed/empty/truncated successful responses too
     def result(text, reason):
-        return ReflectionResult(text, reason, cost, source, status, model)
+        return ReflectionResult(text, reason, cost, source, status, model, request=body)
     try:
         if not isinstance(payload, dict):
             return result(None, "reflection_bad_response")

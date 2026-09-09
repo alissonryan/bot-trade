@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import sys
 
 import pytest
@@ -206,6 +207,57 @@ def test_request_body_has_token_cap_usage_and_optional_json_mode():
     assert "response_format" not in body
     body = request_body(_snap(), _settings(llm_json_mode=True))
     assert body["response_format"] == {"type": "json_object"}
+
+
+def test_think_result_audit_carries_the_full_request_actually_sent():
+    """Finding 4: Snapshot.compact() only ever stored a candle COUNT, so a
+    later reviewer could not reconstruct what the LLM actually saw. The audit
+    payload must now carry the exact sanitized request (model/options/full
+    messages, including all 20 candles) from the boundary that dispatches
+    it -- not a reconstruction, the literal body that was sent."""
+    budget = Budget(spent_usd=0.0, cap_usd=2.0, day="2026-09-04")
+    snap = _snap()
+    res = think_result(snap, _settings(), budget, http_post=lambda *a, **k: FakeResp(_ok_payload()))
+    audit = res.as_audit()
+    assert audit["request"]["model"] == _settings().llm_model
+    assert audit["request"]["messages"][0]["role"] == "system"
+    user_payload = json.loads(audit["request"]["messages"][1]["content"])
+    assert user_payload["last"] == snap.last
+    assert user_payload["atr"] == snap.atr
+    # No secret ever rides in the body -- the API key only ever goes in headers.
+    assert "openrouter_api_key" not in json.dumps(audit)
+    assert "Bearer" not in json.dumps(audit)
+
+
+def test_no_request_captured_when_nothing_was_actually_sent():
+    """A budget/config short-circuit sends no HTTP request at all -- the audit
+    must not fabricate a request payload for a call that never happened."""
+    res = think_result(_snap(), _settings(openrouter_api_key=""), Budget(0, 2, "d"))
+    assert res.reason == "llm_config"
+    assert "request" not in res.as_audit()
+
+    over_budget = think_result(_snap(), _settings(), Budget(2.0, 2.0, "d"))
+    assert over_budget.reason == "llm_budget"
+    assert "request" not in over_budget.as_audit()
+
+
+def test_timeout_and_http_error_still_capture_the_dispatched_request():
+    """A request that was sent but failed (timeout, 4xx, bad response) is
+    exactly the case an operator most needs to reconstruct -- it must not be
+    the one case silently missing its provenance."""
+    s = _settings()
+
+    def timeout(*a, **k):
+        raise requests.Timeout("slow")
+
+    res = think_result(_snap(), s, Budget(0, 2, "d"), http_post=timeout)
+    assert res.reason == "llm_timeout"
+    assert res.as_audit()["request"]["model"] == s.llm_model
+
+    res = think_result(_snap(), s, Budget(0, 2, "d"),
+                       http_post=lambda *a, **k: FakeResp({"error": "x"}, status=429))
+    assert res.reason == "llm_http_429"
+    assert "messages" in res.as_audit()["request"]
 
 
 def test_budget_rolls_over_at_new_day():

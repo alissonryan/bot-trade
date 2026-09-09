@@ -399,6 +399,43 @@ def test_buy_intent_executes_and_records_order_id(tmp_path):
     assert row["payload"]["llm"]["cost_usd"] == 0.001
 
 
+
+def test_audit_row_carries_the_full_request_used_by_the_decision(tmp_path):
+    """Finding 4 end-to-end: the audit row persisted by run_once() must carry
+    the exact sanitized request body think_result() dispatched -- not just
+    Snapshot.compact()'s candle count -- so a decision is reconstructible
+    later. Goes through the real bot.brain.think_result(), not a stub."""
+    import json
+    from unittest.mock import Mock
+    from bot.brain import think_result
+
+    s = _settings(openrouter_api_key="sk-testsecret123", llm_model="test-model-x")
+    eye = FakeEye(last=80_000.0)
+    store = Store(tmp_path / "c.db")
+    hands = PaperHands(s, store)
+    post = Mock(return_value=Mock(status_code=200, json=lambda: {
+        "choices": [{"message": {"content": '{"action":"HOLD","confidence":1,"reason":"wait","regime":"range"}'}}],
+        "usage": {"cost": 0.0005},
+    }))
+
+    def think(snap, settings, budget):
+        return think_result(snap, settings, budget, http_post=post)
+
+    run_once(
+        settings=s, eye=eye, store=store, client=NoClient(), hands=hands,
+        budget=Budget(0, 2, "2026-09-04"), last_llm_ms=0, last_px=0.0, think=think,
+    )
+    row = store.recent_audit(1)[0]
+    request = row["payload"]["llm"]["request"]
+    assert request["model"] == "test-model-x"
+    assert request["messages"][0]["role"] == "system"
+    user_payload = json.loads(request["messages"][1]["content"])
+    assert user_payload["last"] == 80_000.0
+    assert len(user_payload["bars_15m"]) == 20  # not just a count, the actual candles
+    # The API key must never ride in the persisted audit payload.
+    assert "sk-testsecret123" not in json.dumps(row["payload"])
+
+
 def test_exec_error_is_audited_then_raised(tmp_path):
     s = _settings()
     eye = FakeEye(last=80_000.0)
