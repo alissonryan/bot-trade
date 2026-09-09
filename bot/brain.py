@@ -49,6 +49,18 @@ REASON_PARSE = "llm_parse"
 REASON_REFLECTION_BUDGET = "reflection_budget"
 REASON_BUDGET_STATE = "llm_budget_state_unreadable"
 REASON_REFLECTION_OFFLINE = "reflection_offline"
+# The configured LLM_FALLBACK_COST_USD is not a usable reservation (missing,
+# zero, negative or non-finite) -- coercing it to 0.0 and proceeding would
+# admit every call with no real reservation at all. Refuse instead of
+# silently disabling the budget gate.
+REASON_INVALID_RESERVE = "llm_invalid_reserve"
+REASON_REFLECTION_INVALID_RESERVE = "reflection_invalid_reserve"
+# A durable settlement (Store.settle_budget) failed after the real cost was
+# already known -- the persisted ledger may now understate true spend.
+# Blocks every further think_result()/reflect_result() call in THIS process
+# (no timeout clears it) so the understated ledger cannot be used to admit
+# more spend than the cap allows; it does not touch risk barriers or Hands.
+REASON_SETTLEMENT_FAILED = "llm_budget_settlement_failed"
 
 
 @dataclass
@@ -57,6 +69,12 @@ class Budget:
     cap_usd: float
     day: str
     calls: int = 0
+    # Set once a durable settlement (Store.settle_budget) has failed after
+    # the real cost was already known -- the persisted ledger may now
+    # understate true spend. Every subsequent think_result()/reflect_result()
+    # call on this SAME Budget object refuses immediately with this reason,
+    # no HTTP dispatch, until a process restart replaces the Budget.
+    blocked_reason: str | None = None
 
     def remaining(self) -> float:
         return self.cap_usd - self.spent_usd
@@ -250,6 +268,29 @@ def _cost_from(payload: Any, settings: Settings) -> tuple[float, str]:
     return settings.llm_fallback_cost_usd, "fallback"
 
 
+def _cost_from_http_error(resp: Any) -> float | None:
+    """A >=400 response body IS sometimes still valid JSON with a real
+    ``usage.cost`` -- "not typically billed" is an assumption about the
+    common case, not proof for THIS response. Returns the real cost when
+    the body actually supplies one, else None so the caller decides the
+    conservative fallback (settle 0 only for a well-understood 4xx; keep
+    the reservation for a 5xx or any other unreadable case)."""
+    try:
+        payload = resp.json()
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(payload, dict):
+        return None
+    usage = payload.get("usage")
+    if not isinstance(usage, dict) or usage.get("cost") is None:
+        return None
+    try:
+        cost = float(usage["cost"])
+    except (TypeError, ValueError):
+        return None
+    return cost if math.isfinite(cost) and cost >= 0 else None
+
+
 def think_result(
     snap: Snapshot,
     settings: Settings,
@@ -267,13 +308,16 @@ def think_result(
     in-memory against `budget`.
     """
     model = settings.llm_model
+    if budget.blocked_reason:
+        return ThinkResult(None, budget.blocked_reason, model=model)
     if budget.remaining() <= 0:
         return ThinkResult(None, REASON_BUDGET, model=model)
     if not settings.openrouter_api_key or not model:
         return ThinkResult(None, REASON_CONFIG, model=model)
 
     reserve = settings.llm_fallback_cost_usd
-    reserve = reserve if math.isfinite(reserve) and reserve > 0 else 0.0
+    if not math.isfinite(reserve) or reserve <= 0:
+        return ThinkResult(None, REASON_INVALID_RESERVE, model=model)
     reserved_durably = False
     if store is not None:
         try:
@@ -284,8 +328,11 @@ def think_result(
         if not admitted:
             return ThinkResult(None, REASON_BUDGET, model=model)
         reserved_durably = True
+    elif reserve > budget.remaining() + 1e-9:
+        # In-memory path (no store): the early remaining()<=0 check above
+        # only proves SOME room, not room for THIS reserve.
+        return ThinkResult(None, REASON_BUDGET, model=model)
     budget.spend(reserve)  # in-memory mirror of the reservation, store or not
-
 
     def settle(actual_cost: float) -> None:
         delta = actual_cost - reserve
@@ -293,8 +340,11 @@ def think_result(
         if reserved_durably:
             try:
                 store.settle_budget(day=budget.day, delta_usd=delta)
-            except Exception as exc:  # noqa: BLE001 - bookkeeping must never mask a known result
-                log.error("budget settlement failed: %s", exc)
+            except Exception as exc:  # noqa: BLE001 - the persisted ledger may now
+                # understate real spend; block further spend THIS process
+                # rather than silently keep authorizing against it.
+                log.error("budget settlement failed; blocking further LLM spend this process: %s", exc)
+                budget.blocked_reason = REASON_SETTLEMENT_FAILED
 
     post = http_post or requests.post
     url = f"{settings.openrouter_base_url}/chat/completions"
@@ -321,8 +371,19 @@ def think_result(
         status = None
     if status is not None and status >= 400:
         log.warning("llm http %s", status)
-        settle(0.0)  # a rejected request is not typically billed
-        return ThinkResult(None, f"llm_http_{status}", 0.0, "none", status, model, request=body)
+        real_cost = _cost_from_http_error(resp)
+        if real_cost is not None:
+            settle(real_cost)
+            return ThinkResult(None, f"llm_http_{status}", real_cost, "usage", status, model, request=body)
+        if status < 500:
+            # A well-understood client error (bad key, malformed request) is
+            # not typically billed -- an assumption, not proof, but the
+            # narrowest case where settling to zero is defensible.
+            settle(0.0)
+            return ThinkResult(None, f"llm_http_{status}", 0.0, "none", status, model, request=body)
+        # 5xx or any other case with no real usage figure: do not fabricate
+        # a $0 outcome -- keep the reservation as the charge.
+        return ThinkResult(None, f"llm_http_{status}", reserve, "fallback_uncertain", status, model, request=body)
     try:
         payload = resp.json()
     except Exception as exc:  # noqa: BLE001
@@ -393,26 +454,33 @@ def reflect_result(lesson: dict, settings: Settings, budget: Budget, *,
     Provider charges arrive afterwards: the reserve is an estimate, not a hard
     monetary guarantee. Call only AFTER this cycle's decision and execution.
     `store`, when given, makes the reservation durable the same way
-    think_result() does -- see there for the crash-safety rationale.
+    think_result() does -- see there for the crash-safety rationale. The
+    extra "room for the next decision too" headroom is checked ATOMICALLY
+    against the durable store (via required_headroom), not just this
+    process's possibly-stale in-memory `budget.remaining()`.
     """
     model = settings.llm_model
+    if budget.blocked_reason:
+        return ReflectionResult(None, budget.blocked_reason, model=model)
     reserve = settings.llm_fallback_cost_usd
-    reserve = reserve if math.isfinite(reserve) and reserve > 0 else 0.0
-    if reserve <= 0 or budget.remaining() < 2 * reserve:
-        return ReflectionResult(None, REASON_REFLECTION_BUDGET, model=model)
+    if not math.isfinite(reserve) or reserve <= 0:
+        return ReflectionResult(None, REASON_REFLECTION_INVALID_RESERVE, model=model)
     if not settings.openrouter_api_key or not model:
         return ReflectionResult(None, "reflection_config", model=model)
 
     reserved_durably = False
     if store is not None:
         try:
-            admitted = store.reserve_budget(today=budget.day, cap_usd=budget.cap_usd, reserve_usd=reserve)
+            admitted = store.reserve_budget(today=budget.day, cap_usd=budget.cap_usd,
+                                            reserve_usd=reserve, required_headroom=reserve)
         except Exception as exc:  # noqa: BLE001
             log.error("budget state untrustworthy or unreachable, refusing new spend: %s", exc)
             return ReflectionResult(None, "reflection_budget_state", model=model)
         if not admitted:
             return ReflectionResult(None, REASON_REFLECTION_BUDGET, model=model)
         reserved_durably = True
+    elif budget.remaining() < 2 * reserve - 1e-9:
+        return ReflectionResult(None, REASON_REFLECTION_BUDGET, model=model)
     budget.spend(reserve)
 
     def settle(actual_cost: float) -> None:
@@ -422,7 +490,8 @@ def reflect_result(lesson: dict, settings: Settings, budget: Budget, *,
             try:
                 store.settle_budget(day=budget.day, delta_usd=delta)
             except Exception as exc:  # noqa: BLE001
-                log.error("budget settlement failed: %s", exc)
+                log.error("budget settlement failed; blocking further LLM spend this process: %s", exc)
+                budget.blocked_reason = REASON_SETTLEMENT_FAILED
 
     body = {"model": model, "temperature": 0, "max_tokens": 160, "usage": {"include": True},
             "messages": [
@@ -443,8 +512,14 @@ def reflect_result(lesson: dict, settings: Settings, budget: Budget, *,
         return ReflectionResult(None, "reflection_network", reserve, "fallback_uncertain", model=model, request=body)
     status = getattr(resp, "status_code", None)
     if isinstance(status, int) and status >= 400:
-        settle(0.0)
-        return ReflectionResult(None, f"reflection_http_{status}", 0.0, "none", status, model, request=body)
+        real_cost = _cost_from_http_error(resp)
+        if real_cost is not None:
+            settle(real_cost)
+            return ReflectionResult(None, f"reflection_http_{status}", real_cost, "usage", status, model, request=body)
+        if status < 500:
+            settle(0.0)
+            return ReflectionResult(None, f"reflection_http_{status}", 0.0, "none", status, model, request=body)
+        return ReflectionResult(None, f"reflection_http_{status}", reserve, "fallback_uncertain", status, model, request=body)
     try:
         payload = resp.json()
     except Exception:
