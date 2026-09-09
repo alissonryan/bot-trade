@@ -508,3 +508,88 @@ cli._loop(True, settings, None, store, FakeEye(), hands)
     persisted = reopened.budget_load()
     assert persisted is not None, "the crash lost the reservation -- not durable at the dispatch boundary"
     assert persisted["spent_usd"] == pytest.approx(0.02)
+
+
+def test_cli_main_never_loads_an_implicit_dotenv_file_even_when_one_is_discoverable(tmp_path, monkeypatch):
+    """Regression for the post-merge test-isolation bug: `cli.main()` used
+    to call the real, unmocked `load_dotenv()`. python-dotenv's default
+    search is stack-based, not cwd-based -- `find_dotenv()` walks up from
+    bot/cli.py's OWN file location, so a `monkeypatch.chdir()` trick cannot
+    exercise (or fake) that path directly. Instead, simulate the exact
+    failure mode -- "the stack-based search successfully finds a real .env"
+    -- by making `find_dotenv()` itself report a sentinel file, and drive
+    the real `cli.main()` on top of the project's normal test isolation (no
+    per-test dotenv mocking here, matching the four tests that regressed:
+    `test_paper_mode_never_authenticates_even_with_a_leaked_token`,
+    `test_lock_is_acquired_before_any_initializer_with_side_effects`,
+    `test_live_token_preflight_is_acquired_after_the_lock_too`,
+    `test_file_logging_starts_only_after_the_lock_is_held`). If the
+    project's dotenv-blocking fixture is ever removed or broken, this test
+    fails: `cli.main()` would call the real `load_dotenv()`, which finds the
+    faked path and loads it for real. Proves two things: the sentinel
+    values never land in `os.environ` (not just that nothing happened to
+    read a real file this time), and `Settings.from_env()` right afterward
+    still reports the documented defaults -- the environment a later test
+    (e.g. a backtest replay) would observe is clean."""
+    import os
+    import dotenv
+    import bot.cli as cli
+    from bot.settings import Settings
+
+    sentinel = tmp_path / "sentinel.env"
+    sentinel.write_text(
+        "JOURNAL_ENABLED=1\nTP_ATR_MULT=3\nTIME_LIMIT_MINUTES=60\nCOOLDOWN_MINUTES=30\n"
+    )
+    monkeypatch.setattr(dotenv.main, "find_dotenv", lambda *a, **kw: str(sentinel))
+
+    monkeypatch.setenv("MODE", "paper")
+    monkeypatch.setenv("WS_ENABLED", "false")
+    monkeypatch.setattr(cli, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(cli, "DB_PATH", tmp_path / "bot.db")
+    monkeypatch.setattr(cli, "LOCK_PATH", tmp_path / "bot.lock")
+    monkeypatch.setattr(cli, "LOG_PATH", tmp_path / "bot.log")
+
+    class FakeEye:
+        rules = None
+
+        def __init__(self, client, settings):
+            pass
+
+        def start_ws_thread(self):
+            pass
+
+        def load_rules(self):
+            return None
+
+    monkeypatch.setattr(cli, "Eye", FakeEye)
+    monkeypatch.setattr(cli, "_loop", lambda *a, **kw: 0)
+
+    assert cli.main(["run", "--once"]) == 0
+
+    for key in ("JOURNAL_ENABLED", "TP_ATR_MULT", "TIME_LIMIT_MINUTES", "COOLDOWN_MINUTES"):
+        assert key not in os.environ, f"{key} leaked from a dotenv file -- load_dotenv() was not neutralized"
+
+    settings = Settings.from_env()
+    assert settings.journal_enabled is False
+    assert settings.tp_atr_mult == 0.0
+    assert settings.time_limit_minutes == 0.0
+    assert settings.cooldown_minutes == 0.0
+
+
+def test_synthetic_dotenv_fixture_loads_only_its_own_file(synthetic_dotenv, monkeypatch):
+    """The opt-in escape hatch: a test that genuinely wants dotenv-loading
+    behavior under test gets a real load through a file it fully controls
+    (`synthetic_dotenv`), not a permanent no-op -- proving the isolation
+    fixture blocks the *implicit, ambient* search, not dotenv loading
+    altogether. Only the keys the fixture's file names are affected."""
+    import os
+    import bot.cli as cli
+
+    synthetic_dotenv(JOURNAL_ENABLED="1", TP_ATR_MULT="3")
+    monkeypatch.delenv("JOURNAL_ENABLED", raising=False)
+    monkeypatch.delenv("TP_ATR_MULT", raising=False)
+
+    assert cli.load_dotenv() is True
+    assert os.environ["JOURNAL_ENABLED"] == "1"
+    assert os.environ["TP_ATR_MULT"] == "3"
+    assert "TIME_LIMIT_MINUTES" not in os.environ
