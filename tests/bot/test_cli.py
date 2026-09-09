@@ -95,3 +95,61 @@ def test_paper_mode_never_authenticates_even_with_a_leaked_token(tmp_path, monke
 
     assert cli.main(["run", "--once"]) == 0
     assert captured["client"].token == "", "paper must never carry an authorization token"
+
+
+def test_lock_fails_closed_when_fcntl_is_unavailable(tmp_path, monkeypatch):
+    """Finding 5: `except ImportError: pass` let a platform with no fcntl
+    proceed as if it held an exclusive lock. An unenforceable lock must refuse
+    to start, not silently allow two instances to trade unlocked."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "fcntl", None)  # forces `import fcntl` to raise ImportError
+    with pytest.raises(RuntimeError, match="fcntl"):
+        with InstanceLock(tmp_path / "bot.lock"):
+            pass
+
+
+def test_lock_is_acquired_before_any_initializer_with_side_effects(tmp_path, monkeypatch):
+    """Finding 5: the lock used to be acquired after Store/Eye/WS/load_rules/
+    Hands construction, so a second racing instance could create/migrate the
+    database, open a WS connection and construct Hands before discovering, at
+    the very end, that another instance already held the lock. With another
+    instance already holding the lock, main() must fail before touching any
+    of them."""
+    import bot.cli as cli
+
+    monkeypatch.setenv("MODE", "paper")
+    monkeypatch.chdir(tmp_path)
+
+    def boom(*a, **kw):
+        raise AssertionError("initializer ran despite the lock already being held")
+
+    monkeypatch.setattr(cli, "Store", boom)
+    monkeypatch.setattr(cli, "Eye", boom)
+    monkeypatch.setattr(cli, "KcexClient", boom)
+
+    with InstanceLock(cli.LOCK_PATH):
+        assert cli.main(["run", "--once"]) == cli.EXIT_ALREADY_RUNNING
+
+    # released: the same initializers now run normally
+    monkeypatch.setattr(cli, "Store", lambda *a, **kw: object())
+    called = {"eye": False}
+
+    class FakeEye:
+        rules = None
+
+        def __init__(self, client, settings):
+            called["eye"] = True
+
+        def start_ws_thread(self):
+            pass
+
+        def load_rules(self):
+            return None
+
+    monkeypatch.setattr(cli, "Eye", FakeEye)
+    monkeypatch.setattr(cli, "KcexClient", lambda *a, **kw: object())
+    monkeypatch.setattr(cli, "PaperHands", lambda *a, **kw: object())
+    monkeypatch.setattr(cli, "_loop", lambda *a, **kw: 0)
+    assert cli.main(["run", "--once"]) == 0
+    assert called["eye"] is True

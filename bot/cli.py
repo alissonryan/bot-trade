@@ -125,8 +125,17 @@ class InstanceLock:
             import fcntl
 
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except ImportError:  # non-POSIX: best effort, no lock
-            pass
+        except ImportError as exc:
+            # A platform with no fcntl cannot prove exclusion at all -- silently
+            # proceeding "best effort" is exactly the silent paper/live
+            # concurrency this lock exists to prevent. Fail closed instead of
+            # pretending an unenforced lock was taken.
+            fh.close()
+            raise RuntimeError(
+                f"cannot lock {self.path}: the fcntl module is unavailable on "
+                "this platform, so exclusive access cannot be proven. Refusing "
+                "to start rather than risk two instances trading unlocked."
+            ) from exc
         except OSError as exc:
             fh.close()
             raise AlreadyRunning(f"another bot holds {self.path}") from exc
@@ -200,40 +209,50 @@ def main(argv: list[str] | None = None) -> int:
     if settings.mode == "live":
         token = require_live_token()
         warn_token_age(os.getenv("KCEX_TOKEN_AT"))
-    # `token` is already the empty string in paper mode -- pass it explicitly
-    # rather than `token or None`, which collapses "" to None and makes
-    # KcexClient() fall back to reading KCEX_TOKEN from the environment. Paper
-    # must never authenticate, even when a stale KCEX_TOKEN from a prior live
-    # login is still sitting in .env/the shell.
-    client = KcexClient(token=token)
-    store = Store(db_path_for_mode(settings.mode), mode=settings.mode)
-    eye = Eye(client, settings)
-    eye.start_ws_thread()
-    eye.load_rules()
-    chart = None
-    if args.chart:
-        from bot.chart_server import ChartServer
-
-        try:
-            chart = ChartServer(
-                hub=eye.hub,
-                client=client,
-                host=settings.chart_host,
-                port=settings.chart_port,
-                symbol=settings.symbol,
-            )
-            chart.start()
-        except (ValueError, OSError) as exc:
-            print(f"chart server failed to start: {exc}")
-            return 1
-        print(f"chart http://{settings.chart_host}:{settings.chart_port}/")
-    if settings.mode == "live":
-        hands: PaperHands | LiveHands = LiveHands(settings, store, client, rules=eye.rules)
-    else:
-        hands = PaperHands(settings, store)
 
     try:
         with InstanceLock(LOCK_PATH):
+            # Every initializer below has a side effect -- opening/migrating
+            # the database, starting the KCEX WS thread, a REST call for
+            # symbol rules, binding the chart's HTTP/WS server, LiveHands'
+            # own construction -- and now runs only once the exclusive lock is
+            # held. Running them first (as before) let two racing processes
+            # both create/migrate bot.db, both open a KCEX WS connection, and
+            # both attempt to bind the chart port before only one of them
+            # discovered, at the very end, that it should never have started.
+            #
+            # `token` is already the empty string in paper mode -- pass it
+            # explicitly rather than `token or None`, which collapses "" to
+            # None and makes KcexClient() fall back to reading KCEX_TOKEN from
+            # the environment. Paper must never authenticate, even when a
+            # stale KCEX_TOKEN from a prior live login is still sitting in
+            # .env/the shell.
+            client = KcexClient(token=token)
+            store = Store(db_path_for_mode(settings.mode), mode=settings.mode)
+            eye = Eye(client, settings)
+            eye.start_ws_thread()
+            eye.load_rules()
+            chart = None
+            if args.chart:
+                from bot.chart_server import ChartServer
+
+                try:
+                    chart = ChartServer(
+                        hub=eye.hub,
+                        client=client,
+                        host=settings.chart_host,
+                        port=settings.chart_port,
+                        symbol=settings.symbol,
+                    )
+                    chart.start()
+                except (ValueError, OSError) as exc:
+                    print(f"chart server failed to start: {exc}")
+                    return 1
+                print(f"chart http://{settings.chart_host}:{settings.chart_port}/")
+            if settings.mode == "live":
+                hands: PaperHands | LiveHands = LiveHands(settings, store, client, rules=eye.rules)
+            else:
+                hands = PaperHands(settings, store)
             return _loop(args.once, settings, client, store, eye, hands)
     except AlreadyRunning as exc:
         log.error("%s", exc)
