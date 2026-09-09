@@ -10,9 +10,10 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,22 @@ from bot.types import GateResult, TradeIntent
 
 POSITION_STATES = ("PENDING", "OPEN", "UNPROTECTED", "CLOSING")
 MODE_KEY = "store_mode"
+
+_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _valid_day(value: Any) -> bool:
+    """True only for an exact ``YYYY-MM-DD`` string that is a real calendar
+    date. A bare string/lexicographic compare (``"0" < "2026-09-09"``)
+    would otherwise treat any garbage value as "an earlier day", silently
+    resetting a budget that was never actually rolled over."""
+    if not isinstance(value, str) or not _DAY_RE.match(value):
+        return False
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
 
 
 class StoreIdentityMismatch(RuntimeError):
@@ -35,11 +52,22 @@ BUDGET_KEY = "llm_budget"
 
 class BudgetStateCorrupt(RuntimeError):
     """The persisted llm_budget kv row exists but cannot be trusted (bad
-    JSON, missing/invalid fields, non-finite/negative spend, or a stored day
-    after "today" -- a backward clock or a future stored day). Callers MUST
-    treat this as "block new paid calls", never as license to mint a fresh
-    zero budget: silently resetting on corruption is exactly how a spend cap
-    gets bypassed.
+    JSON, missing/invalid fields, wrong types, non-finite/negative spend, a
+    non-canonical day, or a stored day after "today" -- a backward clock or
+    a future stored day). Callers MUST treat this as "block new paid calls",
+    never as license to mint a fresh zero budget: silently resetting on
+    corruption is exactly how a spend cap gets bypassed.
+    """
+
+
+class BudgetTransactionConflict(RuntimeError):
+    """reserve_budget()/settle_budget() were called on a connection that
+    already has an uncommitted transaction open. Proceeding would either
+    write into the caller's pending transaction (invisible to any other
+    reader/connection until the caller commits -- not atomic despite
+    returning as if it were) or touch/roll back writes this call does not
+    own. Refuses before reading or writing anything; the caller must commit
+    or roll back its own pending writes first.
     """
 log = logging.getLogger(__name__)
 _JOURNAL_COLUMNS = (
@@ -569,9 +597,13 @@ class Store:
     def _parse_budget_row(self, raw: str | None) -> dict[str, Any] | None:
         """None only when the kv row was never written (a genuinely fresh
         Store/new day) -- never for a row that exists but cannot be trusted.
-        Raises BudgetStateCorrupt in every case where the data is present but
-        unreadable/inconsistent, so a caller can never mistake corruption for
-        "start fresh"."""
+        Raises BudgetStateCorrupt for anything present but unreadable:
+        invalid JSON, a non-canonical ``day`` (must be exactly YYYY-MM-DD and
+        a real calendar date -- a bare string compare like ``"0" < today``
+        would otherwise treat garbage as "an earlier day, roll to zero"),
+        a non-numeric/negative/non-finite ``spent_usd``, or a non-integer/
+        negative ``calls``. Booleans are rejected even where Python would
+        accept them as ints/floats (``True == 1``)."""
         if raw is None:
             return None
         try:
@@ -580,14 +612,18 @@ class Store:
             raise BudgetStateCorrupt(f"llm_budget row is not valid JSON: {raw[:120]!r}") from exc
         if not isinstance(data, dict) or "day" not in data or "spent_usd" not in data:
             raise BudgetStateCorrupt(f"llm_budget row missing required fields: {data!r}")
-        try:
-            day = str(data["day"])
-            spent = float(data["spent_usd"])
-            calls = int(data.get("calls", 0))
-        except (TypeError, ValueError) as exc:
-            raise BudgetStateCorrupt(f"llm_budget row has invalid field types: {data!r}") from exc
+        day = data["day"]
+        if not _valid_day(day):
+            raise BudgetStateCorrupt(f"llm_budget row has a non-canonical day: {day!r}")
+        spent = data["spent_usd"]
+        if isinstance(spent, bool) or not isinstance(spent, (int, float)):
+            raise BudgetStateCorrupt(f"llm_budget row has a non-numeric spent_usd: {spent!r}")
+        spent = float(spent)
         if not math.isfinite(spent) or spent < 0:
             raise BudgetStateCorrupt(f"llm_budget row has a non-finite/negative spent_usd: {spent!r}")
+        calls = data.get("calls", 0)
+        if isinstance(calls, bool) or not isinstance(calls, int) or calls < 0:
+            raise BudgetStateCorrupt(f"llm_budget row has an invalid calls count: {calls!r}")
         return {"day": day, "spent_usd": spent, "calls": calls}
 
     def budget_load(self) -> dict[str, Any] | None:
@@ -597,7 +633,8 @@ class Store:
         start a fresh zero budget (see reserve_budget, the real gate)."""
         return self._parse_budget_row(self.kv_get(BUDGET_KEY))
 
-    def reserve_budget(self, *, today: str, cap_usd: float, reserve_usd: float) -> bool:
+    def reserve_budget(self, *, today: str, cap_usd: float, reserve_usd: float,
+                       required_headroom: float = 0.0) -> bool:
         """Atomic admission check + durable commit for one paid HTTP dispatch.
 
         Reads the persisted row and writes the reservation back inside a
@@ -606,8 +643,23 @@ class Store:
         figure and both admit a request that together exceed the cap -- the
         second writer blocks/serializes behind the first instead of racing
         it. Returns True (and commits the reservation) when
-        ``already_spent_today + reserve_usd <= cap_usd``; returns False (no
-        write at all) when it does not fit -- the caller must not dispatch.
+        ``already_spent_today + reserve_usd + required_headroom <= cap_usd``;
+        returns False (no write at all) when it does not fit. Only
+        ``reserve_usd`` is actually committed to the persisted spend --
+        ``required_headroom`` is checked atomically alongside it (for a
+        caller that must also prove room for a SEPARATE follow-up spend,
+        e.g. reflection reserving room for the next decision too) without
+        being charged itself.
+
+        Raises ``BudgetTransactionConflict`` immediately, before reading or
+        writing anything, if this connection already has an uncommitted
+        transaction open: writing into a caller's pending transaction would
+        be invisible to any other reader until the caller commits, so
+        returning True there would claim an atomicity this call cannot
+        actually provide. Raises ``ValueError`` for a non-canonical
+        ``today`` or a non-finite/negative ``cap_usd``/``reserve_usd``/
+        ``required_headroom`` (a reservation of exactly 0 reserves nothing
+        and must be refused explicitly, not silently admitted).
 
         A genuinely absent row (new database) or a persisted day strictly
         BEFORE ``today`` both mean zero already spent today -- ordinary UTC
@@ -619,11 +671,20 @@ class Store:
         _parse_budget_row); callers must block new paid calls on it, not
         continue as if nothing were wrong.
         """
-        if not math.isfinite(reserve_usd) or reserve_usd < 0:
+        if self._conn.in_transaction:
+            raise BudgetTransactionConflict(
+                "reserve_budget() cannot prove atomicity inside an already-open "
+                "transaction on this connection; commit or roll back first"
+            )
+        if not _valid_day(today):
+            raise ValueError(f"invalid today: {today!r}")
+        if not math.isfinite(cap_usd) or cap_usd < 0:
+            raise ValueError(f"invalid cap_usd: {cap_usd!r}")
+        if not math.isfinite(reserve_usd) or reserve_usd <= 0:
             raise ValueError(f"invalid reserve_usd: {reserve_usd!r}")
-        own_txn = not self._conn.in_transaction
-        if own_txn:
-            self._conn.execute("BEGIN IMMEDIATE")
+        if not math.isfinite(required_headroom) or required_headroom < 0:
+            raise ValueError(f"invalid required_headroom: {required_headroom!r}")
+        self._conn.execute("BEGIN IMMEDIATE")
         try:
             persisted = self._parse_budget_row(self.kv_get(BUDGET_KEY))
             if persisted is None or persisted["day"] < today:
@@ -635,42 +696,46 @@ class Store:
                     f"persisted budget day {persisted['day']!r} is after today {today!r}: "
                     "backward clock or a future stored day -- refusing to mint a fresh budget"
                 )
-            if base_spent + reserve_usd > cap_usd + 1e-9:
-                if own_txn:
-                    self.rollback()
+            if base_spent + reserve_usd + required_headroom > cap_usd + 1e-9:
+                self.rollback()
                 return False
             self.kv_set(
                 BUDGET_KEY,
                 json.dumps({"day": today, "spent_usd": base_spent + reserve_usd, "calls": base_calls + 1}),
                 commit=False,
             )
-            if own_txn:
-                self.commit()
+            self.commit()
             return True
         except Exception:
-            if own_txn:
-                self.rollback()
+            self.rollback()
             raise
 
     def settle_budget(self, *, day: str, delta_usd: float) -> None:
         """True up a reservation to the real provider cost: ``delta_usd`` =
-        actual - reserved (usually negative). Atomic against concurrent
-        writers the same way reserve_budget() is. If the persisted day has
-        already rolled over past ``day`` by the time this runs, the new
-        day's budget is left untouched -- there is nothing left of the old
-        reservation on that row to correct. Never raises on a corrupt row
-        that reserve_budget() itself would have already refused to create;
-        a corrupt row here means something else wrote it after the fact, so
-        this degrades to a no-op rather than crashing bookkeeping that runs
-        after the real (successful or failed) result is already known."""
-        own_txn = not self._conn.in_transaction
-        if own_txn:
-            self._conn.execute("BEGIN IMMEDIATE")
+        actual - reserved (usually negative). Same atomicity/refusal rules
+        as reserve_budget() (an open caller transaction raises
+        BudgetTransactionConflict before touching anything; a non-canonical
+        ``day`` or non-finite ``delta_usd`` raises ValueError). If the
+        persisted day has already rolled over past ``day``, or the row was
+        genuinely never written, the new/absent state is left untouched --
+        there is nothing left of the old reservation to correct, and that is
+        not an error. A row that IS present for ``day`` but unreadable
+        (BudgetStateCorrupt) is NOT swallowed here: settlement genuinely
+        failed and the caller (bot.brain.think_result/reflect_result) must
+        block further spend in this process rather than silently losing a
+        real cost correction."""
+        if self._conn.in_transaction:
+            raise BudgetTransactionConflict(
+                "settle_budget() cannot prove atomicity inside an already-open "
+                "transaction on this connection; commit or roll back first"
+            )
+        if not _valid_day(day):
+            raise ValueError(f"invalid day: {day!r}")
+        if not math.isfinite(delta_usd):
+            raise ValueError(f"invalid delta_usd: {delta_usd!r}")
+        self._conn.execute("BEGIN IMMEDIATE")
         try:
-            try:
-                persisted = self._parse_budget_row(self.kv_get(BUDGET_KEY))
-            except BudgetStateCorrupt:
-                persisted = None
+            persisted = self._parse_budget_row(self.kv_get(BUDGET_KEY))
             if persisted is not None and persisted["day"] == day:
                 new_spent = max(0.0, persisted["spent_usd"] + delta_usd)
                 self.kv_set(
@@ -678,11 +743,9 @@ class Store:
                     json.dumps({"day": day, "spent_usd": new_spent, "calls": persisted["calls"]}),
                     commit=False,
                 )
-            if own_txn:
-                self.commit()
+            self.commit()
         except Exception:
-            if own_txn:
-                self.rollback()
+            self.rollback()
             raise
 
     def commit(self) -> None:
