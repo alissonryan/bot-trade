@@ -107,9 +107,10 @@ class PanelServer:
         self.state_bytes = json.dumps({"estado": "carregando"}, ensure_ascii=False).encode("utf-8")
 
     def refresh_now(self) -> None:
+        now_ms = self.clock_ms()
         try:
-            self.cache.refresh(now_ms=self.clock_ms())
-            state = build_state(self.cache, now_ms=self.clock_ms(), max_hold_s=self.max_hold_s,
+            self.cache.refresh(now_ms=now_ms)
+            state = build_state(self.cache, now_ms=now_ms, max_hold_s=self.max_hold_s,
                                 jev_every_s=self.jev_every_s)
             body = json.dumps(state, ensure_ascii=False).encode("utf-8")
         except PanelDbMissing:

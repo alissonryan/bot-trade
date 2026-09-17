@@ -1,4 +1,6 @@
 from datetime import datetime, timezone
+import threading
+import time
 
 from fut.panel.cache import PanelCache
 
@@ -70,3 +72,20 @@ def test_database_replacement_resets_the_incremental_cursor():
     assert cache.last_id == 0 and cache.loading is True
     cache.refresh(now_ms=10)
     assert cache.last_id == 1 and cache.snapshot["bid"] == 200.0
+
+
+def test_concurrent_refreshes_are_serialized_without_double_counting():
+    class SlowReader(CountingReader):
+        def decision_facts(self, after_id, limit=2000):
+            time.sleep(0.02)
+            return super().decision_facts(after_id, limit)
+
+    reader = SlowReader([fact(1, DAY, cost_usd=0.3)])
+    cache = PanelCache(reader)
+    threads = [threading.Thread(target=cache.refresh, kwargs={"now_ms": DAY + 1}) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert cache.lifetime_costs == {"jev": 0.3, "llm": 0.0}
+    assert cache.price_series(DAY) == [[DAY, 101.0]]

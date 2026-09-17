@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime, timezone
 import time
+import threading
 from typing import Any
 
 from fut.panel.reader import PanelReader
@@ -25,6 +26,7 @@ class PanelCache:
     def __init__(self, reader: PanelReader, *, limit: int = 2000):
         self.reader = reader
         self.limit = limit
+        self._lock = threading.Lock()
         self.last_id = 0
         self.last_ts_ms = 0
         self.loading = True
@@ -78,22 +80,40 @@ class PanelCache:
 
     def refresh(self, *, now_ms: int | None = None) -> None:
         now_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
-        facts = self.reader.decision_facts(self.last_id, self.limit)
-        max_id = getattr(facts, "max_id", None)
-        if max_id is not None and max_id < self.last_id:
-            self._reset()
-            return
-        for fact in facts:
-            self._fold(fact)
-        self.loading = len(facts) >= self.limit
-        self._trim(now_ms)
+        with self._lock:
+            facts = self.reader.decision_facts(self.last_id, self.limit)
+            max_id = getattr(facts, "max_id", None)
+            if max_id is not None and max_id < self.last_id:
+                self._reset()
+                return
+            for fact in facts:
+                self._fold(fact)
+            self.loading = len(facts) >= self.limit
+            self._trim(now_ms)
 
     def costs_for_day(self, day: str) -> dict[str, float]:
-        return dict(self._day_costs.get(day, {"jev": 0.0, "llm": 0.0}))
+        with self._lock:
+            return dict(self._day_costs.get(day, {"jev": 0.0, "llm": 0.0}))
 
-    def price_series(self, since_ms: int, max_points: int = MAX_SERIES_POINTS) -> list[list[float | int]]:
+    def _price_series(self, since_ms: int, max_points: int) -> list[list[float | int]]:
         points = [[ts_ms, mid] for ts_ms, mid in self._prices if ts_ms >= since_ms]
         if len(points) <= max_points:
             return points
         stride = max(1, -(-len(points) // max_points))
         return points[::stride]
+
+    def price_series(self, since_ms: int, max_points: int = MAX_SERIES_POINTS) -> list[list[float | int]]:
+        with self._lock:
+            return self._price_series(since_ms, max_points)
+
+    def view(self, *, day: str, since_ms: int, max_points: int = MAX_SERIES_POINTS) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "snapshot": dict(self.snapshot) if self.snapshot is not None else None,
+                "last_id": self.last_id,
+                "last_ts_ms": self.last_ts_ms,
+                "loading": self.loading,
+                "lifetime_costs": dict(self.lifetime_costs),
+                "day_costs": dict(self._day_costs.get(day, {"jev": 0.0, "llm": 0.0})),
+                "price_series": self._price_series(since_ms, max_points),
+            }

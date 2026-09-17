@@ -85,16 +85,18 @@ def _position(pos: dict | None, price: dict | None, now_ms: int, max_hold_s: flo
 def build_state(cache: PanelCache, *, now_ms: int, max_hold_s: float = 300.0,
                 jev_every_s: float = 2.0) -> dict[str, Any]:
     reader = cache.reader
-    last_id, last_ts = cache.last_id, cache.last_ts_ms
-    price = _price(cache.snapshot, now_ms)
     day = _day_of(now_ms)
+    since = now_ms - SERIES_MS
+    view = cache.view(day=day, since_ms=since)
+    last_id, last_ts = view["last_id"], view["last_ts_ms"]
+    price = _price(view["snapshot"], now_ms)
     today = reader.fills("main", day=day)
-    costs = cache.costs_for_day(day)
+    costs = view["day_costs"]
     gross = sum(f["pnl"] for f in today)
     fees = sum(f["fee"] for f in today)
     funding = sum(f["funding"] for f in today)
     balances = reader.balances()
-    all_costs = cache.lifetime_costs
+    all_costs = view["lifetime_costs"]
     fills_by_book = {book: reader.fills(book) for book, _ in BOOKS}
     board = []
     for book, name in BOOKS:
@@ -103,7 +105,6 @@ def build_state(cache: PanelCache, *, now_ms: int, max_hold_s: float = 300.0,
             net -= all_costs["jev"] + all_costs["llm"]
         board.append({"carteira": book, "nome": name, "saldo": balances.get(book),
                       "trades": len(_pair_trades(fills_by_book[book])), "liquido": net})
-    since = now_ms - SERIES_MS
     marks = []
     for f in fills_by_book["main"]:
         if f["ts_ms"] < since or f["kind"] not in ("open", "close"):
@@ -113,7 +114,7 @@ def build_state(cache: PanelCache, *, now_ms: int, max_hold_s: float = 300.0,
     return {
         "estado": "ok",
         "agora_ms": now_ms,
-        "carregando": cache.loading,
+        "carregando": view["loading"],
         "bot": {"vivo": bool(last_id) and now_ms - last_ts <= alive_threshold_ms(jev_every_s),
                 "ultimo_sinal_s": (now_ms - last_ts) // 1000 if last_id else None},
         "preco": price,
@@ -122,7 +123,7 @@ def build_state(cache: PanelCache, *, now_ms: int, max_hold_s: float = 300.0,
                 "custo_llm": costs["llm"], "liquido": gross - fees - funding - costs["jev"] - costs["llm"]},
         "placar": board,
         "trades": _pair_trades(fills_by_book["main"])[-MAX_TRADES:][::-1],
-        "serie": {"pontos": cache.price_series(since), "marcas": marks},
+        "serie": {"pontos": view["price_series"], "marcas": marks},
     }
 
 

@@ -197,3 +197,15 @@ def test_refresh_loop_catches_up_quickly_while_cache_is_loading(tmp_path):
     thread.start()
     thread.join(1)
     assert calls == [1, 2] and waits == [0.05, 1.0]
+
+
+def test_refresh_now_reads_the_clock_once(tmp_path):
+    db = tmp_path / "fut.db"
+    make_db(db).close()
+    index = tmp_path / "index.html"
+    index.write_text("x", encoding="utf-8")
+    clock_calls = []
+    server = PanelServer(reader=PanelReader(db), index_path=index, port=0,
+                         clock_ms=lambda: clock_calls.append(T0) or T0)
+    server.refresh_now()
+    assert clock_calls == [T0]
