@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from fut.panel.cache import PanelCache
 from fut.panel.narrate import narrate
 from fut.panel.reader import PanelReader
 
@@ -76,18 +77,18 @@ def _position(pos: dict | None, price: dict | None, now_ms: int, max_hold_s: flo
     return out
 
 
-def build_state(reader: PanelReader, *, now_ms: int, max_hold_s: float = 300.0) -> dict[str, Any]:
-    last_id, last_ts = reader.last_decision()
-    price = _price(reader.latest_snapshot(), now_ms)
+def build_state(cache: PanelCache, *, now_ms: int, max_hold_s: float = 300.0) -> dict[str, Any]:
+    reader = cache.reader
+    last_id, last_ts = cache.last_id, cache.last_ts_ms
+    price = _price(cache.snapshot, now_ms)
     day = _day_of(now_ms)
-    start, end = _day_bounds_ms(day)
     today = reader.fills("main", day=day)
-    costs = reader.model_costs(start, end)
+    costs = cache.costs_for_day(day)
     gross = sum(f["pnl"] for f in today)
     fees = sum(f["fee"] for f in today)
     funding = sum(f["funding"] for f in today)
     balances = reader.balances()
-    all_costs = reader.model_costs(0, now_ms + 1)
+    all_costs = cache.lifetime_costs
     fills_by_book = {book: reader.fills(book) for book, _ in BOOKS}
     board = []
     for book, name in BOOKS:
@@ -106,6 +107,7 @@ def build_state(reader: PanelReader, *, now_ms: int, max_hold_s: float = 300.0) 
     return {
         "estado": "ok",
         "agora_ms": now_ms,
+        "carregando": cache.loading,
         "bot": {"vivo": bool(last_id) and now_ms - last_ts <= ALIVE_MS,
                 "ultimo_sinal_s": (now_ms - last_ts) // 1000 if last_id else None},
         "preco": price,
@@ -114,7 +116,7 @@ def build_state(reader: PanelReader, *, now_ms: int, max_hold_s: float = 300.0) 
                 "custo_llm": costs["llm"], "liquido": gross - fees - funding - costs["jev"] - costs["llm"]},
         "placar": board,
         "trades": _pair_trades(fills_by_book["main"])[-MAX_TRADES:][::-1],
-        "serie": {"pontos": reader.price_series(since), "marcas": marks},
+        "serie": {"pontos": cache.price_series(since), "marcas": marks},
     }
 
 

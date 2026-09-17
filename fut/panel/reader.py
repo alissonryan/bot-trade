@@ -1,7 +1,8 @@
 """Read-only window onto the futures paper database for the local panel.
 
-Every call opens its own ``mode=ro`` connection and closes it: the panel must never hold a
-read lock while the bot wants to commit, and must never run FutStore's schema/stamp writes.
+Every call opens its own ``mode=ro`` connection and closes it. The panel's state path uses
+bounded incremental reads by decision id, with one refresher shared by all browser tabs;
+those short reads can still contend briefly with a writer and are reported explicitly.
 """
 
 from __future__ import annotations
@@ -27,6 +28,14 @@ class PanelDbMissing(RuntimeError):
 
 class PanelDbBusy(RuntimeError):
     """The database is locked by a writer right now; try again."""
+
+
+class DecisionFacts(list):
+    """A bounded fact page with the table high-water mark from the same read."""
+
+    def __init__(self, rows: list[dict[str, Any]], max_id: int):
+        super().__init__(rows)
+        self.max_id = max_id
 
 
 def _loads(text: Any) -> dict[str, Any]:
@@ -63,31 +72,47 @@ class PanelReader:
 
     def event_rows(self, after_id: int | None, upto_id: int, limit: int = 500) -> list[dict[str, Any]]:
         if after_id is None:
-            rows = self._query(f"SELECT id, ts_ms, kind, payload FROM fut_decisions WHERE id <= ? AND {_EVENT_FILTER} "
-                               "ORDER BY id DESC LIMIT ?", (upto_id, limit))[::-1]
+            rows = self._query(f"SELECT id, ts_ms, kind, payload FROM fut_decisions "
+                               f"WHERE id > ? AND id <= ? AND {_EVENT_FILTER} "
+                               "ORDER BY id DESC LIMIT ?", (max(0, upto_id - 20_000), upto_id, limit))[::-1]
         else:
             rows = self._query(f"SELECT id, ts_ms, kind, payload FROM fut_decisions WHERE id > ? AND id <= ? "
                                f"AND {_EVENT_FILTER} ORDER BY id LIMIT ?", (after_id, upto_id, limit))
         return [{"id": int(r[0]), "ts_ms": int(r[1]), "kind": r[2], "payload": _loads(r[3])} for r in rows]
 
-    def latest_snapshot(self) -> dict[str, Any] | None:
-        rows = self._query("SELECT json_extract(payload, '$.snapshot') FROM fut_decisions "
-                           "WHERE kind='jev' ORDER BY id DESC LIMIT 1")
-        snap = _loads(rows[0][0]) if rows else {}
-        return snap or None
-
-    def price_series(self, since_ms: int, max_points: int = 600) -> list[list]:
-        rows = self._query("SELECT ts_ms, json_extract(payload, '$.snapshot.bid'), "
-                           "json_extract(payload, '$.snapshot.ask'), json_extract(payload, '$.snapshot.last') "
-                           "FROM fut_decisions WHERE kind='jev' AND ts_ms >= ? ORDER BY id", (since_ms,))
-        points = []
-        for ts, bid, ask, last in rows:
-            bid, ask, last = float(bid or 0), float(ask or 0), float(last or 0)
-            mid = (bid + ask) / 2 if bid > 0 and ask > 0 else last
-            if mid > 0:
-                points.append([int(ts), mid])
-        stride = max(1, -(-len(points) // max_points))
-        return points[::stride]
+    def decision_facts(self, after_id: int, limit: int = 2000) -> DecisionFacts:
+        """Read the next bounded decision page and its max id in one short query."""
+        sql = """
+            WITH facts AS (
+                SELECT id, ts_ms, kind,
+                       CASE WHEN json_valid(payload)
+                            THEN CAST(COALESCE(json_extract(payload, '$.cost_usd'), 0) AS REAL)
+                            ELSE 0.0 END AS cost_usd,
+                       CASE WHEN json_valid(payload) THEN json_extract(payload, '$.snapshot.bid') END AS bid,
+                       CASE WHEN json_valid(payload) THEN json_extract(payload, '$.snapshot.ask') END AS ask,
+                       CASE WHEN json_valid(payload) THEN json_extract(payload, '$.snapshot.last') END AS last
+                FROM fut_decisions
+                WHERE id > ?
+                ORDER BY id
+                LIMIT ?
+            ), max_row AS (
+                SELECT COALESCE(MAX(id), 0) AS max_id FROM fut_decisions
+            )
+            SELECT f.id, f.ts_ms, f.kind, f.cost_usd, f.bid, f.ask, f.last, m.max_id, 0 AS sentinel
+            FROM facts AS f CROSS JOIN max_row AS m
+            UNION ALL
+            SELECT NULL, NULL, NULL, NULL, NULL, NULL, NULL, m.max_id, 1 AS sentinel
+            FROM max_row AS m
+            WHERE NOT EXISTS (SELECT 1 FROM facts)
+        """
+        rows = self._query(sql, (after_id, limit))
+        max_id = int(rows[0][7] or 0) if rows else 0
+        facts = [
+            {"id": int(row[0]), "ts_ms": int(row[1]), "kind": row[2], "cost_usd": row[3],
+             "bid": row[4], "ask": row[5], "last": row[6]}
+            for row in rows if not row[8]
+        ]
+        return DecisionFacts(facts, max_id)
 
     def position(self, book: str) -> dict[str, Any] | None:
         rows = self._query(f"SELECT {', '.join(_POSITION_KEYS)} FROM fut_position WHERE book=?", (book,))
@@ -110,10 +135,3 @@ class PanelReader:
         if day is not None:
             sql, params = sql + " AND day = ?", params + [day]
         return [dict(zip(_FILL_KEYS, row)) for row in self._query(sql + " ORDER BY id", tuple(params))]
-
-    def model_costs(self, start_ms: int, end_ms: int) -> dict[str, float]:
-        rows = self._query("SELECT kind, COALESCE(SUM(json_extract(payload, '$.cost_usd')), 0) FROM fut_decisions "
-                           "WHERE kind IN ('jev', 'llm') AND ts_ms >= ? AND ts_ms < ? GROUP BY kind", (start_ms, end_ms))
-        out = {"jev": 0.0, "llm": 0.0}
-        out.update({kind: float(total or 0.0) for kind, total in rows})
-        return out

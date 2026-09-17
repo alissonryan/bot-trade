@@ -11,6 +11,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
 
 from bot.chart_server import _origin_is_loopback, require_loopback
+from fut.panel.cache import PanelCache
 from fut.panel.reader import PanelDbBusy, PanelDbMissing, PanelReader
 from fut.panel.state import build_events, build_state
 
@@ -63,7 +64,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             if parts.path == "/api/state":
-                self._json(200, build_state(panel.reader, now_ms=panel.clock_ms(), max_hold_s=panel.max_hold_s))
+                self._send(200, panel.state_bytes, "application/json")
                 return
             raw = parse_qs(parts.query).get("after", [None])[0]
             after = None
@@ -85,6 +86,7 @@ class PanelServer:
                  clock_ms: Callable[[], int] | None = None, max_hold_s: float = 300.0):
         self.host = require_loopback(host)
         self.reader = reader
+        self.cache = PanelCache(reader)
         self.index_path = Path(index_path)
         self.clock_ms = clock_ms or (lambda: int(time.time() * 1000))
         self.max_hold_s = max_hold_s
@@ -92,6 +94,33 @@ class PanelServer:
         self.port: int | None = None
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        self._refresh_thread: threading.Thread | None = None
+        self._refresh_stop = threading.Event()
+        self._state_lock = threading.Lock()
+        self.state_bytes = json.dumps({"estado": "carregando"}, ensure_ascii=False).encode("utf-8")
+
+    def refresh_now(self) -> None:
+        try:
+            self.cache.refresh(now_ms=self.clock_ms())
+            state = build_state(self.cache, now_ms=self.clock_ms(), max_hold_s=self.max_hold_s)
+            body = json.dumps(state, ensure_ascii=False).encode("utf-8")
+        except PanelDbMissing:
+            body = json.dumps({"estado": "sem_banco"}, ensure_ascii=False).encode("utf-8")
+        except PanelDbBusy:
+            return
+        with self._state_lock:
+            self.state_bytes = body
+
+    def _refresh_loop(self) -> None:
+        while not self._refresh_stop.is_set():
+            self.refresh_now()
+            self._refresh_stop.wait(1.0)
+
+    def _start_refresher(self) -> None:
+        if self._refresh_thread is None:
+            self._refresh_stop.clear()
+            self._refresh_thread = threading.Thread(target=self._refresh_loop, name="fut-panel-refresh", daemon=True)
+            self._refresh_thread.start()
 
     def _bind(self) -> ThreadingHTTPServer:
         if self._httpd is None:
@@ -103,14 +132,20 @@ class PanelServer:
 
     def start(self) -> None:
         httpd = self._bind()
+        self._start_refresher()
         self._thread = threading.Thread(target=httpd.serve_forever, name="fut-panel", daemon=True)
         self._thread.start()
 
     def serve_forever(self) -> None:
+        self._start_refresher()
         self._bind().serve_forever()
 
     def shutdown(self) -> None:
+        self._refresh_stop.set()
         if self._httpd is not None:
             self._httpd.shutdown()
             self._httpd.server_close()
             self._httpd = None
+        if self._refresh_thread is not None and self._refresh_thread is not threading.current_thread():
+            self._refresh_thread.join(timeout=2)
+        self._refresh_thread = None

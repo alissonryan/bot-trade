@@ -1,6 +1,7 @@
 import pytest
 
 from fut.panel.reader import PanelReader
+from fut.panel.cache import PanelCache
 from fut.panel.state import build_events, build_state
 from tests.fut.panel_db import SNAP, add_decision, add_fill, make_db, set_balance, set_position
 
@@ -17,7 +18,9 @@ def jev_row(conn, ts, bid, ask, **extra):
 def test_empty_database_gives_a_calm_state(tmp_path):
     db = tmp_path / "fut.db"
     make_db(db).close()
-    state = build_state(PanelReader(db), now_ms=T0)
+    cache = PanelCache(PanelReader(db))
+    cache.refresh(now_ms=T0)
+    state = build_state(cache, now_ms=T0)
     assert state["estado"] == "ok" and state["bot"]["vivo"] is False and state["bot"]["ultimo_sinal_s"] is None
     assert state["preco"] is None and state["posicao"] is None and state["trades"] == []
     assert state["dia"]["liquido"] == 0.0
@@ -28,7 +31,9 @@ def test_alive_price_and_long_position_marked_to_mid(tmp_path):
     conn = make_db(db)
     jev_row(conn, T0 + 100_000, 76100.0, 76100.2)
     set_position(conn, "main", side="long", contracts=2, entry=76000.0, stop=75900.0, opened_ms=T0 + 40_000)
-    state = build_state(PanelReader(db), now_ms=T0 + 104_000, max_hold_s=300.0)
+    cache = PanelCache(PanelReader(db))
+    cache.refresh(now_ms=T0 + 104_000)
+    state = build_state(cache, now_ms=T0 + 104_000, max_hold_s=300.0)
     assert state["bot"] == {"vivo": True, "ultimo_sinal_s": 4}
     assert state["preco"]["mid"] == pytest.approx(76100.1) and state["preco"]["velho"] is False
     pos = state["posicao"]
@@ -42,7 +47,9 @@ def test_short_position_profits_when_price_falls_and_stale_bot_is_flagged(tmp_pa
     conn = make_db(db)
     jev_row(conn, T0, 75900.0, 75900.2)
     set_position(conn, "main", side="short", entry=76000.0, stop=76100.0, opened_ms=T0)
-    state = build_state(PanelReader(db), now_ms=T0 + 400_000)
+    cache = PanelCache(PanelReader(db))
+    cache.refresh(now_ms=T0 + 400_000)
+    state = build_state(cache, now_ms=T0 + 400_000)
     assert state["bot"]["vivo"] is False and state["preco"]["velho"] is True
     assert state["posicao"]["resultado_usd"] > 0 and state["posicao"]["fecha_em_s"] == 0
 
@@ -57,7 +64,9 @@ def test_day_result_separates_model_costs_and_ignores_yesterday(tmp_path):
     add_fill(conn, "main", T0 + 3000, "close", pnl=0.05, fee=0.002, reason="time_limit")
     jev_row(conn, T0 + 1000, 76000.0, 76000.2, cost_usd=0.01)
     add_decision(conn, T0 + 1500, "llm", {"outcome": "ok", "cost_usd": 0.02})
-    dia = build_state(PanelReader(db), now_ms=T0 + 4000)["dia"]
+    cache = PanelCache(PanelReader(db))
+    cache.refresh(now_ms=T0 + 4000)
+    dia = build_state(cache, now_ms=T0 + 4000)["dia"]
     assert dia["bruto"] == pytest.approx(0.05) and dia["taxas"] == pytest.approx(0.004)
     assert dia["funding"] == pytest.approx(0.001)
     assert dia["custo_jev"] == pytest.approx(0.01) and dia["custo_llm"] == pytest.approx(0.02)
@@ -75,7 +84,9 @@ def test_trades_scoreboard_and_chart_marks(tmp_path):
     add_fill(conn, "shadow:random", T0 + 2000, "close", fee=0.002, pnl=-0.02, reason="stop")
     set_balance(conn, "main", 450.004)
     set_balance(conn, "shadow:random", 449.976)
-    state = build_state(PanelReader(db), now_ms=T0 + 80_000)
+    cache = PanelCache(PanelReader(db))
+    cache.refresh(now_ms=T0 + 80_000)
+    state = build_state(cache, now_ms=T0 + 80_000)
     (trade,) = state["trades"]
     assert trade == {"entrada_ms": T0 + 1000, "saida_ms": T0 + 61_000, "lado": "short", "entrada": 76000.0,
                      "saida": 75950.0, "motivo": "llm_close", "duracao_s": 60,

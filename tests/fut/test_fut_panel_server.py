@@ -19,6 +19,7 @@ def served(tmp_path):
     index.write_text("<h1>painel</h1>", encoding="utf-8")
     server = PanelServer(reader=PanelReader(db, timeout_s=0.05), index_path=index, port=0, clock_ms=lambda: T0)
     server.start()
+    server.refresh_now()
     yield server, conn
     server.shutdown()
 
@@ -40,6 +41,7 @@ def test_refuses_to_bind_off_loopback(tmp_path):
 def test_serves_the_page_state_and_events(served):
     server, conn = served
     first = add_decision(conn, T0 - 1000, "exit", {"reason": "stop"})
+    server.refresh_now()
     status, headers, body = get(server, "/")
     assert status == 200 and b"painel" in body and headers["Content-Type"].startswith("text/html")
     status, headers, body = get(server, "/api/state")
@@ -71,12 +73,35 @@ def test_foreign_origin_or_host_is_forbidden_on_the_api(served):
     assert get(server, "/api/state", headers={"Origin": f"http://127.0.0.1:{server.port}"})[0] == 200
 
 
+def test_two_state_gets_do_not_refresh_the_database(tmp_path):
+    db = tmp_path / "fut.db"
+    make_db(db).close()
+    index = tmp_path / "index.html"
+    index.write_text("x", encoding="utf-8")
+    reader = PanelReader(db)
+    server = PanelServer(reader=reader, index_path=index, port=0, clock_ms=lambda: T0)
+    server.start()
+    try:
+        server.refresh_now()
+        server._refresh_stop.set()
+        original = reader.decision_facts
+        calls = []
+        reader.decision_facts = lambda *args, **kwargs: calls.append((args, kwargs))
+        assert get(server, "/api/state")[0] == 200
+        assert get(server, "/api/state")[0] == 200
+        assert calls == []
+        reader.decision_facts = original
+    finally:
+        server.shutdown()
+
+
 def test_missing_database_is_a_calm_answer_and_busy_is_a_retry(tmp_path):
     index = tmp_path / "index.html"
     index.write_text("x", encoding="utf-8")
     server = PanelServer(reader=PanelReader(tmp_path / "none.db"), index_path=index, port=0)
     server.start()
     try:
+        server.refresh_now()
         assert json.loads(get(server, "/api/state")[2]) == {"estado": "sem_banco"}
         assert json.loads(get(server, "/api/events")[2]) == {"estado": "sem_banco", "events": [], "last_id": 0}
     finally:
@@ -87,10 +112,12 @@ def test_missing_database_is_a_calm_answer_and_busy_is_a_retry(tmp_path):
     conn = make_db(db)
     server = PanelServer(reader=PanelReader(db, timeout_s=0.05), index_path=index, port=0)
     server.start()
+    server.refresh_now()
+    before = get(server, "/api/state")[2]
     conn.execute("BEGIN EXCLUSIVE")
     try:
         status, headers, _ = get(server, "/api/state")
-        assert status == 503 and headers["Retry-After"] == "1"
+        assert status == 200 and json.loads(get(server, "/api/state")[2]) == json.loads(before)
     finally:
         conn.rollback()
         server.shutdown()

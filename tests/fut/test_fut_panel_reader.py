@@ -29,8 +29,8 @@ def test_every_read_leaves_the_file_byte_identical_and_needs_no_mode_stamp(tmp_p
     conn.close()
     before = digest(db)
     r = PanelReader(db)
-    r.last_decision(); r.event_rows(None, 10); r.latest_snapshot(); r.price_series(0)
-    r.position("main"); r.balances(); r.fills("main"); r.model_costs(0, 10_000)
+    r.last_decision(); r.event_rows(None, 10); r.decision_facts(0)
+    r.position("main"); r.balances(); r.fills("main")
     assert digest(db) == before
     assert not list(tmp_path.glob("fut.db-*"))  # no journal/wal side files
 
@@ -73,14 +73,12 @@ def test_snapshot_series_position_balances_fills_and_costs(tmp_path):
     set_balance(conn, "main", 449.5)
     set_balance(conn, "shadow:random", 450.25)
     r = PanelReader(db)
-    assert r.latest_snapshot()["bid"] == 109.0
-    series = r.price_series(1005, max_points=3)
-    assert len(series) <= 3 and series[0] == [1005, 106.0] and all(ts >= 1005 for ts, _ in series)
+    facts = r.decision_facts(0)
+    assert [fact for fact in facts if fact["kind"] == "jev"][-1]["bid"] == 109.0
     assert r.position("main")["side"] == "short" and r.position("shadow:jev_only") is None
     assert r.balances() == {"main": 449.5, "shadow:random": 450.25}
     assert [f["kind"] for f in r.fills("main")] == ["open"] and r.fills("main", since_ms=1501) == []
     assert r.fills("main", day="1970-01-01")[0]["fee"] == 0.01
-    assert r.model_costs(0, 10_000) == {"jev": pytest.approx(0.01), "llm": 0.5}
 
 
 def test_database_without_tables_reads_as_empty(tmp_path):
