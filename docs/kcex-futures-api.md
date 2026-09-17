@@ -41,8 +41,8 @@ Ping `{"method":"ping"}` → `{"channel":"pong"}`.
 - In a 2-minute live sample on 2026-09-17, the book stayed synchronized with 0 version gaps.
   `T=2` printed at the ask 126 times versus 18 at the bid; `T=1` printed at the bid 61 times
   versus 13 at the ask. The minority prints are consistent with the book moving between frames.
-- **Inferred, not documented:** deal `T=2` printed at the ask (aggressive buy) and `T=1` at the
-  bid (aggressive sell) in every captured sample, WS and REST.
+- **Inferred, not documented:** deal `T=2` is mapped to aggressive buy and `T=1` to aggressive
+  sell from the majority of prints (see the counts above), across the captured WS and REST data.
 - Volumes are in contracts (`× contractSize` BTC).
 
 Samples: `tests/fixtures/kcex_fut_ws_frames.jsonl`.
