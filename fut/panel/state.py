@@ -11,6 +11,7 @@ from fut.panel.narrate import narrate
 from fut.panel.reader import PanelReader
 
 MIN_ALIVE_MS = 10_000
+MAX_ALIVE_MS = 120_000
 OLD_PRICE_MS = 15_000
 SERIES_MS = 2 * 3_600_000
 MAX_TRADES = 50
@@ -32,8 +33,9 @@ class StateData:
     position: dict[str, Any] | None
 
 
-def alive_threshold_ms(jev_every_s: float) -> int:
-    return int(max(MIN_ALIVE_MS, 5 * float(jev_every_s) * 1000))
+def alive_threshold_ms(jev_every_s: float, jev_gap_ms: float | None = None) -> int:
+    base_s = (jev_gap_ms / 1000 if jev_gap_ms is not None else jev_every_s)
+    return min(MAX_ALIVE_MS, max(MIN_ALIVE_MS, int(3 * base_s * 1000)))
 
 
 def _day_of(ts_ms: int) -> str:
@@ -108,6 +110,8 @@ def build_state_from_data(cache: PanelCache, data: StateData, *, now_ms: int, ma
     since = now_ms - SERIES_MS
     view = cache.view(day=day, since_ms=since)
     last_id, last_ts = view["last_id"], view["last_ts_ms"]
+    jev_gap_ms = view["jev_gap_ms"]
+    cadencia_s = None if jev_gap_ms is None else round(jev_gap_ms / 1000)
     price = _price(view["snapshot"], now_ms)
     gross = sum(f["pnl"] for f in data.today)
     fees = sum(f["fee"] for f in data.today)
@@ -130,8 +134,9 @@ def build_state_from_data(cache: PanelCache, data: StateData, *, now_ms: int, ma
         "agora_ms": now_ms,
         "carregando": view["loading"],
         "jev": view["jev"],
-        "bot": {"vivo": bool(last_id) and now_ms - last_ts <= alive_threshold_ms(jev_every_s),
-                "ultimo_sinal_s": (now_ms - last_ts) // 1000 if last_id else None},
+        "bot": {"vivo": bool(last_id) and now_ms - last_ts <= alive_threshold_ms(jev_every_s, jev_gap_ms),
+                "ultimo_sinal_s": (now_ms - last_ts) // 1000 if last_id else None,
+                "cadencia_s": cadencia_s},
         "preco": price,
         "posicao": _position(data.position, price, now_ms, max_hold_s),
         "dia": {"bruto": gross, "taxas": fees, "funding": funding, "custo_jev": view["day_costs"]["jev"],

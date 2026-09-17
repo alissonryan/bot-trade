@@ -108,6 +108,63 @@ def test_jev_failure_streak_resets_on_success_across_chunks():
     assert cache.jev_failure_reason == "Jev recusou por limite de uso"
 
 
+def _gap(cache):
+    return cache.view(day="1970-01-02", since_ms=0)["jev_gap_ms"]
+
+
+def test_jev_gaps_come_only_from_consecutive_jev_rows():
+    reader = CountingReader([
+        fact(1, DAY),
+        fact(2, DAY + 1_000, kind="jev_ab"),
+        fact(3, DAY + 2_000, kind="llm"),
+        fact(4, DAY + 10_000),
+        fact(5, DAY + 10_500, kind="jev_ab"),
+        fact(6, DAY + 20_000),
+        fact(7, DAY + 20_100, kind="llm"),
+        fact(8, DAY + 30_000),
+        fact(9, DAY + 40_000),
+        fact(10, DAY + 50_000),
+        fact(11, DAY + 50_000),  # non-positive: ignored
+        fact(12, DAY + 49_000),  # negative: ignored
+    ])
+    cache = PanelCache(reader)
+    cache.refresh(now_ms=DAY + 50_000)
+    assert _gap(cache) == 10_000
+
+
+def test_jev_gap_is_the_median_not_the_mean():
+    rows = [fact(i + 1, DAY + i * 10_000) for i in range(20)]
+    rows.append(fact(21, DAY + 19 * 10_000 + 3_600_000))
+    cache = PanelCache(CountingReader(rows))
+    cache.refresh(now_ms=DAY + 4_000_000)
+    assert _gap(cache) == 10_000
+
+
+def test_jev_gap_is_none_until_five_gaps():
+    rows = [fact(i + 1, DAY + i * 10_000) for i in range(5)]
+    cache = PanelCache(CountingReader(rows))
+    cache.refresh(now_ms=DAY + 50_000)
+    assert _gap(cache) is None
+    cache.reader.rows.append(fact(6, DAY + 50_000))
+    cache.refresh(now_ms=DAY + 50_000)
+    assert _gap(cache) == 10_000
+
+
+def test_jev_gaps_survive_chunked_refresh_and_clear_on_database_replace():
+    rows = [fact(i + 1, DAY + i * 10_000) for i in range(8)]
+    reader = CountingReader(rows)
+    cache = PanelCache(reader, limit=3)
+    cache.refresh(now_ms=DAY + 80_000)
+    cache.refresh(now_ms=DAY + 80_000)
+    cache.refresh(now_ms=DAY + 80_000)
+    assert _gap(cache) == 10_000
+    reader.rows = [fact(1, DAY + 100_000)]
+    cache.refresh(now_ms=DAY + 100_000)
+    assert cache.last_id == 0 and _gap(cache) is None
+    cache.refresh(now_ms=DAY + 100_000)
+    assert _gap(cache) is None
+
+
 def test_jev_ab_costs_are_jev_costs_but_never_market_or_health_facts():
     reader = CountingReader([
         fact(1, DAY, cost_usd=0.1, bid=100.0, ask=102.0, error="503 unavailable"),

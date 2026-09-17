@@ -25,6 +25,13 @@ def test_page_distinguishes_a_recent_silent_market_from_a_stopped_bot():
     assert "> 120" in html
 
 
+def test_page_appends_observed_cadence_on_the_alive_banner():
+    html = PAGE.read_text(encoding="utf-8")
+    assert "o bot avalia a cada ~" in html
+    assert "s.bot.cadencia_s" in html
+    assert "● BOT RODANDO — último sinal há" in html
+
+
 def test_page_handles_null_position_levels_and_sustained_database_failures():
     html = PAGE.read_text(encoding="utf-8")
     assert 'p.stop == null ? "—"' in html and 'p.liq == null ? "—"' in html
