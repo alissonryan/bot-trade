@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import random
+import time
 
 from fut import collar
 from fut.ledger import PaperLedger
@@ -21,7 +22,8 @@ SHADOW_BOOKS = ("shadow:jev_only", "shadow:random")
 
 
 class ShadowBooks:
-    def __init__(self, store: FutStore, settings: FutSettings, spec: ContractSpec, *, rng=None):
+    def __init__(self, store: FutStore, settings: FutSettings, spec: ContractSpec, *, rng=None,
+                 process_start_ms: int | None = None):
         self.store = store
         self.settings = settings
         self.spec = spec
@@ -29,7 +31,9 @@ class ShadowBooks:
             "jev_only": PaperLedger(store, settings, spec, book="shadow:jev_only"),
             "random": PaperLedger(store, settings, spec, book="shadow:random"),
         }
-        self.rng = rng or random.Random(settings.shadow_seed)
+        start_ms = int(time.time() * 1000) if process_start_ms is None else int(process_start_ms)
+        self.effective_seed = settings.shadow_seed ^ start_ms
+        self.rng = rng or random.Random(self.effective_seed)
         self._entry_side: str | None = None
         self._entry_streak = 0
 

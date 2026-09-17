@@ -160,6 +160,25 @@ def test_jev_audit_keeps_main_position_state_for_replay(tmp_path):
     assert store.decisions("jev")[0]["payload"]["state"]["position"]["side"] == "long"
 
 
+def test_random_entry_rate_uses_persisted_main_opens_and_real_jev_rows(tmp_path):
+    loop, store, _, _, _ = build(tmp_path)
+    for index in range(4):
+        store.log_decision("jev", {"model": "jev-real", "error": None}, ts_ms=T0 + index)
+    for index in range(2):
+        store.add_fut_fill("main", ts_ms=T0 + index, kind="open", side="long", contracts=1, price=1.0,
+                           fee=0.0, funding=0.0, pnl=0.0, reason="entry")
+
+    assert loop._random_entry_rate() == 0.5
+
+
+def test_jev_audit_records_effective_random_seed(tmp_path):
+    loop, store, _, _, _ = build(tmp_path)
+
+    loop._jev(make_snap(ts_ms=T0), T0)
+
+    assert store.decisions("jev")[0]["payload"]["random_seed"] == loop.shadow.effective_seed
+
+
 def test_cost_gate_blocks_flat_entry_wake_before_llm_and_is_logged(tmp_path):
     settings = FutSettings(max_spread_bps=0.01)
     loop, store, _, _, calls = build(tmp_path, settings=settings)

@@ -12,9 +12,10 @@ def verdict(direction="up", exit_now=None):
     return JevVerdict(direction, 0.9, 0.9, 0.5, "trend", exit_now, 100, 1000, "jev-1")
 
 
-def books(tmp_path, seed=7):
+def books(tmp_path, seed=7, process_start_ms=None):
     store = FutStore(tmp_path / "fut.db")
-    return store, ShadowBooks(store, FutSettings(), SPEC, rng=random.Random(seed))
+    return store, ShadowBooks(store, FutSettings(shadow_seed=seed), SPEC, rng=random.Random(seed),
+                                process_start_ms=process_start_ms)
 
 
 def test_jev_only_opens_on_entry_signal_and_closes_on_exit_signal(tmp_path):
@@ -101,3 +102,11 @@ def test_shadow_entry_rate_uses_its_own_recent_open_count(tmp_path):
     shadow.settings = FutSettings(max_entries_per_hour=1)
     out = shadow.on_jev(verdict(), make_snap(), now_ms=1_000, wake="entry_signal", entry_rate=0.0)
     assert out["jev_only"] == "entry_rate"
+
+
+def test_shadow_effective_seed_changes_with_process_start(tmp_path):
+    _, first = books(tmp_path / "a", process_start_ms=1000)
+    _, second = books(tmp_path / "b", process_start_ms=2000)
+
+    assert first.effective_seed == (7 ^ 1000)
+    assert second.effective_seed == (7 ^ 2000)

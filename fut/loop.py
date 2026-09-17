@@ -79,12 +79,13 @@ class FutLoop:
         self.budget = budget
         self.events = events
         self._clock = clock_ms
+        self._process_start_ms = self._clock()
         self._llm_decide = llm_decide
         self._store_factory = store_factory or (lambda: FutStore(store.path))
         self._llm_store = None
         self.market = MarketState(settings, spec)
         self.ledger = PaperLedger(store, settings, spec)
-        self.shadow = ShadowBooks(store, settings, spec, rng=rng)
+        self.shadow = ShadowBooks(store, settings, spec, rng=rng, process_start_ms=self._process_start_ms)
         self.dispatcher = Dispatcher(settings, run_llm=self._run_llm, clock_ms=clock_ms, submit=submit)
         self._next = {"jev": 0, "bars": 0, "funding": 0, "ticker": 0, "spec": clock_ms() + SPEC_EVERY_MS}
         self._book_dirty = True
@@ -186,6 +187,12 @@ class FutLoop:
         start, end = day_bounds_ms(day)
         return self.store.day_net("main", day) - self.store.model_cost_between(start, end)
 
+    def _random_entry_rate(self) -> float:
+        real_jev = sum(1 for decision in self.store.decisions("jev")
+                       if decision["payload"].get("model") != "mock")
+        main_opens = sum(1 for fill in self.store.fut_fills("main") if fill["kind"] == "open")
+        return min(1.0, main_opens / real_jev) if real_jev else 0.0
+
     def _resolve(self, snap, now: int) -> None:
         res = self.dispatcher.poll(mid_now=snap.mid)
         if res is None:
@@ -255,7 +262,7 @@ class FutLoop:
             if wake_gate is not None:
                 wake = None
         shadow = self.shadow.on_jev(verdict, snap, now_ms=now, wake=wake,
-                                    entry_rate=self.llm_entries / self.jev_evals)
+                                    entry_rate=self._random_entry_rate())
         dispatch = None
         if wake:
             self.budget.roll_day(day_of(now))
@@ -268,5 +275,5 @@ class FutLoop:
             "input_tokens": verdict.input_tokens, "cost_usd": cost, "answers": verdict.answers(),
             "state": verdict.state,
             "wake": wake, "dispatch": dispatch, "shadow": shadow, "snapshot": snap.compact(),
-            "streak": self._entry_streak, "gate": wake_gate,
+            "streak": self._entry_streak, "gate": wake_gate, "random_seed": self.shadow.effective_seed,
         }, ts_ms=now)
