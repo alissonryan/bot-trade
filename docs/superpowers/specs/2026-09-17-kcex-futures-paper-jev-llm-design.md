@@ -22,7 +22,7 @@ Operar o contrato perpétuo **BTC_USDT** da KCEX em **paper**, num horizonte de 
 | Ordens | Mercado nas duas pontas (taker). |
 | Proteções | Stop obrigatório + tempo máximo (5 min) + saída antecipada pela LLM, o que vier primeiro. |
 | Dinheiro | Saldo inicial 450 USDT; margem 20 USDT por trade; máx. 5% do saldo; 1 posição; perda diária igual à do spot. |
-| Chamada da LLM | Imediata ao disparo do Jev; uma por vez; 10 s de espera só após HOLD (sinal oposto ou saída ignoram); timeout 8 s; descarte se o preço andar > 5 bps entre disparo e resposta. |
+| Chamada da LLM | Imediata ao disparo do Jev; uma por vez; 10 s de espera após HOLD ou falha/não-decisão da LLM (sinal oposto ou saída ignoram); timeout 8 s; descarte se o preço andar > 5 bps entre disparo e resposta. |
 | Edge | Critério rígido abaixo, fixado antes de começar. |
 | Arquitetura | Pacote novo `fut/` ao lado de `bot/`; banco e lock próprios. |
 
@@ -113,7 +113,7 @@ Toda etapa grava uma linha de auditoria com: snapshot, perguntas e respostas do 
 
 - Nenhuma chamada em andamento → chama já.
 - Chamada em andamento → disparo ignorado e gravado como `suppressed_inflight`.
-- Última resposta foi HOLD há menos de 10 s → disparo de mesmo tipo e direção gravado como `suppressed_cooldown`. Direção oposta ou `exit_signal` não esperam.
+- Última resposta foi HOLD ou falha/não-decisão há menos de 10 s → disparo de mesmo tipo e direção gravado como `suppressed_cooldown`. Direção oposta ou `exit_signal` não esperam.
 - `LONG`/`SHORT` com resposta após 8 s → descartada (`stale_timeout`).
 - `LONG`/`SHORT` com `|mid_resposta − mid_disparo| / mid_disparo > 5 bps` → descartada (`stale_price`).
 - `CLOSE` nunca é descartado por atraso ou movimento de preço: descartar uma saída prenderia o bot na posição. A latência fica registrada do mesmo jeito.
@@ -125,15 +125,17 @@ Para `LONG`/`SHORT`, na ordem:
 1. mercado fresco (último frame < 5 s) e contrato `state=0`;
 2. sem posição aberta;
 3. perda diária não atingida (realizado + não realizado + taxas + funding + custo de Jev e LLM do dia);
-4. `confidence` finita e ≥ `FUT_MIN_CONFIDENCE`;
-5. ATR de 1 min válido;
-6. alavancagem entre 1 e min(3, `maxLeverage`);
-7. preço executável: `ask1` para LONG, `bid1` para SHORT, com fallback para `lastPrice` só se o lado estiver ausente, multiplicado (LONG) ou dividido (SHORT) pelo slippage; slippage negativo recusado;
-8. `nocional_alvo = min(FUT_MARGIN_USDT, FUT_MAX_BALANCE_PCT × saldo) × alavancagem`;
-9. `contratos = floor(nocional_alvo / (preço × contractSize))`; `< minVol` → `dust`;
-10. stop: distância `clamp(ATR_MULT × ATR, MIN_STOP_PCT × preço, MAX_STOP_PCT × preço)`, arredondado a `priceUnit` (LONG para baixo, SHORT para cima, mesma convenção do spot);
-11. liquidação estimada (ver ledger); se a distância do stop **já arredondado** for `> 0,5 × distância_liquidação` → `liq_too_close`;
-12. margem requerida ≤ saldo livre.
+4. `cost_gate`: spread máximo e movimento esperado mínimo, quando configurados;
+5. limite de entradas por hora (`FUT_MAX_ENTRIES_PER_HOUR`), quando configurado;
+6. `confidence` finita e ≥ `FUT_MIN_CONFIDENCE`;
+7. ATR de 1 min válido;
+8. alavancagem entre 1 e min(3, `maxLeverage`);
+9. preço executável: `ask1` para LONG, `bid1` para SHORT, com fallback para `lastPrice` só se o lado estiver ausente, multiplicado (LONG) ou dividido (SHORT) pelo slippage; slippage negativo recusado;
+10. `nocional_alvo = min(FUT_MARGIN_USDT, FUT_MAX_BALANCE_PCT × saldo) × alavancagem`;
+11. `contratos = floor(nocional_alvo / (preço × contractSize))`; `< minVol` → `dust`;
+12. stop: distância `clamp(ATR_MULT × ATR, MIN_STOP_PCT × preço, MAX_STOP_PCT × preço)`, arredondado a `priceUnit` (LONG para baixo, SHORT para cima, mesma convenção do spot);
+13. liquidação estimada (ver ledger); se a distância do stop **já arredondado** for `> 0,5 × distância_liquidação` → `liq_too_close`;
+14. margem requerida ≤ saldo livre.
 
 `CLOSE` passa sempre que há posição (nada no collar prende o bot numa posição).
 

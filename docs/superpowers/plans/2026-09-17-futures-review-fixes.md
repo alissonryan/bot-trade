@@ -140,4 +140,3 @@
 - [ ] Run `./scripts/test` after the last change and read the complete exit status and test count.
 - [ ] Check `git diff --check`, prohibited paths, and `git log --oneline main..HEAD`.
 - [ ] Report one line per A1–A4, M1–M6, B1–B6 as fixed/documented/skipped with reason, then print `CODEX_DONE`.
-
