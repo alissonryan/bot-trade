@@ -122,6 +122,17 @@ def test_mock_jev_follows_momentum_and_flow():
     assert v.model == "mock" and v.exit_now is None
 
 
+def test_mock_jev_can_match_trend_or_volatile_regime_filter():
+    settings = FutSettings(wake_regimes=("trend", "volatile"))
+    snap = make_snap(returns_bps={"10s": 20.0, "60s": 6.0}, imbalance=0.5,
+                     flow={"30s": {"buy": 10, "sell": 0, "cvd": 10, "vwap": 76000.0}})
+
+    v = MockJev(settings).evaluate(snap, FutPosition(), now_ms=0)
+
+    assert v.regime in settings.wake_regimes
+    assert entry_qualifies(v, threshold=settings.wake_threshold, regimes=settings.wake_regimes) == "long"
+
+
 def test_make_jev_uses_mock_without_key():
     assert isinstance(make_jev(FutSettings()), MockJev)
     assert isinstance(make_jev(FutSettings(typesafe_api_key="k", jev_model="mock")), MockJev)

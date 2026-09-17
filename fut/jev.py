@@ -61,10 +61,11 @@ class MockJev:
         direction = "up" if p_up >= 0.6 else "down" if p_up <= 0.4 else "flat"
         beats = min(1.0, abs(snap.returns_bps.get("60s") or 0.0) / max(self.settings.move_cost_bps, 1e-9))
         aligned = 1.0 if (flow > 0) == (r10 > 0) else 0.0
+        regime = "trend" if abs(signal) >= 8 else "volatile" if abs(signal) >= 3 else "range"
         exit_now = None
         if position.is_open():
             exit_now = 1 - p_up if position.side == "long" else p_up
-        return JevVerdict(direction, min(1.0, abs(p_up - 0.5) * 2), beats, aligned, "range", exit_now,
+        return JevVerdict(direction, min(1.0, abs(p_up - 0.5) * 2), beats, aligned, regime, exit_now,
                           0, 0, "mock", state=state)
 
 
