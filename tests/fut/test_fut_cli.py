@@ -48,3 +48,22 @@ def test_run_takes_the_lock_then_logs_then_runs(tmp_path, monkeypatch):
     calls = patch_run(tmp_path, monkeypatch)
     assert cli.main(["run", "--max-seconds", "1"]) == cli.EXIT_OK
     assert calls == {"run": [1.0], "log": [tmp_path / "futures.log"]}
+
+
+def test_wakegrid_reads_without_futstore_mode_stamp_or_write(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "fut.db"
+    import json
+    import sqlite3
+
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE fut_decisions (id INTEGER PRIMARY KEY, ts_ms INTEGER, kind TEXT, payload TEXT)")
+    conn.execute("INSERT INTO fut_decisions(ts_ms, kind, payload) VALUES (?,?,?)", (1, "jev", json.dumps({
+        "error": "timeout", "answers": None, "snapshot": {},
+    })))
+    conn.commit()
+    conn.close()
+    before = db.stat().st_mtime_ns
+    monkeypatch.setattr(cli, "DB_PATH", db)
+    assert cli.main(["wakegrid"]) == cli.EXIT_OK
+    assert "WARNING: in-sample" in capsys.readouterr().out
+    assert db.stat().st_mtime_ns == before

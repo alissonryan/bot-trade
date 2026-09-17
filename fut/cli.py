@@ -26,6 +26,7 @@ from fut.loop import FutLoop, Unmonitored, now_ms, seed_budget, start_ws_thread
 from fut.report import evaluate, render, summarize
 from fut.settings import FutSettings
 from fut.store import FutStore, day_of
+from fut.wakegrid import grid_results, load_rows, render_grid
 from kcex.fapi import FuturesPublic
 
 log = logging.getLogger("fut")
@@ -50,10 +51,14 @@ def main(argv: list[str] | None = None) -> int:
     run = sub.add_parser("run", help="run the futures paper loop")
     run.add_argument("--max-seconds", type=float, default=None)
     sub.add_parser("report", help="print the edge report")
+    wakegrid = sub.add_parser("wakegrid", help="replay stored Jev wakes in read-only mode")
+    wakegrid.add_argument("--since-ms", type=int, default=None)
     args = parser.parse_args(argv)
     setup_logging(os.getenv("LOG_LEVEL", "INFO"))
     if args.cmd == "report":
         return report()
+    if args.cmd == "wakegrid":
+        return wakegrid_report(args.since_ms)
     try:
         with InstanceLock(LOCK_PATH):
             add_file_logging(LOG_PATH)
@@ -77,6 +82,14 @@ def report() -> int:
     settings = FutSettings.from_env()
     summary = summarize(store, settings)
     print(render(summary, evaluate(summary, settings)))
+    return EXIT_OK
+
+
+def wakegrid_report(since_ms: int | None) -> int:
+    if not DB_PATH.exists():
+        print(f"no futures paper database yet at {DB_PATH}")
+        return EXIT_OK
+    print(render_grid(grid_results(load_rows(DB_PATH, since_ms=since_ms))))
     return EXIT_OK
 
 
