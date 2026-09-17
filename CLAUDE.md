@@ -89,6 +89,8 @@ FUT_WAKE_THRESHOLD is a first guess to be tuned from paper data, never from the 
 
 `python -m fut panel` serves a read-only page (plain Portuguese: price, position, narrated decisions, day result, trades, shadow scoreboard) for whoever is watching. It is a separate process: `mode=ro` SQLite connections opened and closed per read, bounded incremental reads by decision id, one refresher shared by all browser tabs, never `FutStore`, no `futures.lock`, no `.env`, no KCEX/Jev/LLM call, GET only, and it hard-rejects any host but `127.0.0.1`/`localhost`/`::1`. The short reads can still contend briefly with a writer and are retried on the next refresh; during cold start the totals are incomplete and the page says so with `carregando`; the price is the snapshot the bot already logs (~2.5 s), not a second exchange connection; the position card is an estimate, the ledger fills are the record.
 
+`FUT_JEV_AB` is opt-in and off by default. It makes a second Jev call using semantic labels after the normal call, roughly doubling Jev cost (about US$0.36/day extra at 10 s). The labeled call is observational only: `jev_ab` rows never drive orders, wakes, gates, the ledger, or shadow books. Use `python -m fut jevscore [--since-ms N]` for the read-only comparison; an A/B window is a new configuration and cannot count toward the edge criterion.
+
 ## Resume (2026-09-04, safety revision)
 
 - `main` @ `d6ae9c9` (public WS + local chart) merged with PR #1 `fix/live-safety-observability` (live invariants, fill-by-balance, reconcile, observability). Paper works; live login **not** in `.env`.
