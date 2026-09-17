@@ -188,6 +188,16 @@ def test_cost_gate_blocks_flat_entry_wake_before_llm_and_is_logged(tmp_path):
     assert payload["wake"] is None and payload["gate"] == "spread_too_wide"
 
 
+def test_atr_gate_blocks_entry_wake_before_llm(tmp_path):
+    loop, store, _, _, calls = build(tmp_path)
+
+    loop._jev(make_snap(ts_ms=T0, atr_1m=None), T0)
+
+    payload = store.decisions("jev")[0]["payload"]
+    assert calls == []
+    assert payload["wake"] is None and payload["gate"] == "atr"
+
+
 def test_hold_trades_nothing(tmp_path):
     loop, store, events, _, _ = build(tmp_path, action="HOLD")
     ws_tick(events)

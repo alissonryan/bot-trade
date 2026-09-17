@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import queue
 import threading
 import time
@@ -258,7 +259,10 @@ class FutLoop:
                            regimes=self.settings.wake_regimes)
         wake_gate = None
         if wake == "entry_signal":
-            wake_gate = collar.cost_gate(snap, spec=self.spec, settings=self.settings)
+            if snap.atr_1m is None or not math.isfinite(snap.atr_1m) or snap.atr_1m <= 0:
+                wake_gate = "atr"
+            else:
+                wake_gate = collar.cost_gate(snap, spec=self.spec, settings=self.settings)
             if wake_gate is not None:
                 wake = None
         shadow = self.shadow.on_jev(verdict, snap, now_ms=now, wake=wake,
