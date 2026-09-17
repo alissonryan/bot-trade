@@ -36,6 +36,20 @@ def test_falls_back_to_ticker_quotes_when_book_unsynced():
     assert s.imbalance == 0.0
 
 
+def test_stale_ws_uses_rest_ticker_quotes_and_neutral_depth():
+    m = market(stale_market_s=5)
+    m.load_book(10, [(100.0, 5)], [(100.1, 4)])
+    m.apply(ticker(100.0, 100.1), now_ms=0, source="ws")
+    m.apply(ticker(97.95, 98.05, last=98.0), now_ms=6_000, source="rest")
+
+    s = m.snapshot(6_000)
+
+    assert (s.bid, s.ask, s.last) == (97.95, 98.05, 98.0)
+    assert s.depth_bps == {"5": {"bid": 0, "ask": 0}, "10": {"bid": 0, "ask": 0},
+                           "25": {"bid": 0, "ask": 0}}
+    assert s.imbalance == 0.0
+
+
 def test_fair_funding_and_next_settle():
     m = market()
     m.apply(ticker(100.0, 100.0, fair=100.2, funding=0.0002), now_ms=0)

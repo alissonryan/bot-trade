@@ -61,12 +61,15 @@ class MarketState:
     def set_bars(self, rows) -> None:
         self.bars_1m = [Bar(t=int(r[0]), o=r[1], h=r[2], l=r[3], c=r[4], v=r[5]) for r in rows]
 
-    def bid(self) -> float:
-        best = self.book.best_bid() if self.book.synced else None
+    def _book_usable(self, now_ms: int | None) -> bool:
+        return self.book.synced and (now_ms is None or now_ms - self.ws_last_ms <= self.settings.stale_market_s * 1000)
+
+    def bid(self, now_ms: int | None = None) -> float:
+        best = self.book.best_bid() if self._book_usable(now_ms) else None
         return best if best else (self.ticker.bid if self.ticker else 0.0)
 
-    def ask(self) -> float:
-        best = self.book.best_ask() if self.book.synced else None
+    def ask(self, now_ms: int | None = None) -> float:
+        best = self.book.best_ask() if self._book_usable(now_ms) else None
         return best if best else (self.ticker.ask if self.ticker else 0.0)
 
     def last(self) -> float:
@@ -74,12 +77,12 @@ class MarketState:
             return self.ticker.last
         return self.deals[-1].price if self.deals else 0.0
 
-    def mid(self) -> float:
-        bid, ask = self.bid(), self.ask()
+    def mid(self, now_ms: int | None = None) -> float:
+        bid, ask = self.bid(now_ms), self.ask(now_ms)
         return (bid + ask) / 2 if bid > 0 and ask > 0 else self.last()
 
     def _record_mid(self, now_ms: int) -> None:
-        mid = self.mid()
+        mid = self.mid(now_ms)
         if mid > 0:
             self.mids.append((now_ms, mid))
         while self.mids and self.mids[0][0] < now_ms - MID_HISTORY_MS:
@@ -92,12 +95,12 @@ class MarketState:
         return None
 
     def snapshot(self, now_ms: int) -> FutSnapshot:
-        bid, ask, last = self.bid(), self.ask(), self.last()
+        bid, ask, last = self.bid(now_ms), self.ask(now_ms), self.last()
         mid = (bid + ask) / 2 if bid > 0 and ask > 0 else last
         spread_bps = (ask - bid) / mid * 10_000 if bid > 0 and ask > 0 and mid > 0 else 0.0
 
-        bids = self.book.levels("bid") if self.book.synced else []
-        asks = self.book.levels("ask") if self.book.synced else []
+        bids = self.book.levels("bid") if self._book_usable(now_ms) else []
+        asks = self.book.levels("ask") if self._book_usable(now_ms) else []
         depth: dict[str, dict[str, float]] = {}
         for band in DEPTH_BANDS_BPS:
             lo, hi = mid * (1 - band / 10_000), mid * (1 + band / 10_000)

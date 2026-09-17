@@ -30,8 +30,9 @@ class Clock:
 
 
 class FakeRest:
-    def __init__(self, ticker_error=False):
+    def __init__(self, ticker_error=False, ticker_bid=76000.0, ticker_ask=76000.1, ticker_fair=76000.0):
         self.calls, self.ticker_error = [], ticker_error
+        self.ticker_bid, self.ticker_ask, self.ticker_fair = ticker_bid, ticker_ask, ticker_fair
 
     def depth(self, symbol, limit=50):
         self.calls.append("depth")
@@ -49,7 +50,8 @@ class FakeRest:
         self.calls.append("ticker")
         if self.ticker_error:
             raise KcexError("down", {"status": None})
-        return FutTicker(0, 76000.0, 76000.0, 76000.1, 76000.0, 76000.0, 0.0001)
+        return FutTicker(0, self.ticker_bid, self.ticker_bid, self.ticker_ask,
+                         self.ticker_fair, self.ticker_fair, 0.0001)
 
     def contract_detail(self, symbol):
         return SPEC
@@ -204,11 +206,28 @@ def test_entry_after_price_moved_is_logged_not_traded(tmp_path):
 
 
 def test_stale_ws_uses_rest_prices_but_skips_jev_when_flat(tmp_path):
-    rest = FakeRest()
+    rest = FakeRest(ticker_bid=97.95, ticker_ask=98.05, ticker_fair=76000.0)
     loop, _, _, _, _ = build(tmp_path, rest=rest)
     loop.step()
     assert {"depth", "klines", "funding", "ticker"} <= set(rest.calls)
+    snapshot = loop.market.snapshot(T0)
+    assert (snapshot.bid, snapshot.ask) == (97.95, 98.05)
     assert loop.jev.calls == 0
+
+
+def test_time_limit_exit_uses_fresh_rest_quotes_when_ws_is_stale(tmp_path):
+    rest = FakeRest(ticker_bid=97.95, ticker_ask=98.05)
+    loop, store, _, clock, _ = build(tmp_path, rest=rest)
+    loop.ledger.open(FutGate(True, "ok_open", "LONG", side="long", contracts=2, price=76000.0,
+                             notional=2 * 0.0001 * 76000.0, margin=15.2, stop=1.0, liq=1.0, leverage=1),
+                     now_ms=T0)
+    clock.now = T0 + 301_000
+
+    loop.step()
+
+    close = next(fill for fill in store.fut_fills("main") if fill["kind"] == "close")
+    assert close["reason"] == "time_limit"
+    assert close["price"] == pytest.approx(97.95 * (1 - 0.0002))
 
 
 def test_unmonitored_open_position_halts(tmp_path):
