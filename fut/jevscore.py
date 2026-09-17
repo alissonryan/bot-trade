@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+from bisect import bisect_left, bisect_right
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -59,14 +60,16 @@ def _probability_up(direction: str, confidence: float, probabilities: dict[str, 
     return 0.5, "confidence fallback (not a probability)"
 
 
-def _future_mid(rows: list[dict[str, Any]], ts_ms: int) -> float | None:
+def _future_mid(rows: list[dict[str, Any]], ts_ms: int, *, timestamps: list[int] | None = None) -> float | None:
+    timestamps = timestamps if timestamps is not None else [int(row["ts_ms"]) for row in rows]
+    start = bisect_left(timestamps, ts_ms + MIN_FUTURE_MS)
+    end = bisect_right(timestamps, ts_ms + MAX_FUTURE_MS)
     candidates = []
-    for row in rows:
+    for row in rows[start:end]:
         later = int(row["ts_ms"]) - ts_ms
-        if MIN_FUTURE_MS <= later <= MAX_FUTURE_MS:
-            mid = _mid(row.get("payload"))
-            if mid is not None:
-                candidates.append((abs(later - HORIZON_MS), later, int(row.get("id", 0)), mid))
+        mid = _mid(row.get("payload"))
+        if mid is not None:
+            candidates.append((abs(later - HORIZON_MS), later, int(row.get("id", 0)), mid))
     return min(candidates)[-1] if candidates else None
 
 
@@ -79,6 +82,7 @@ def _empty() -> dict[str, Any]:
 
 def score_rows(rows: Iterable[dict[str, Any]], *, since_ms: int | None = None) -> dict[str, dict[str, Any]]:
     rows = sorted(rows, key=lambda row: (int(row["ts_ms"]), int(row.get("id", 0))))
+    timestamps = [int(row["ts_ms"]) for row in rows]
     results = {variant: _empty() for variant in VARIANTS}
     source_rows = {variant: [row for row in rows if row.get("kind") == variant and
                              (since_ms is None or int(row["ts_ms"]) >= since_ms)]
@@ -87,7 +91,7 @@ def score_rows(rows: Iterable[dict[str, Any]], *, since_ms: int | None = None) -
         scored = []
         for row in variant_rows:
             answer = _answer(row.get("payload"))
-            future = _future_mid(rows, int(row["ts_ms"]))
+            future = _future_mid(rows, int(row["ts_ms"]), timestamps=timestamps)
             if answer is None or future is None:
                 results[variant]["rows_skipped"] += 1
                 continue
