@@ -80,3 +80,35 @@ def test_wakegrid_reads_without_futstore_mode_stamp_or_write(tmp_path, monkeypat
     assert cli.main(["wakegrid"]) == cli.EXIT_OK
     assert "WARNING: in-sample" in capsys.readouterr().out
     assert db.stat().st_mtime_ns == before
+
+
+def test_panel_serves_read_only_without_lock_or_database(tmp_path, monkeypatch):
+    seen = {}
+
+    class FakeServer:
+        def __init__(self, *, reader, index_path, host, port, max_hold_s, jev_every_s):
+            seen.update(path=reader.path, index=index_path, host=host, port=port, max_hold_s=max_hold_s,
+                        jev_every_s=jev_every_s)
+
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+        def shutdown(self):
+            seen["shutdown"] = True
+
+    monkeypatch.setattr(cli, "DB_PATH", tmp_path / "none.db")
+    monkeypatch.setattr(cli, "LOCK_PATH", tmp_path / "futures.lock")
+    monkeypatch.setattr(cli, "PanelServer", FakeServer)
+    monkeypatch.setenv("FUT_MAX_HOLD_SECONDS", "120")
+    monkeypatch.setenv("FUT_JEV_EVERY_SECONDS", "3")
+    assert cli.main(["panel", "--port", "9999"]) == cli.EXIT_OK
+    assert seen["path"] == tmp_path / "none.db" and seen["port"] == 9999 and seen["host"] == "127.0.0.1"
+    assert seen["index"] == cli.PANEL_INDEX and seen["max_hold_s"] == 120.0 and seen["jev_every_s"] == 3.0
+    assert seen["shutdown"] is True
+    assert not (tmp_path / "none.db").exists() and not (tmp_path / "futures.lock").exists()
+
+
+def test_panel_refuses_a_non_loopback_host(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "DB_PATH", tmp_path / "none.db")
+    assert cli.main(["panel", "--host", "0.0.0.0"]) == 1
+    assert "loopback" in capsys.readouterr().out

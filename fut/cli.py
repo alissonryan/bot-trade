@@ -1,4 +1,4 @@
-"""``python -m fut run [--max-seconds N]`` and ``python -m fut report``.
+"""``python -m fut run [--max-seconds N]``, ``python -m fut report`` and ``python -m fut panel``.
 
 Paper only: no private route, no KCEX_TOKEN, no order is ever sent.
 
@@ -23,6 +23,8 @@ from bot.cli import AlreadyRunning, InstanceLock, add_file_logging, setup_loggin
 from bot.store import StoreIdentityMismatch
 from fut.jev import make_jev
 from fut.loop import FutLoop, Unmonitored, now_ms, seed_budget, start_ws_thread
+from fut.panel.reader import PanelReader
+from fut.panel.server import PanelServer
 from fut.report import ReadOnlyReportStore, evaluate, render, summarize
 from fut.settings import FutSettings
 from fut.store import FutStore, day_of
@@ -37,6 +39,8 @@ DB_PATH = DATA_DIR / "futures-paper.db"
 LOCK_PATH = DATA_DIR / "futures.lock"
 LOG_PATH = DATA_DIR / "futures.log"
 ENV_PATH = ROOT / ".env"
+PANEL_INDEX = ROOT / "panel" / "index.html"
+PANEL_PORT = 8766
 
 EXIT_OK = 0
 EXIT_ALREADY_RUNNING = 3
@@ -54,12 +58,17 @@ def main(argv: list[str] | None = None) -> int:
     report_parser.add_argument("--since-ms", type=int, default=None)
     wakegrid = sub.add_parser("wakegrid", help="replay stored Jev wakes in read-only mode")
     wakegrid.add_argument("--since-ms", type=int, default=None)
+    panel_cmd = sub.add_parser("panel", help="serve the read-only local panel (loopback only)")
+    panel_cmd.add_argument("--host", default="127.0.0.1")
+    panel_cmd.add_argument("--port", type=int, default=PANEL_PORT)
     args = parser.parse_args(argv)
     setup_logging(os.getenv("LOG_LEVEL", "INFO"))
     if args.cmd == "report":
         return report(args.since_ms)
     if args.cmd == "wakegrid":
         return wakegrid_report(args.since_ms)
+    if args.cmd == "panel":
+        return panel(args.host, args.port)
     try:
         with InstanceLock(LOCK_PATH):
             add_file_logging(LOG_PATH)
@@ -94,6 +103,36 @@ def wakegrid_report(since_ms: int | None) -> int:
         print(f"no futures paper database yet at {DB_PATH}")
         return EXIT_OK
     print(render_grid(grid_results(load_rows(DB_PATH, since_ms=since_ms))))
+    return EXIT_OK
+
+
+def panel(host: str, port: int) -> int:
+    # Read-only and lock-free on purpose: it runs beside `fut run`. It reads no .env; the only
+    # setting it needs is the max hold for the "closes in" estimate, taken from its own environment.
+    try:
+        max_hold_s = float(os.getenv("FUT_MAX_HOLD_SECONDS", "300"))
+    except ValueError:
+        max_hold_s = 300.0
+    try:
+        jev_every_s = float(os.getenv("FUT_JEV_EVERY_SECONDS", "2.0"))
+    except ValueError:
+        jev_every_s = 2.0
+    try:
+        server = PanelServer(reader=PanelReader(DB_PATH), index_path=PANEL_INDEX, host=host, port=port,
+                             max_hold_s=max_hold_s, jev_every_s=jev_every_s)
+    except ValueError as exc:
+        print(f"panel is loopback only: {exc}")
+        return 1
+    print(f"futures panel (read-only): http://{host}:{port}/  — Ctrl+C to stop")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    except OSError as exc:
+        print(f"cannot serve on {host}:{port}: {exc}")
+        return 1
+    finally:
+        server.shutdown()
     return EXIT_OK
 
 

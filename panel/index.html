@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bot de Futuros</title>
+<style>
+  :root { --bg:#0e1116; --card:#171b22; --line:#262c36; --text:#e6e9ee; --dim:#8b94a3;
+          --good:#3fb98a; --bad:#ef6b6b; --warn:#e6b450; --accent:#6ea8fe; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.45 -apple-system, system-ui, sans-serif; }
+  main { max-width:1100px; margin:0 auto; padding:16px; display:grid; gap:14px; }
+  #status { padding:10px 14px; border-radius:10px; font-weight:600; background:var(--card); }
+  #status.vivo { color:var(--good); } #status.parado { background:#3a1b1b; color:var(--bad); }
+  #status.espera { color:var(--warn); }
+  .row { display:grid; gap:14px; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; }
+  .label { color:var(--dim); font-size:12px; text-transform:uppercase; letter-spacing:.06em; }
+  .big { font-size:34px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .mid { font-size:20px; font-weight:650; }
+  .dim { color:var(--dim); } .good { color:var(--good); } .bad { color:var(--bad); } .warn { color:var(--warn); }
+  canvas { width:100%; height:260px; display:block; }
+  #feed { font:13px/1.5 ui-monospace, Menlo, monospace; height:320px; overflow:auto; background:#0a0d11;
+          border-radius:8px; padding:10px; }
+  #feed div { white-space:pre-wrap; border-bottom:1px solid #12161c; padding:2px 0; }
+  .info { color:var(--text); } .bom { color:var(--good); } .ruim { color:var(--bad); } .alerta { color:var(--warn); }
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); font-size:13px; }
+  th { color:var(--dim); font-weight:500; }
+  .scroll { overflow-x:auto; }
+</style>
+</head>
+<body>
+<main>
+  <div id="status" class="espera">Conectando…</div>
+
+  <div class="row">
+    <div class="card"><div class="label">Bitcoin agora (BTC/USDT futuro)</div>
+      <div id="preco" class="big">—</div><div id="preco-nota" class="dim"></div></div>
+    <div class="card"><div class="label">Posição do bot</div>
+      <div id="pos-titulo" class="mid">—</div><div id="pos-detalhe" class="dim"></div></div>
+    <div class="card"><div class="label">Resultado de hoje (já com custos)</div>
+      <div id="dia" class="big">—</div><div id="dia-detalhe" class="dim"></div></div>
+  </div>
+
+  <div class="card"><div class="label">Preço nas últimas 2 horas · ▲ comprou · ▼ vendeu · ✕ saiu</div>
+    <canvas id="grafico" width="1060" height="260"></canvas></div>
+
+  <div class="card"><div class="label">O que o bot está fazendo</div><div id="feed"></div></div>
+
+  <div class="row">
+    <div class="card"><div class="label">Placar (dinheiro de mentira, mesmos preços)</div>
+      <div class="scroll"><table><thead><tr><th>Quem</th><th>Saldo</th><th>Operações</th><th>Resultado</th></tr></thead>
+      <tbody id="placar"></tbody></table></div>
+      <div id="placar-nota" class="warn" style="margin-top:6px;font-size:12px"></div>
+      <div class="dim" style="margin-top:6px;font-size:12px">O resultado do bot já desconta o custo das IAs; os outros dois não usam LLM.</div></div>
+    <div class="card"><div class="label">Últimas operações do bot</div>
+      <div class="scroll"><table><thead><tr><th>Hora</th><th>Lado</th><th>Entrou</th><th>Saiu</th><th>Durou</th><th>Por quê</th><th>Resultado</th></tr></thead>
+      <tbody id="trades"></tbody></table></div></div>
+  </div>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const num = (x, d) => Number(x).toLocaleString("pt-BR", { minimumFractionDigits: d, maximumFractionDigits: d });
+const usd = (x, d = 4) => (x >= 0 ? "+" : "−") + num(Math.abs(x), d) + " USD";
+const hora = (ms) => new Date(ms).toLocaleTimeString("pt-BR");
+const mmss = (s) => Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+const tone = (x) => (x > 0 ? "good" : x < 0 ? "bad" : "dim");
+const MOTIVOS = { llm_close: "LLM mandou fechar", stop: "bateu no stop", time_limit: "tempo máximo",
+                  liquidation: "liquidação", jev_signal: "sinal do Jev" };
+const MAX_FEED = 300;
+let lastId = null;
+let stateFailures = 0;
+
+function cell(tr, text, cls) { const td = document.createElement("td"); td.textContent = text; if (cls) td.className = cls; tr.appendChild(td); }
+
+function renderState(s) {
+  const st = $("status");
+  if (s.estado === "sem_banco") { st.className = "espera"; st.textContent = "O bot ainda não rodou: não há dados para mostrar."; return; }
+  if (s.estado === "carregando") { st.className = "espera"; st.textContent = "Carregando histórico do bot…"; return; }
+  if (s.estado === "banco_invalido") { st.className = "espera"; st.textContent = "Banco de dados ilegível"; return; }
+  if (s.estado === "erro_painel") { st.className = "espera"; st.textContent = "Erro no painel — tentando de novo…"; return; }
+  if (Math.abs(Date.now() - s.agora_ms) > 10000) {
+    st.className = "parado";
+    st.textContent = "Painel travado: dados de " + hora(s.agora_ms) + " — reinicie o python -m fut panel";
+  } else if (s.bot.vivo) { st.className = "vivo"; st.textContent = "● BOT RODANDO — último sinal há " + s.bot.ultimo_sinal_s + " s"; }
+  else if (s.bot.ultimo_sinal_s === null) { st.className = "espera"; st.textContent = "Aguardando o primeiro sinal do bot…"; }
+  else {
+    st.className = s.bot.ultimo_sinal_s > 120 ? "parado" : "espera";
+    st.textContent = "SEM SINAL DO BOT há " + mmss(s.bot.ultimo_sinal_s) + " — se o mercado estiver parado isso é normal; se passar de alguns minutos, confira o terminal";
+  }
+
+  if (s.preco) {
+    $("preco").textContent = num(s.preco.mid, 1);
+    $("preco-nota").textContent = s.preco.velho ? "⚠ preço velho (o bot não está gravando)" : "atualiza a cada ~2,5 s";
+    $("preco-nota").className = s.preco.velho ? "warn" : "dim";
+  }
+  const p = s.posicao;
+  if (!p) { $("pos-titulo").textContent = "SEM POSIÇÃO"; $("pos-titulo").className = "mid dim"; $("pos-detalhe").textContent = "o bot está esperando uma boa chance"; }
+  else {
+    const lado = p.lado === "long" ? "COMPRADO (ganha se subir)" : "VENDIDO (ganha se cair)";
+    $("pos-titulo").textContent = lado + " a " + num(p.entrada, 1);
+    $("pos-titulo").className = "mid " + tone(p.resultado_usd || 0);
+    const res = p.resultado_usd === null ? "" : usd(p.resultado_usd) + " (" + num(p.resultado_bps, 1) + " bps) · ";
+    const stop = p.stop == null ? "—" : num(p.stop, 1);
+    const liq = p.liq == null ? "—" : num(p.liq, 1);
+    $("pos-detalhe").textContent = res + "stop " + stop + " · liq. " + liq + " · aberta há " + mmss(p.aberto_ha_s) + " · fecha em ~" + mmss(p.fecha_em_s);
+  }
+  $("dia").textContent = usd(s.dia.liquido); $("dia").className = "big " + tone(s.dia.liquido);
+  $("dia-detalhe").textContent = "operações " + usd(s.dia.bruto) + " · taxas −" + num(s.dia.taxas + s.dia.funding, 4) +
+    " · IA −" + num(s.dia.custo_jev + s.dia.custo_llm, 4);
+  $("dia-detalhe").className = s.carregando ? "warn" : "dim";
+  $("dia-detalhe").textContent += s.carregando ? " · carregando histórico — os totais ainda estão incompletos" : "";
+
+  const placar = $("placar"); placar.replaceChildren();
+  for (const b of s.placar) { const tr = document.createElement("tr");
+    cell(tr, b.nome); cell(tr, b.saldo === null ? "—" : num(b.saldo, 2)); cell(tr, String(b.trades)); cell(tr, usd(b.liquido), tone(b.liquido)); placar.appendChild(tr); }
+  $("placar-nota").textContent = s.carregando ? "carregando histórico — os totais ainda estão incompletos" : "";
+  const trades = $("trades"); trades.replaceChildren();
+  for (const t of s.trades) { const tr = document.createElement("tr");
+    cell(tr, hora(t.entrada_ms)); cell(tr, t.lado === "long" ? "comprou" : "vendeu"); cell(tr, num(t.entrada, 1)); cell(tr, num(t.saida, 1));
+    cell(tr, mmss(t.duracao_s)); cell(tr, MOTIVOS[t.motivo] || t.motivo); cell(tr, usd(t.liquido_usd), tone(t.liquido_usd)); trades.appendChild(tr); }
+  drawChart(s.serie);
+}
+
+function drawChart(serie) {
+  const c = $("grafico"), g = c.getContext("2d"), W = c.width, H = c.height, pad = 8;
+  g.clearRect(0, 0, W, H);
+  const pts = serie.pontos;
+  if (pts.length < 2) { g.fillStyle = "#8b94a3"; g.font = "14px system-ui"; g.fillText("Ainda sem preços suficientes para o gráfico.", 12, 24); return; }
+  const t0 = pts[0][0], t1 = pts[pts.length - 1][0];
+  let lo = Infinity, hi = -Infinity;
+  for (const [, v] of pts) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+  for (const m of serie.marcas) { lo = Math.min(lo, m.preco); hi = Math.max(hi, m.preco); }
+  if (hi === lo) { hi += 1; lo -= 1; }
+  const x = (t) => pad + (t - t0) / Math.max(1, t1 - t0) * (W - 2 * pad);
+  const y = (v) => H - pad - (v - lo) / (hi - lo) * (H - 2 * pad);
+  g.strokeStyle = "#6ea8fe"; g.lineWidth = 1.5; g.beginPath();
+  pts.forEach(([t, v], i) => (i ? g.lineTo(x(t), y(v)) : g.moveTo(x(t), y(v)))); g.stroke();
+  g.font = "16px system-ui"; g.textAlign = "center";
+  for (const m of serie.marcas) { if (m.ts_ms < t0) continue;
+    const glyph = m.tipo === "entrada_long" ? "▲" : m.tipo === "entrada_short" ? "▼" : "✕";
+    g.fillStyle = m.tipo === "entrada_long" ? "#3fb98a" : m.tipo === "entrada_short" ? "#ef6b6b" : "#e6b450";
+    g.fillText(glyph, x(m.ts_ms), y(m.preco) + 5); }
+  g.fillStyle = "#8b94a3"; g.font = "11px system-ui"; g.textAlign = "left";
+  g.fillText(num(hi, 1), 4, 12); g.fillText(num(lo, 1), 4, H - 2);
+}
+
+function renderEvents(page) {
+  const feed = $("feed");
+  for (const e of page.events) {
+    const line = document.createElement("div"); line.className = e.tom;
+    line.textContent = hora(e.ts_ms) + "  " + e.texto; feed.prepend(line);
+  }
+  while (feed.childElementCount > MAX_FEED) feed.lastElementChild.remove();
+  if (typeof page.last_id === "number") lastId = page.last_id;
+}
+
+async function tick() {
+  try {
+    const [s, e] = await Promise.all([
+      fetch("/api/state").then((r) => (r.ok ? r.json() : null)),
+      fetch("/api/events" + (lastId === null ? "" : "?after=" + lastId)).then((r) => (r.ok ? r.json() : null)),
+    ]);
+    if (s) {
+      stateFailures = 0;
+      try { renderState(s); } catch (err) { /* keep the feed running */ }
+    }           // a 503 (banco ocupado) keeps the last good screen
+    else {
+      stateFailures += 1;
+      if (stateFailures >= 5) { $("status").className = "espera"; $("status").textContent = "Painel sem resposta do banco — tentando de novo…"; }
+    }
+    if (e && e.events) {
+      try { renderEvents(e); } catch (err) { /* a bad event cannot stop polling */ }
+    }
+  } catch (err) {
+    stateFailures += 1;
+    if (stateFailures >= 5) { $("status").className = "espera"; $("status").textContent = "Painel sem resposta do banco — tentando de novo…"; }
+  }
+  setTimeout(tick, 1000);
+}
+tick();
+</script>
+</body>
+</html>
