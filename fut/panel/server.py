@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from bot.chart_server import _origin_is_loopback, require_loopback
 from fut.panel.cache import PanelCache
-from fut.panel.reader import PanelDbBusy, PanelDbMissing, PanelReader
+from fut.panel.reader import PanelDbBroken, PanelDbBusy, PanelDbMissing, PanelReader
 from fut.panel.state import build_events, build_state
 
 _LOOPBACK_HOST_PREFIXES = ("127.0.0.1", "localhost", "[::1]")
@@ -79,6 +79,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(200, empty if parts.path == "/api/state" else {**empty, "events": [], "last_id": 0})
         except PanelDbBusy:
             self._json(503, {"error": "database busy"}, {"Retry-After": "1"})
+        except PanelDbBroken:
+            empty = {"estado": "banco_invalido"}
+            self._json(200, empty if parts.path == "/api/state" else {**empty, "events": [], "last_id": 0})
 
 
 class PanelServer:
@@ -110,6 +113,8 @@ class PanelServer:
             body = json.dumps({"estado": "sem_banco"}, ensure_ascii=False).encode("utf-8")
         except PanelDbBusy:
             return
+        except PanelDbBroken:
+            body = json.dumps({"estado": "banco_invalido"}, ensure_ascii=False).encode("utf-8")
         with self._state_lock:
             self.state_bytes = body
 

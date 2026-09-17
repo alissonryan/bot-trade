@@ -13,3 +13,5 @@ def test_panel_docs_describe_incremental_shared_refresh_and_possible_contention(
     assert "one refresher" in panel_docs and "all browser tabs" in panel_docs
     assert "can still contend" in panel_docs
     assert "lock-free" not in panel_docs
+    assert "Evento <kind>" in agents
+    assert "shows raw" not in agents

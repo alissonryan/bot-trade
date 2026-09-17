@@ -14,6 +14,7 @@ OLD_PRICE_MS = 15_000
 SERIES_MS = 2 * 3_600_000
 MAX_TRADES = 50
 FIRST_PAGE = 200
+EVENT_PAGE = 500
 # BTC_USDT contractSize from docs/kcex-futures-api.md. The panel never calls KCEX, so it cannot
 # read ContractSpec; the position card is an estimate, the ledger fills are the record.
 CONTRACT_SIZE = 0.0001
@@ -129,8 +130,8 @@ def build_events(reader: PanelReader, after_id: int | None) -> dict[str, Any]:
     # Read the high-water mark FIRST and bound the page by it: a row the bot inserts between
     # the two queries is picked up by the next poll instead of being skipped forever.
     last_id, _ = reader.last_decision()
-    rows = reader.event_rows(after_id, last_id, FIRST_PAGE if after_id is None else 500)
-    if rows and after_id is not None and len(rows) == 500:
+    rows = reader.event_rows(after_id, last_id, FIRST_PAGE if after_id is None else EVENT_PAGE)
+    if rows and after_id is not None and len(rows) == EVENT_PAGE:
         last_id = rows[-1]["id"]  # a full page: continue from its end on the next poll
     closes = {}
     if rows:

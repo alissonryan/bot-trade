@@ -40,6 +40,7 @@ def test_quiet_jev_row_is_not_an_event():
     (dict(wake="reversal_signal", dispatch="dispatched"), "info", ["virou contra a posição"]),
     (dict(gate="spread_too_wide"), "info", ["ignorado", "spread"]),
     (dict(gate="move_lt_cost"), "info", ["ignorado", "não paga o custo"]),
+    (dict(gate="atr"), "info", ["sem medida de volatilidade"]),
     (dict(error="TimeoutError: slow"), "alerta", ["Jev falhou", "TimeoutError"]),
 ])
 def test_jev_rows(payload, tom, parts):
@@ -98,7 +99,8 @@ def test_close_fill_adds_the_money_result_and_sets_the_tone():
 
 def test_unmonitored_and_unknown_and_malformed_rows():
     assert narrate(row("unmonitored", {"silent_ms": 61000}))["tom"] == "alerta"
-    assert narrate(row("brand_new_kind", {})) is None
+    assert narrate(row("brand_new_kind", {})) == {"id": 7, "ts_ms": 1000, "tipo": "evento", "tom": "info",
+                                                    "texto": "Evento brand_new_kind"}
     assert narrate(row("llm", {})) is not None  # empty payload: "não respondeu", never raises
     assert narrate({"id": 1, "ts_ms": 1, "kind": "jev", "payload": {"wake": "entry_signal", "answers": "oops"}})
 

@@ -30,6 +30,10 @@ class PanelDbBusy(RuntimeError):
     """The database is locked by a writer right now; try again."""
 
 
+class PanelDbBroken(RuntimeError):
+    """The database is present but SQLite cannot read it."""
+
+
 class DecisionFacts(list):
     """A bounded fact page with the table high-water mark from the same read."""
 
@@ -64,7 +68,10 @@ class PanelReader:
         except sqlite3.OperationalError as exc:
             if "no such table" in str(exc):
                 return []
-            raise PanelDbBusy(str(exc)) from exc
+            message = str(exc).lower()
+            if "locked" in message or "busy" in message:
+                raise PanelDbBusy(str(exc)) from exc
+            raise PanelDbBroken(str(exc)) from exc
 
     def last_decision(self) -> tuple[int, int]:
         rows = self._query("SELECT id, ts_ms FROM fut_decisions ORDER BY id DESC LIMIT 1")

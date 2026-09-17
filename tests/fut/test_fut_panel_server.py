@@ -5,6 +5,7 @@ import urllib.request
 import pytest
 
 from fut.panel.reader import PanelReader
+from fut.panel.reader import PanelDbBroken
 from fut.panel.server import PanelServer
 from tests.fut.panel_db import add_decision, make_db
 
@@ -120,4 +121,19 @@ def test_missing_database_is_a_calm_answer_and_busy_is_a_retry(tmp_path):
         assert status == 200 and json.loads(get(server, "/api/state")[2]) == json.loads(before)
     finally:
         conn.rollback()
+        server.shutdown()
+
+
+def test_broken_database_is_a_calm_invalid_database_answer(tmp_path):
+    db = tmp_path / "fut.db"
+    make_db(db).close()
+    index = tmp_path / "index.html"
+    index.write_text("x", encoding="utf-8")
+    server = PanelServer(reader=PanelReader(db), index_path=index, port=0)
+    server.cache.refresh = lambda **kwargs: (_ for _ in ()).throw(PanelDbBroken("broken"))
+    server.refresh_now()
+    server.start()
+    try:
+        assert json.loads(get(server, "/api/state")[2]) == {"estado": "banco_invalido"}
+    finally:
         server.shutdown()

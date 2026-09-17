@@ -16,6 +16,7 @@ DISPATCH = {
 WAKE_GATES = {
     "spread_too_wide": "spread alto demais",
     "move_lt_cost": "o movimento esperado não paga o custo",
+    "atr": "sem medida de volatilidade",
 }
 COLLAR_RULES = {
     "stale": "preço desatualizado", "contract_state": "contrato fora de negociação",
@@ -123,7 +124,8 @@ def narrate(row: dict, net_usd: float | None = None) -> dict | None:
     elif kind == "unmonitored":
         told, tipo = ("BOT PAROU: posição aberta ficou sem preço por tempo demais", "alerta"), "alerta"
     else:
-        return None
+        return {"id": row.get("id"), "ts_ms": row.get("ts_ms"), "tipo": "evento", "tom": "info",
+                "texto": f"Evento {str(kind)}"}
     if told is None:
         return None
     text, tone = told

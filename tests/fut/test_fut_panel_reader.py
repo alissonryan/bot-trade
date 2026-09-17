@@ -3,7 +3,7 @@ import sqlite3
 
 import pytest
 
-from fut.panel.reader import PanelDbBusy, PanelDbMissing, PanelReader
+from fut.panel.reader import PanelDbBroken, PanelDbBusy, PanelDbMissing, PanelReader
 from tests.fut.panel_db import SNAP, add_decision, add_fill, make_db, set_balance, set_position
 
 QUIET = {"wake": None, "error": None, "gate": None, "snapshot": SNAP(bid=100.0, ask=102.0)}
@@ -99,3 +99,15 @@ def test_locked_database_is_a_named_busy_error(tmp_path):
             PanelReader(db, timeout_s=0.05).last_decision()
     finally:
         conn.rollback()
+
+
+def test_non_busy_operational_error_is_a_broken_database(tmp_path, monkeypatch):
+    db = tmp_path / "fut.db"
+    make_db(db).close()
+
+    def broken_connect(*args, **kwargs):
+        raise sqlite3.OperationalError("malformed database image")
+
+    monkeypatch.setattr(sqlite3, "connect", broken_connect)
+    with pytest.raises(PanelDbBroken):
+        PanelReader(db).last_decision()

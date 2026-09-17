@@ -70,12 +70,14 @@ const MOTIVOS = { llm_close: "LLM mandou fechar", stop: "bateu no stop", time_li
                   liquidation: "liquidação", jev_signal: "sinal do Jev" };
 const MAX_FEED = 300;
 let lastId = null;
+let stateFailures = 0;
 
 function cell(tr, text, cls) { const td = document.createElement("td"); td.textContent = text; if (cls) td.className = cls; tr.appendChild(td); }
 
 function renderState(s) {
   const st = $("status");
   if (s.estado === "sem_banco") { st.className = "espera"; st.textContent = "O bot ainda não rodou: não há dados para mostrar."; return; }
+  if (s.estado === "banco_invalido") { st.className = "espera"; st.textContent = "Banco de dados ilegível"; return; }
   if (s.bot.vivo) { st.className = "vivo"; st.textContent = "● BOT RODANDO — último sinal há " + s.bot.ultimo_sinal_s + " s"; }
   else if (s.bot.ultimo_sinal_s === null) { st.className = "espera"; st.textContent = "Aguardando o primeiro sinal do bot…"; }
   else {
@@ -95,7 +97,9 @@ function renderState(s) {
     $("pos-titulo").textContent = lado + " a " + num(p.entrada, 1);
     $("pos-titulo").className = "mid " + tone(p.resultado_usd || 0);
     const res = p.resultado_usd === null ? "" : usd(p.resultado_usd) + " (" + num(p.resultado_bps, 1) + " bps) · ";
-    $("pos-detalhe").textContent = res + "stop " + num(p.stop, 1) + " · aberta há " + mmss(p.aberto_ha_s) + " · fecha em ~" + mmss(p.fecha_em_s);
+    const stop = p.stop == null ? "—" : num(p.stop, 1);
+    const liq = p.liq == null ? "—" : num(p.liq, 1);
+    $("pos-detalhe").textContent = res + "stop " + stop + " · liq. " + liq + " · aberta há " + mmss(p.aberto_ha_s) + " · fecha em ~" + mmss(p.fecha_em_s);
   }
   $("dia").textContent = usd(s.dia.liquido); $("dia").className = "big " + tone(s.dia.liquido);
   $("dia-detalhe").textContent = "operações " + usd(s.dia.bruto) + " · taxas −" + num(s.dia.taxas + s.dia.funding, 4) +
@@ -150,10 +154,15 @@ async function tick() {
       fetch("/api/state").then((r) => (r.ok ? r.json() : null)),
       fetch("/api/events" + (lastId === null ? "" : "?after=" + lastId)).then((r) => (r.ok ? r.json() : null)),
     ]);
-    if (s) renderState(s);           // a 503 (banco ocupado) keeps the last good screen
+    if (s) { stateFailures = 0; renderState(s); }           // a 503 (banco ocupado) keeps the last good screen
+    else {
+      stateFailures += 1;
+      if (stateFailures >= 5) { $("status").className = "espera"; $("status").textContent = "Painel sem resposta do banco — tentando de novo…"; }
+    }
     if (e && e.events) renderEvents(e);
   } catch (err) {
-    $("status").className = "parado"; $("status").textContent = "Painel desconectado — tentando de novo…";
+    stateFailures += 1;
+    if (stateFailures >= 5) { $("status").className = "espera"; $("status").textContent = "Painel sem resposta do banco — tentando de novo…"; }
   }
   setTimeout(tick, 1000);
 }
