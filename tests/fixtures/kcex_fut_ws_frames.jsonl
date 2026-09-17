@@ -1,0 +1,10 @@
+{"channel":"rs.sub.depth","data":"success","ts":1789614158917}
+{"channel":"pong","data":1789614158917,"ts":1789614158917}
+{"symbol":"BTC_USDT","data":{"symbol":"BTC_USDT","lastPrice":76353.8,"riseFallRate":0.0079,"fairPrice":76354.2,"indexPrice":76387.6,"volume24":966351187,"amount24":7332559529.68844,"maxBidPrice":87845.7,"minAskPrice":64929.4,"lower24Price":75025.1,"high24Price":76744.1,"timestamp":1789614158008,"bid1":76353.8,"ask1":76353.9,"holdVol":4310237,"riseFallValue":600.2,"fundingRate":0.000071,"zone":"UTC+8","riseFallRates":[0.0079,-0.0251,0.1916,0.2124,0.0799,-0.3453],"riseFallRatesOfTimezone":[0.0065,0.0023,0.0079]},"channel":"push.ticker","ts":1789614158008}
+{"symbol":"BTC_USDT","data":{"symbol":"BTC_USDT","price":76355.6},"channel":"push.fair.price","ts":1789614158366}
+{"symbol":"BTC_USDT","data":{"p":76356.9,"v":2200,"T":2,"O":3,"M":1,"t":1789614159388},"channel":"push.deal","ts":1789614159388}
+{"symbol":"BTC_USDT","data":{"p":76356.8,"v":1499,"T":1,"O":3,"M":1,"t":1789614161493},"channel":"push.deal","ts":1789614161493}
+{"symbol":"BTC_USDT","data":{"asks":[[76356.9,1286398,4]],"bids":[],"version":14452998433},"channel":"push.depth","ts":1789614159371}
+{"symbol":"BTC_USDT","data":{"asks":[[76356.9,1709998,5]],"bids":[],"version":14452998434},"channel":"push.depth","ts":1789614159371}
+{"symbol":"BTC_USDT","data":{"asks":[],"bids":[[76356.8,1206199,4]],"version":14452998435},"channel":"push.depth","ts":1789614159372}
+{"symbol":"BTC_USDT","data":{"asks":[],"bids":[[76352.9,0,0]],"version":14452998671},"channel":"push.depth","ts":1789614162701}
