@@ -117,7 +117,7 @@ def test_unmonitored_and_unknown_and_malformed_rows():
      "Jev sobrecarregado (servidor da TypeSafe com excesso de demanda)"),
     ("TypeSafeInternalServerError: POST https://api.typesafe.ai/v1/systemone: 503 The model is unavailable. "
      "If this issue persists, please contact support. (request_id=req_01a0b0ba5c987a32965d338a6decfbbb)",
-     "Jev com erro no servidor da TypeSafe"),
+     "Jev fora do ar (servidor da TypeSafe indisponível)"),
     ("TypeSafeAPITimeoutError: Request timed out (timeout=2.0).", "Jev demorou demais para responder"),
     ("request timed out", "Jev demorou demais para responder"),
     ("429 rate limit request_id=req-123", "Jev recusou por limite de uso"),
@@ -133,13 +133,32 @@ def test_jev_errors_are_short_plain_and_grouped(error, expected):
 
 
 @pytest.mark.parametrize("error, expected", [
-    ("500 Internal Server Error", "Jev com erro no servidor da TypeSafe"),
-    ("502 Bad Gateway", "Jev com erro no servidor da TypeSafe"),
-    ("504 Gateway Timeout", "Jev com erro no servidor da TypeSafe"),
+    ("500 Internal Server Error", "Jev falhou (500 Internal Server Error)"),
+    ("502 Bad Gateway", "Jev falhou (502 Bad Gateway)"),
+    ("504 Gateway Failure", "Jev falhou (504 Gateway Failure)"),
     ("TypeSafeAPIOError: connect failed", "Jev sem conexão"),
 ])
 def test_jev_server_and_connection_error_families_are_localized(error, expected):
     assert narrate(jev(error=error))["texto"] == expected
+
+
+@pytest.mark.parametrize("error, expected", [
+    ("Request timed out (timeout=500)", "Jev demorou demais para responder"),
+    ("latency_ms=512", "Jev falhou"),
+    ("attempts=503", "Jev falhou"),
+])
+def test_jev_error_numbers_in_metadata_do_not_become_server_errors(error, expected):
+    assert narrate(jev(error=error))["texto"] == expected
+
+
+def test_only_sdk_status_after_a_colon_is_a_generic_server_error():
+    assert narrate(jev(error="TypeSafeInternalServerError: POST https://api.typesafe.ai/v1/systemone: 502 Bad Gateway"))["texto"] == "Jev com erro no servidor da TypeSafe"
+
+
+def test_fallback_keeps_safe_text_only():
+    event = narrate(jev(error="weird failure with token=abc123 and https://x.io/y"))
+    assert event["texto"] == "Jev falhou (weird failure with and)"
+    assert "=" not in event["texto"] and "://" not in event["texto"]
 
 
 def test_non_error_events_have_no_group():
