@@ -14,9 +14,22 @@ def test_report_without_database_creates_nothing(tmp_path, monkeypatch, capsys):
 def test_report_prints_the_criterion(tmp_path, monkeypatch, capsys):
     db = tmp_path / "fut.db"
     FutStore(db).close()
+    before = db.stat().st_mtime_ns
     monkeypatch.setattr(cli, "DB_PATH", db)
+    monkeypatch.setattr(cli, "FutStore", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("report opened FutStore")))
     assert cli.main(["report"]) == cli.EXIT_OK
     assert "Edge criterion: FAILED" in capsys.readouterr().out
+    assert db.stat().st_mtime_ns == before
+
+
+def test_report_prints_the_requested_window(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "fut.db"
+    FutStore(db).close()
+    monkeypatch.setattr(cli, "DB_PATH", db)
+
+    assert cli.main(["report", "--since-ms", "12345"]) == cli.EXIT_OK
+
+    assert "window: since_ms >= 12345" in capsys.readouterr().out
 
 
 def test_report_refuses_a_database_from_another_mode(tmp_path, monkeypatch):

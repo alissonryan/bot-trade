@@ -3,14 +3,78 @@
 from __future__ import annotations
 
 import random
+import json
+import sqlite3
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from pathlib import Path
 from statistics import mean
+from typing import Any
 
+from bot.store import StoreIdentityMismatch
 from fut.settings import FutSettings
-from fut.store import FutStore, day_bounds_ms, day_of
+from fut.store import day_bounds_ms, day_of
 
 BOOKS = ("main", "shadow:jev_only", "shadow:random")
+
+
+class ReadOnlyReportStore:
+    """Minimal report view opened with SQLite's read-only URI; never migrates or commits."""
+
+    def __init__(self, path: Path, *, since_ms: int | None = None):
+        uri = f"file:{Path(path).resolve()}?mode=ro"
+        self._conn = sqlite3.connect(uri, uri=True)
+        self.since_ms = since_ms
+        row = self._conn.execute(
+            "SELECT value FROM kv WHERE key='store_mode'"
+        ).fetchone() if self._has_table("kv") else None
+        if row and row[0] != "futures-paper":
+            self.close()
+            raise StoreIdentityMismatch(
+                f"{path} was written in {row[0]!r} mode and cannot be reported as 'futures-paper'"
+            )
+
+    def _has_table(self, name: str) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone() is not None
+
+    def close(self) -> None:
+        self._conn.close()
+
+    def decisions(self, kind: str | None = None) -> list[dict[str, Any]]:
+        clauses, params = [], []
+        if kind is not None:
+            clauses.append("kind=?")
+            params.append(kind)
+        if self.since_ms is not None:
+            clauses.append("ts_ms >= ?")
+            params.append(self.since_ms)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._conn.execute(
+            f"SELECT id, ts_ms, kind, payload FROM fut_decisions{where} ORDER BY id", params
+        ).fetchall()
+        return [{"id": r[0], "ts_ms": r[1], "kind": r[2], "payload": json.loads(r[3])} for r in rows]
+
+    def fut_fills(self, book: str) -> list[dict[str, Any]]:
+        clauses, params = ["book=?"], [book]
+        if self.since_ms is not None:
+            clauses.append("ts_ms >= ?")
+            params.append(self.since_ms)
+        rows = self._conn.execute(
+            "SELECT id, ts_ms, day, kind, side, contracts, price, fee, funding, pnl, reason "
+            f"FROM fut_fills WHERE {' AND '.join(clauses)} ORDER BY id", params
+        ).fetchall()
+        keys = ("id", "ts_ms", "day", "kind", "side", "contracts", "price", "fee", "funding", "pnl", "reason")
+        return [dict(zip(keys, row)) for row in rows]
+
+    def model_cost_between(self, start_ms: int, end_ms: int) -> float:
+        start = max(start_ms, self.since_ms) if self.since_ms is not None else start_ms
+        row = self._conn.execute(
+            "SELECT COALESCE(SUM(json_extract(payload, '$.cost_usd')), 0) FROM fut_decisions "
+            "WHERE kind IN ('jev', 'llm') AND ts_ms >= ? AND ts_ms < ?", (start, end_ms)
+        ).fetchone()
+        return float(row[0] or 0.0)
 
 
 @dataclass(frozen=True)
@@ -19,7 +83,7 @@ class EdgeCriterion:
     min_days: float = 14.0
 
 
-def book_totals(store: FutStore, book: str) -> dict:
+def book_totals(store, book: str) -> dict:
     fills = store.fut_fills(book)
     trades, current = [], None
     daily: dict[str, float] = defaultdict(float)
@@ -57,14 +121,14 @@ def _percentile(sorted_values, q):
     return sorted_values[min(len(sorted_values) - 1, int(q * (len(sorted_values) - 1)))]
 
 
-def summarize(store: FutStore, settings: FutSettings) -> dict:
+def summarize(store, settings: FutSettings) -> dict:
     decisions = store.decisions()
     jev = [d for d in decisions if d["kind"] == "jev"]
     llm = [d for d in decisions if d["kind"] == "llm"]
     jev_cost = sum(float(d["payload"].get("cost_usd") or 0.0) for d in jev)
     llm_cost = sum(float(d["payload"].get("cost_usd") or 0.0) for d in llm)
-    stamps = [d["ts_ms"] for d in decisions]
-    days = (max(stamps) - min(stamps)) / 86_400_000 if stamps else 0.0
+    real_jev_days = {day_of(d["ts_ms"]) for d in jev if d["payload"].get("model") != "mock"}
+    days = len(real_jev_days)
 
     totals = {book: book_totals(store, book) for book in BOOKS}
     main_trades = totals["main"]["trades"]
@@ -83,6 +147,7 @@ def summarize(store: FutStore, settings: FutSettings) -> dict:
     latencies = sorted(int(d["payload"].get("elapsed_ms") or 0) for d in llm)
     return {
         "days": days,
+        "since_ms": getattr(store, "since_ms", None),
         "jev_models": sorted({str(d["payload"].get("model")) for d in jev}),
         "jev_cost_usd": jev_cost,
         "llm_cost_usd": llm_cost,
@@ -123,6 +188,8 @@ def evaluate(summary: dict, settings: FutSettings, criterion: EdgeCriterion = Ed
 def render(summary: dict, verdict: dict) -> str:
     lines = [
         f"Edge criterion: {'PASSED' if verdict['passed'] else 'FAILED'}",
+        f"window: since_ms >= {summary['since_ms']}" if summary.get("since_ms") is not None
+        else "window: all available rows",
         f"days {summary['days']:.2f} | trades {summary['n_trades']} | jev models {summary['jev_models']}",
         f"net after models: main {summary['main_net_usd']:.6f} | jev_only {summary['jev_only_net_usd']:.6f} "
         f"| random {summary['random_net_usd']:.6f} | flat 0",

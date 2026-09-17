@@ -23,7 +23,7 @@ from bot.cli import AlreadyRunning, InstanceLock, add_file_logging, setup_loggin
 from bot.store import StoreIdentityMismatch
 from fut.jev import make_jev
 from fut.loop import FutLoop, Unmonitored, now_ms, seed_budget, start_ws_thread
-from fut.report import evaluate, render, summarize
+from fut.report import ReadOnlyReportStore, evaluate, render, summarize
 from fut.settings import FutSettings
 from fut.store import FutStore, day_of
 from fut.wakegrid import grid_results, load_rows, render_grid
@@ -50,13 +50,14 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     run = sub.add_parser("run", help="run the futures paper loop")
     run.add_argument("--max-seconds", type=float, default=None)
-    sub.add_parser("report", help="print the edge report")
+    report_parser = sub.add_parser("report", help="print the edge report")
+    report_parser.add_argument("--since-ms", type=int, default=None)
     wakegrid = sub.add_parser("wakegrid", help="replay stored Jev wakes in read-only mode")
     wakegrid.add_argument("--since-ms", type=int, default=None)
     args = parser.parse_args(argv)
     setup_logging(os.getenv("LOG_LEVEL", "INFO"))
     if args.cmd == "report":
-        return report()
+        return report(args.since_ms)
     if args.cmd == "wakegrid":
         return wakegrid_report(args.since_ms)
     try:
@@ -69,19 +70,22 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_ALREADY_RUNNING
 
 
-def report() -> int:
+def report(since_ms: int | None = None) -> int:
     if not DB_PATH.exists():
         print(f"no futures paper database yet at {DB_PATH}")
         return EXIT_OK
     try:
-        store = FutStore(DB_PATH)
+        store = ReadOnlyReportStore(DB_PATH, since_ms=since_ms)
     except StoreIdentityMismatch as exc:
         log.error("%s", exc)
         return EXIT_STORE_MISMATCH
     load_dotenv(ENV_PATH)
     settings = FutSettings.from_env()
-    summary = summarize(store, settings)
-    print(render(summary, evaluate(summary, settings)))
+    try:
+        summary = summarize(store, settings)
+        print(render(summary, evaluate(summary, settings)))
+    finally:
+        store.close()
     return EXIT_OK
 
 

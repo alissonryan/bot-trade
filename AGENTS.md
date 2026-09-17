@@ -186,7 +186,7 @@ Audit: `sqlite3 data/bot.db "select ts, action, rule, json_extract(payload,'$.ll
 - Opt-in entry cost gates are `FUT_MAX_SPREAD_BPS`, `FUT_MIN_MOVE_MULT`, and `FUT_MAX_ENTRIES_PER_HOUR` (all default off); `FUT_WAKE_STREAK` and `FUT_WAKE_REGIMES` persist same-side Jev entry evidence (defaults preserve today's wake). Main and shadow books share the collar/gates and wake behavior, while `python -m fut wakegrid [--since-ms N]` replays stored Jev rows through a truly read-only SQLite connection for in-sample calibration only; its settings must be checked on new data.
 - The LLM worker thread opens its own `FutStore` connection (sqlite connections are thread-bound) for the durable budget reservation.
 - Baselines `shadow:jev_only` and `shadow:random` share ticks, collar and ledger; `flat` is 0.
-- Edge criterion (fixed): ≥ 200 trades, ≥ 14 days, no mock Jev, net > 0 after fees/funding/slippage/Jev/LLM, beats all three baselines, bootstrap CI95 lower bound of per-trade net > 0, no day below `FUT_MAX_DAY_LOSS_USDT`.
+- Edge criterion (fixed): ≥ 200 trades, ≥ 14 distinct UTC calendar days with real Jev rows, no mock Jev, net > 0 after fees/funding/slippage/Jev/LLM, beats all three baselines, bootstrap CI95 lower bound of per-trade net > 0, no day below `FUT_MAX_DAY_LOSS_USDT`. Run `python -m fut report --since-ms N` at the start of a pre-registered window with fixed settings; tuning windows never count toward the criterion.
 - Tests: `tests/fut/test_fut_*.py`, `tests/kcex/test_fws.py`, `tests/kcex/test_fapi.py`. No network.
 
 ## Known live risks (do not ignore)

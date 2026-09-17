@@ -26,7 +26,8 @@ def build(tmp_path, *, n=200, days=15, main_pnl=0.05, model="jev-1.13.0", shadow
         trade(store, "main", t, main_pnl + (0.001 if i % 2 else -0.001))
         trade(store, "shadow:jev_only", t, shadow_pnl)
         trade(store, "shadow:random", t, shadow_pnl)
-    store.log_decision("jev", {"model": model, "cost_usd": jev_cost}, ts_ms=T0)
+    for i in range(n):
+        store.log_decision("jev", {"model": model, "cost_usd": jev_cost}, ts_ms=T0 + i * step)
     store.log_decision("llm", {"cost_usd": 0.002, "verdict": "ok", "elapsed_ms": 900}, ts_ms=T0 + days * DAY_MS)
     return store
 
@@ -53,6 +54,17 @@ def test_strong_synthetic_run_passes_every_check(tmp_path):
     assert verdict["passed"] is True
     assert summary["n_trades"] == 200 and summary["days"] >= 14
     assert "PASSED" in render(summary, verdict)
+
+
+def test_min_days_counts_distinct_real_jev_utc_dates_not_elapsed_span(tmp_path):
+    store = FutStore(tmp_path / "fut.db")
+    store.log_decision("jev", {"model": "jev-real", "cost_usd": 0.0}, ts_ms=T0)
+    store.log_decision("jev", {"model": "jev-real", "cost_usd": 0.0}, ts_ms=T0 + 15 * DAY_MS)
+
+    summary = summarize(store, FutSettings())
+
+    assert summary["days"] == 2
+    assert evaluate(summary, FutSettings(), EdgeCriterion(min_trades=0, min_days=3))["checks"]["min_days"] is False
 
 
 @pytest.mark.parametrize("kwargs, failing", [
