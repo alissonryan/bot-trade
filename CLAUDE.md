@@ -84,7 +84,7 @@ Each mode gets its own database (`bot/cli.py::db_path_for_mode`): paper keeps `d
 ## Futures paper (fut/)
 
 Paper only, BTC_USDT perpetual, leverage 1x default and 3x hard cap, isolated margin, market orders at book ± slippage with the venue taker fee. Jev (`typesafe-sdk`, `FUT_JEV_MODEL`, `TYPESAFE_API_KEY`) evaluates every 2 s; `fut/questions.py` holds every question and threshold. A wake calls the LLM immediately, one call at a time, 10 s cooldown only after HOLD; late or price-moved LONG/SHORT are discarded, CLOSE never is. Stop, 5 min max hold and liquidation (by `fairPrice`) are enforced every step; opt-in `FUT_MIN_HOLD_SECONDS` (default 0) only suppresses Jev exit/reversal wakes right after entry. Own DB `data/futures-paper.db` (mode `futures-paper`), own lock `data/futures.lock`. Exit codes: 3 already running, 8 unmonitored position, 9 DB of another mode. Sessions with the mock Jev never count toward the edge criterion; passing the criterion only allows writing a live spec.
-FUT_WAKE_THRESHOLD is a first guess to be tuned from paper data, never from the edge-criterion window.
+FUT_WAKE_THRESHOLD is a first guess to be tuned from paper data, never from the edge-criterion window. The opt-in `FUT_MAX_SPREAD_BPS`, `FUT_MIN_MOVE_MULT`, `FUT_MAX_ENTRIES_PER_HOUR`, `FUT_WAKE_STREAK`, and `FUT_WAKE_REGIMES` settings apply to the main and shadow wake/collar paths, and `python -m fut wakegrid [--since-ms N]` is a read-only, in-sample replay only.
 
 ## Resume (2026-09-04, safety revision)
 
