@@ -114,8 +114,9 @@ Toda etapa grava uma linha de auditoria com: snapshot, perguntas e respostas do 
 - Nenhuma chamada em andamento → chama já.
 - Chamada em andamento → disparo ignorado e gravado como `suppressed_inflight`.
 - Última resposta foi HOLD há menos de 10 s → disparo de mesmo tipo e direção gravado como `suppressed_cooldown`. Direção oposta ou `exit_signal` não esperam.
-- Resposta após 8 s → descartada (`stale_timeout`).
-- `|mid_resposta − mid_disparo| / mid_disparo > 5 bps` → ação descartada (`stale_price`).
+- `LONG`/`SHORT` com resposta após 8 s → descartada (`stale_timeout`).
+- `LONG`/`SHORT` com `|mid_resposta − mid_disparo| / mid_disparo > 5 bps` → descartada (`stale_price`).
+- `CLOSE` nunca é descartado por atraso ou movimento de preço: descartar uma saída prenderia o bot na posição. A latência fica registrada do mesmo jeito.
 - Sem orçamento → `suppressed_budget`.
 
 ## Collar
