@@ -87,12 +87,12 @@ def test_exit_rows(reason, tom, part):
 
 
 def test_close_fill_adds_the_money_result_and_sets_the_tone():
-    win = narrate(row("exit", {"reason": "time_limit"}), {"pnl": 0.05, "fee": 0.002})
+    win = narrate(row("exit", {"reason": "time_limit"}), 0.048)
     assert "+0,0480 USD" in win["texto"] and win["tom"] == "bom"
     loss = narrate(llm(intent={"action": "CLOSE", "confidence": 1, "reason": "r"}, outcome="closed"),
-                   {"pnl": -0.03, "fee": 0.002})
+                   -0.032)
     assert "-0,0320 USD" in loss["texto"] and loss["tom"] == "ruim"
-    liq = narrate(row("exit", {"reason": "liquidation"}), {"pnl": -15.0, "fee": 0.0})
+    liq = narrate(row("exit", {"reason": "liquidation"}), -15.0)
     assert liq["tom"] == "alerta"  # an alert stays an alert
 
 

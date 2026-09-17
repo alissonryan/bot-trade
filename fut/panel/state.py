@@ -129,7 +129,7 @@ def build_events(reader: PanelReader, after_id: int | None) -> dict[str, Any]:
         last_id = rows[-1]["id"]  # a full page: continue from its end on the next poll
     closes = {}
     if rows:
-        closes = {f["ts_ms"]: f for f in reader.fills("main", since_ms=rows[0]["ts_ms"]) if f["kind"] == "close"}
+        closes = {trade["saida_ms"]: trade["liquido_usd"] for trade in _pair_trades(reader.fills("main"))}
     events = []
     for row in rows:
         closing = row["kind"] == "exit" or (row["kind"] == "llm" and row["payload"].get("outcome") == "closed")

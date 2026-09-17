@@ -110,7 +110,7 @@ def _llm(p: dict) -> tuple[str, str]:
     return f"LLM respondeu {intent.get('action')} ({outcome}){why}", "info"
 
 
-def narrate(row: dict, close_fill: dict | None = None) -> dict | None:
+def narrate(row: dict, net_usd: float | None = None) -> dict | None:
     kind, p = row.get("kind"), _d(row.get("payload"))
     if kind == "jev":
         told, tipo = _jev(p), "jev"
@@ -127,9 +127,9 @@ def narrate(row: dict, close_fill: dict | None = None) -> dict | None:
     if told is None:
         return None
     text, tone = told
-    if close_fill is not None:
+    if net_usd is not None:
         try:
-            net = float(close_fill.get("pnl") or 0.0) - float(close_fill.get("fee") or 0.0)
+            net = float(net_usd)
         except (TypeError, ValueError):
             net = None
         if net is not None:

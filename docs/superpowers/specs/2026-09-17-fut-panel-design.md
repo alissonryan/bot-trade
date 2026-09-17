@@ -61,7 +61,7 @@ Função pura `narrate(row) -> Event | None`, com `Event = {id, ts_ms, tipo, tom
 | `exit` | "SAIU por STOP / TEMPO MÁXIMO / LIQUIDAÇÃO / funding cobrado" |
 | `unmonitored` | "BOT PAROU: posição aberta sem preço" — tom alerta |
 
-Resultado em dinheiro de cada saída vem do fill `close` correspondente (pnl − fee), pareado por `ts_ms` no `state`, não inventado no `narrate`. Regra desconhecida cai num texto genérico que mostra o valor cru — nunca levanta exceção.
+Resultado em dinheiro de cada saída vem do trade pareado (pnl − taxa de abertura − funding − taxa de fechamento), pareado por `ts_ms` no `state`, não inventado no `narrate`. Regra desconhecida cai num texto genérico que mostra o valor cru — nunca levanta exceção.
 
 ### `fut/panel/state.py`
 Função pura `build_state(reader, now_ms, settings_view) -> dict`:

@@ -108,6 +108,7 @@ def test_events_are_narrated_paged_and_carry_the_close_result(tmp_path):
     wake = jev_row(conn, T0 + 2000, 76000.0, 76000.2, wake="entry_signal", dispatch="dispatched",
                    answers={"direction": "up", "direction_conf": 0.7})
     close = add_decision(conn, T0 + 9000, "exit", {"reason": "stop"})
+    add_fill(conn, "main", T0, "open", fee=0.0)
     add_fill(conn, "main", T0 + 9000, "close", pnl=-0.03, fee=0.002, reason="stop")
     quiet_tail = jev_row(conn, T0 + 11_000, 76000.0, 76000.2)
     reader = PanelReader(db)
@@ -116,6 +117,20 @@ def test_events_are_narrated_paged_and_carry_the_close_result(tmp_path):
     assert "-0,0320 USD" in first["events"][1]["texto"] and first["events"][1]["tom"] == "ruim"
     assert build_events(reader, quiet_tail) == {"events": [], "last_id": quiet_tail}
     assert [e["id"] for e in build_events(reader, wake)["events"]] == [close]
+
+
+def test_event_close_result_matches_the_paired_trade_net(tmp_path):
+    db = tmp_path / "fut.db"
+    conn = make_db(db)
+    close = add_decision(conn, T0 + 9000, "exit", {"reason": "time_limit"})
+    add_fill(conn, "main", T0, "open", fee=0.002)
+    add_fill(conn, "main", T0 + 9000, "close", pnl=0.05, fee=0.002, reason="time_limit")
+    event = build_events(PanelReader(db), None)["events"][0]
+    assert event["id"] == close and "+0,0460 USD" in event["texto"]
+    cache = PanelCache(PanelReader(db))
+    cache.refresh(now_ms=T0 + 10_000)
+    trade = build_state(cache, now_ms=T0 + 10_000)["trades"][0]
+    assert trade["liquido_usd"] == pytest.approx(0.046)
 
 
 def test_one_bad_narration_does_not_abort_the_event_page(tmp_path, monkeypatch):
