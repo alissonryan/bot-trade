@@ -116,3 +116,23 @@ def test_events_are_narrated_paged_and_carry_the_close_result(tmp_path):
     assert "-0,0320 USD" in first["events"][1]["texto"] and first["events"][1]["tom"] == "ruim"
     assert build_events(reader, quiet_tail) == {"events": [], "last_id": quiet_tail}
     assert [e["id"] for e in build_events(reader, wake)["events"]] == [close]
+
+
+def test_one_bad_narration_does_not_abort_the_event_page(tmp_path, monkeypatch):
+    db = tmp_path / "fut.db"
+    conn = make_db(db)
+    first = add_decision(conn, T0, "exit", {"reason": "stop"})
+    second = add_decision(conn, T0 + 1, "exit", {"reason": "time_limit"})
+    import fut.panel.state as state_module
+
+    calls = {first: 0}
+
+    def fail_once(row, net_usd=None):
+        if row["id"] == first:
+            calls[first] += 1
+            raise ValueError("malformed event")
+        return {"id": row["id"], "ts_ms": row["ts_ms"], "tipo": "saida", "tom": "info", "texto": "ok"}
+
+    monkeypatch.setattr(state_module, "narrate", fail_once)
+    result = build_events(PanelReader(db), None)
+    assert calls[first] == 1 and [event["id"] for event in result["events"]] == [second]

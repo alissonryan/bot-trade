@@ -60,15 +60,17 @@ def _jev(p: dict) -> tuple[str, str] | None:
         return f"Jev falhou ({p['error']})", "alerta"
     answers = _d(p.get("answers"))
     if p.get("gate"):
-        return f"Jev viu sinal, mas foi ignorado: {WAKE_GATES.get(p['gate'], p['gate'])}", "info"
+        gate = str(p.get("gate"))
+        return f"Jev viu sinal, mas foi ignorado: {WAKE_GATES.get(gate, gate)}", "info"
     wake = p.get("wake")
     if not wake:
         return None
     dispatch = p.get("dispatch")
-    suffix = DISPATCH.get(dispatch, str(dispatch or ""))
-    tone = "alerta" if dispatch == "suppressed_budget" else "info"
+    dispatch_key = str(dispatch) if dispatch else ""
+    suffix = DISPATCH.get(dispatch_key, dispatch_key)
+    tone = "alerta" if dispatch_key == "suppressed_budget" else "info"
     if wake == "entry_signal":
-        direction = {"up": "ALTA", "down": "QUEDA"}.get(answers.get("direction"), "MOVIMENTO")
+        direction = {"up": "ALTA", "down": "QUEDA"}.get(str(answers.get("direction")), "MOVIMENTO")
         try:
             pct = f" ({float(answers.get('direction_conf')) * 100:.0f}%)"
         except (TypeError, ValueError):
@@ -116,7 +118,8 @@ def narrate(row: dict, close_fill: dict | None = None) -> dict | None:
         told, tipo = _llm(p), "llm"
     elif kind == "exit":
         reason = p.get("reason")
-        told, tipo = EXITS.get(reason, (f"SAIU ({reason})", "info")), "saida"
+        reason_key = str(reason) if reason else ""
+        told, tipo = EXITS.get(reason_key, (f"SAIU ({reason_key})", "info")), "saida"
     elif kind == "unmonitored":
         told, tipo = ("BOT PAROU: posição aberta ficou sem preço por tempo demais", "alerta"), "alerta"
     else:
@@ -125,8 +128,12 @@ def narrate(row: dict, close_fill: dict | None = None) -> dict | None:
         return None
     text, tone = told
     if close_fill is not None:
-        net = float(close_fill.get("pnl") or 0.0) - float(close_fill.get("fee") or 0.0)
-        text = f"{text} · resultado {fmt_usd(net)}"
-        if tone != "alerta":
-            tone = "bom" if net > 0 else "ruim"
+        try:
+            net = float(close_fill.get("pnl") or 0.0) - float(close_fill.get("fee") or 0.0)
+        except (TypeError, ValueError):
+            net = None
+        if net is not None:
+            text = f"{text} · resultado {fmt_usd(net)}"
+            if tone != "alerta":
+                tone = "bom" if net > 0 else "ruim"
     return {"id": row.get("id"), "ts_ms": row.get("ts_ms"), "tipo": tipo, "tom": tone, "texto": text}

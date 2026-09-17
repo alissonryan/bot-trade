@@ -133,7 +133,10 @@ def build_events(reader: PanelReader, after_id: int | None) -> dict[str, Any]:
     events = []
     for row in rows:
         closing = row["kind"] == "exit" or (row["kind"] == "llm" and row["payload"].get("outcome") == "closed")
-        event = narrate(row, closes.get(row["ts_ms"]) if closing else None)
+        try:
+            event = narrate(row, closes.get(row["ts_ms"]) if closing else None)
+        except Exception:
+            continue
         if event is not None:
             events.append(event)
     return {"events": events, "last_id": last_id}

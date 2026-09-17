@@ -101,3 +101,16 @@ def test_unmonitored_and_unknown_and_malformed_rows():
     assert narrate(row("brand_new_kind", {})) is None
     assert narrate(row("llm", {})) is not None  # empty payload: "não respondeu", never raises
     assert narrate({"id": 1, "ts_ms": 1, "kind": "jev", "payload": {"wake": "entry_signal", "answers": "oops"}})
+
+
+@pytest.mark.parametrize("bad_row, close_fill", [
+    (jev(wake="entry_signal", gate={}), None),
+    (jev(wake="entry_signal", dispatch=[]), None),
+    (jev(wake="entry_signal", answers={"direction": []}), None),
+    (row("exit", {"reason": []}), None),
+    (jev(wake="entry_signal", gate=[]), None),
+    (llm(intent={"action": "CLOSE", "reason": "r"}, outcome="closed"), {"pnl": "abc", "fee": 0.002}),
+])
+def test_unhashable_and_non_numeric_values_never_raise(bad_row, close_fill):
+    result = narrate(bad_row, close_fill)
+    assert isinstance(result, (dict, type(None)))
