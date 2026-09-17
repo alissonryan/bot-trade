@@ -97,7 +97,9 @@ class PanelReader:
                             ELSE 0.0 END AS cost_usd,
                        CASE WHEN json_valid(payload) THEN json_extract(payload, '$.snapshot.bid') END AS bid,
                        CASE WHEN json_valid(payload) THEN json_extract(payload, '$.snapshot.ask') END AS ask,
-                       CASE WHEN json_valid(payload) THEN json_extract(payload, '$.snapshot.last') END AS last
+                       CASE WHEN json_valid(payload) THEN json_extract(payload, '$.snapshot.last') END AS last,
+                       CASE WHEN json_valid(payload) THEN json_extract(payload, '$.snapshot.stale') END AS stale,
+                       CASE WHEN json_valid(payload) THEN json_extract(payload, '$.snapshot.spread_bps') END AS spread_bps
                 FROM fut_decisions
                 WHERE id > ?
                 ORDER BY id
@@ -105,19 +107,21 @@ class PanelReader:
             ), max_row AS (
                 SELECT COALESCE(MAX(id), 0) AS max_id FROM fut_decisions
             )
-            SELECT f.id, f.ts_ms, f.kind, f.cost_usd, f.bid, f.ask, f.last, m.max_id, 0 AS sentinel
+            SELECT f.id, f.ts_ms, f.kind, f.cost_usd, f.bid, f.ask, f.last, f.stale, f.spread_bps,
+                   m.max_id, 0 AS sentinel
             FROM facts AS f CROSS JOIN max_row AS m
             UNION ALL
-            SELECT NULL, NULL, NULL, NULL, NULL, NULL, NULL, m.max_id, 1 AS sentinel
+            SELECT NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, m.max_id, 1 AS sentinel
             FROM max_row AS m
             WHERE NOT EXISTS (SELECT 1 FROM facts)
         """
         rows = self._query(sql, (after_id, limit))
-        max_id = int(rows[0][7] or 0) if rows else 0
+        max_id = int(rows[0][9] or 0) if rows else 0
         facts = [
             {"id": int(row[0]), "ts_ms": int(row[1]), "kind": row[2], "cost_usd": row[3],
-             "bid": row[4], "ask": row[5], "last": row[6]}
-            for row in rows if not row[8]
+             "bid": row[4], "ask": row[5], "last": row[6],
+             "stale": (bool(row[7]) if row[7] is not None else None), "spread_bps": row[8]}
+            for row in rows if not row[10]
         ]
         return DecisionFacts(facts, max_id)
 

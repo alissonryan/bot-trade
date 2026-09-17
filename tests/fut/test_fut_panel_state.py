@@ -59,6 +59,19 @@ def test_short_position_profits_when_price_falls_and_stale_bot_is_flagged(tmp_pa
     assert state["posicao"]["resultado_usd"] > 0 and state["posicao"]["fecha_em_s"] == 0
 
 
+def test_fresh_snapshot_preserves_stored_stale_and_spread_fields(tmp_path):
+    db = tmp_path / "fut.db"
+    conn = make_db(db)
+    add_decision(conn, T0, "jev", {"cost_usd": 0.001,
+                                    "snapshot": SNAP(ts_ms=T0, bid=75900.0, ask=75900.2,
+                                                      stale=True, spread_bps=8.75)})
+    cache = PanelCache(PanelReader(db))
+    cache.refresh(now_ms=T0 + 1000)
+    state = build_state(cache, now_ms=T0 + 1000)
+    assert state["preco"]["velho"] is True
+    assert state["preco"]["spread_bps"] == pytest.approx(8.75)
+
+
 def test_day_result_separates_model_costs_and_ignores_yesterday(tmp_path):
     db = tmp_path / "fut.db"
     conn = make_db(db)

@@ -81,6 +81,14 @@ def test_snapshot_series_position_balances_fills_and_costs(tmp_path):
     assert r.fills("main", day="1970-01-01")[0]["fee"] == 0.01
 
 
+def test_decision_facts_include_stored_snapshot_quality_fields(tmp_path):
+    db = tmp_path / "fut.db"
+    conn = make_db(db)
+    add_decision(conn, 1000, "jev", {"snapshot": SNAP(stale=True, spread_bps=8.75)})
+    facts = PanelReader(db).decision_facts(0)
+    assert facts[0]["stale"] is True and facts[0]["spread_bps"] == pytest.approx(8.75)
+
+
 def test_database_without_tables_reads_as_empty(tmp_path):
     db = tmp_path / "fut.db"
     sqlite3.connect(db).close()

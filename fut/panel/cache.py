@@ -64,9 +64,12 @@ class PanelCache:
         mid = (bid_value + ask_value) / 2 if bid_value > 0 and ask_value > 0 else last_value
         if mid > 0:
             self._prices.append((self.last_ts_ms, mid))
-        spread_bps = ((ask_value - bid_value) / mid * 10_000) if mid > 0 and ask_value > bid_value else 0.0
+        spread_bps = _number(fact.get("spread_bps"))
+        if spread_bps is None:
+            spread_bps = ((ask_value - bid_value) / mid * 10_000) if mid > 0 and ask_value > bid_value else 0.0
+        stale = fact.get("stale")
         self.snapshot = {"ts_ms": self.last_ts_ms, "last": last_value, "bid": bid_value, "ask": ask_value,
-                         "spread_bps": spread_bps, "stale": False}
+                         "spread_bps": spread_bps, "stale": bool(stale) if stale is not None else False}
 
     def _trim(self, now_ms: int) -> None:
         cutoff = now_ms - SERIES_MS
