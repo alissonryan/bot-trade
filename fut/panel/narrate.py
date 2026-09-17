@@ -1,6 +1,6 @@
 """One database row in, one plain-Portuguese event out. All layman vocabulary lives here.
 
-Pure and total: unknown values fall back to showing the raw value, nothing here raises.
+Pure and total: unknown event kinds get a generic label, and malformed values never escape as exceptions.
 """
 
 from __future__ import annotations

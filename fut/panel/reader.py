@@ -17,6 +17,8 @@ from urllib.parse import quote
 _EVENT_FILTER = ("(kind != 'jev' OR json_extract(payload, '$.wake') IS NOT NULL "
                  "OR json_extract(payload, '$.error') IS NOT NULL "
                  "OR json_extract(payload, '$.gate') IS NOT NULL)")
+# The first page reaches roughly 13 hours at the current ~1,500 quiet Jev rows/hour.
+EVENT_HISTORY_ROWS = 20_000
 _FILL_KEYS = ("id", "ts_ms", "day", "kind", "side", "contracts", "price", "fee", "funding", "pnl", "reason")
 _POSITION_KEYS = ("side", "contracts", "entry", "stop", "liq", "margin", "leverage", "opened_ms")
 _BALANCE_PREFIX = "fut_balance:"
@@ -69,7 +71,11 @@ class PanelReader:
             if "no such table" in str(exc):
                 return []
             message = str(exc).lower()
-            if "locked" in message or "busy" in message:
+            # A hot journal can make a read-only connection report a write/open error while SQLite recovers;
+            # retrying on the next refresh is safer than declaring the ledger corrupt.
+            if ("locked" in message or "busy" in message or
+                    "attempt to write a readonly database" in message or
+                    "unable to open database file" in message):
                 raise PanelDbBusy(str(exc)) from exc
             raise PanelDbBroken(str(exc)) from exc
 
@@ -81,7 +87,7 @@ class PanelReader:
         if after_id is None:
             rows = self._query(f"SELECT id, ts_ms, kind, payload FROM fut_decisions "
                                f"WHERE id > ? AND id <= ? AND {_EVENT_FILTER} "
-                               "ORDER BY id DESC LIMIT ?", (max(0, upto_id - 20_000), upto_id, limit))[::-1]
+                               "ORDER BY id DESC LIMIT ?", (max(0, upto_id - EVENT_HISTORY_ROWS), upto_id, limit))[::-1]
         else:
             rows = self._query(f"SELECT id, ts_ms, kind, payload FROM fut_decisions WHERE id > ? AND id <= ? "
                                f"AND {_EVENT_FILTER} ORDER BY id LIMIT ?", (after_id, upto_id, limit))

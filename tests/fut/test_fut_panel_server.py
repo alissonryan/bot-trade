@@ -97,7 +97,7 @@ def test_two_state_gets_do_not_refresh_the_database(tmp_path):
         server.shutdown()
 
 
-def test_missing_database_is_a_calm_answer_and_busy_is_a_retry(tmp_path):
+def test_missing_state_is_calm_and_busy_keeps_last_cached_state(tmp_path):
     index = tmp_path / "index.html"
     index.write_text("x", encoding="utf-8")
     server = PanelServer(reader=PanelReader(tmp_path / "none.db"), index_path=index, port=0)

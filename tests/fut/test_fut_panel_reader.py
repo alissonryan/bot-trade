@@ -109,6 +109,19 @@ def test_locked_database_is_a_named_busy_error(tmp_path):
         conn.rollback()
 
 
+@pytest.mark.parametrize("message", ["attempt to write a readonly database", "unable to open database file"])
+def test_readonly_database_transients_are_named_busy_errors(tmp_path, monkeypatch, message):
+    db = tmp_path / "fut.db"
+    make_db(db).close()
+
+    def busy_connect(*args, **kwargs):
+        raise sqlite3.OperationalError(message)
+
+    monkeypatch.setattr(sqlite3, "connect", busy_connect)
+    with pytest.raises(PanelDbBusy):
+        PanelReader(db).last_decision()
+
+
 def test_non_busy_operational_error_is_a_broken_database(tmp_path, monkeypatch):
     db = tmp_path / "fut.db"
     make_db(db).close()

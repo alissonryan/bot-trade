@@ -35,12 +35,14 @@ O painel não pega `data/futures.lock` (só lê), não constrói `FutStore` (que
 ### `fut/panel/reader.py`
 Única porta para o banco. Abre `sqlite3.connect("file:<abs>?mode=ro", uri=True, timeout=0.5)` a cada leitura e fecha em seguida (conexão curta: nunca segura lock de leitura enquanto o bot quer commitar).
 
-- `decisions_after(after_id, limit=500) -> list[dict]`: linhas de `fut_decisions` com `id > after_id`, em ordem de `id`.
+- `decision_facts(after_id, limit=2000) -> rows`: uma leitura limitada por busca `id > after_id ORDER BY id LIMIT ?`, retornando `id, ts_ms, kind, cost_usd, bid, ask, last, stale, spread_bps` e o high-water mark.
+- `event_rows(after_id, upto_id, limit)`: eventos paginados por id; a primeira página fica limitada aos últimos 20.000 ids.
 - `fills(book=None, since_ms=None) -> list[dict]`
 - `position(book) -> dict | None`, `balances() -> dict[str, float]` (chaves `fut_balance:*` de `kv`)
-- `latest_snapshot() -> dict | None`: `snapshot` da última linha `jev`.
-- `price_series(since_ms, max_points=600) -> list[(ts_ms, mid)]`: mids das linhas `jev`, reduzidos por amostragem uniforme.
-- Erros: arquivo ausente → `PanelDbMissing`; `sqlite3.OperationalError` (locked/busy) → `PanelDbBusy`. Nada além disso é engolido.
+- Erros: arquivo ausente → `PanelDbMissing`; `locked`, `busy` e falhas transitórias de journal/abertura → `PanelDbBusy`; demais erros operacionais → `PanelDbBroken`. Tabelas opcionais ausentes continuam sendo lidas como vazias.
+
+### `fut/panel/cache.py`
+`PanelCache` dobra os `decision_facts` incrementalmente por chave primária, com um refresher compartilhado por todas as abas. Mantém custos vitalícios e por dia UTC, o snapshot mais recente, e a série de preços das últimas 2 h; a série é reduzida para no máximo 600 pontos apenas ao servir. Durante o cold start, `loading=true` até uma página menor que o limite chegar; o painel informa que os totais ainda estão incompletos. Um `view()` protegido por lock entrega uma cópia consistente para `build_state`.
 
 ### `fut/panel/narrate.py`
 Função pura `narrate(row) -> Event | None`, com `Event = {id, ts_ms, tipo, tom, texto}`; `tom ∈ {info, bom, ruim, alerta}`. Todo o vocabulário para leigo mora neste arquivo.
@@ -64,9 +66,9 @@ Função pura `narrate(row) -> Event | None`, com `Event = {id, ts_ms, tipo, tom
 Resultado em dinheiro de cada saída vem do trade pareado (pnl − taxa de abertura − funding − taxa de fechamento), pareado por `ts_ms` no `state`, não inventado no `narrate`. Regra desconhecida cai num texto genérico que mostra o valor cru — nunca levanta exceção.
 
 ### `fut/panel/state.py`
-Função pura `build_state(reader, now_ms, settings_view) -> dict`:
+Função pura `build_state(cache, now_ms, settings_view) -> dict`, lendo a visão consistente do `PanelCache`:
 
-- `bot`: `{vivo: bool, ultimo_sinal_s}` — vivo se a última linha de `fut_decisions` tem menos de 10 s.
+- `bot`: `{vivo: bool, ultimo_sinal_s}` — vivo se a última linha de `fut_decisions` está dentro de `max(10 s, 5 × FUT_JEV_EVERY_SECONDS)`.
 - `preco`: `{mid, bid, ask, spread_bps, ts_ms, velho: bool}` do último snapshot.
 - `posicao` (book `main`): `None` ou `{lado, entrada, stop, liq, contratos, aberto_ha_s, fecha_em_s, resultado_bps, resultado_usd}` marcado ao `mid` do último snapshot. `fecha_em_s` usa `FUT_MAX_HOLD_SECONDS` lido do ambiente do processo do painel, com padrão 300; o campo é rotulado "estimado".
 - `dia` (UTC, igual ao bot): `{bruto, taxas, funding, custo_jev, custo_llm, liquido}`.
@@ -75,10 +77,10 @@ Função pura `build_state(reader, now_ms, settings_view) -> dict`:
 - `serie`: `price_series` das últimas 2 h + marcadores `{ts_ms, preco, tipo: entrada_long|entrada_short|saida}`.
 
 ### `fut/panel/server.py`
-`ThreadingHTTPServer` com `require_loopback(host)` importado de `bot/chart_server.py`. Rotas: `/`, `/api/state`, `/api/events` (`after` inteiro ≥ 0; inválido → 400). Qualquer outro caminho → 404; qualquer método além de GET → 405. `PanelDbMissing` → 200 com `{"estado": "sem_banco"}`; `PanelDbBusy` → 503 com `Retry-After: 1` (a página mantém a última tela). `Cache-Control: no-store`. Verificação de `Origin`/`Host` loopback nas rotas `/api/*` (anti DNS-rebinding), reaproveitando `_origin_is_loopback`.
+`ThreadingHTTPServer` com `require_loopback(host)` importado de `bot/chart_server.py`. Um único refresher em background atualiza o `PanelCache` e publica bytes de estado a cada segundo (0,05 s durante o cold start); todas as abas servem os mesmos bytes cacheados em `/api/state`. Antes da primeira atualização, `/api/state` responde `{"estado": "carregando"}`. Rotas: `/`, `/api/state`, `/api/events` (`after` inteiro ≥ 0; inválido → 400). Qualquer outro caminho → 404; qualquer método além de GET → 405. `PanelDbMissing` → 200 com `{"estado": "sem_banco"}`; `PanelDbBusy` → 503 somente em `/api/events` e mantém o último estado cacheado; falha inesperada do refresher → `{"estado": "erro_painel", "detalhe": "<tipo>"}` e o loop continua; `PanelDbBroken` → 200 com `{"estado": "banco_invalido"}`. `Cache-Control: no-store`. Verificação de `Origin`/`Host` loopback nas rotas `/api/*` (anti DNS-rebinding), reaproveitando `_origin_is_loopback`.
 
 ### `panel/index.html`
-Um arquivo, HTML/CSS/JS puros, sem CDN e sem build. Blocos: faixa de status (vivo/parado), preço grande, cartão de posição, gráfico de linha em `<canvas>` com ▲ ▼ ✕, terminalzinho (feed monoespaçado, mais novo em cima, máx. 300 linhas, cores por `tom`), placar das três carteiras, tabela de operações. Polling de 1 s; em erro mostra "reconectando…" e continua. Tema escuro, legível em tela pequena.
+Um arquivo, HTML/CSS/JS puros, sem CDN e sem build. Blocos: faixa de status (vivo/parado), preço grande, cartão de posição, gráfico de linha em `<canvas>` com ▲ ▼ ✕, terminalzinho (feed monoespaçado, mais novo em cima, máx. 300 linhas, cores por `tom`), placar das três carteiras, tabela de operações. Polling de 1 s; `carregando` mostra o histórico incompleto, `erro_painel` mostra aviso âmbar, e dados normais com mais de 10 s mostram o painel travado em vermelho. Em cinco falhas consecutivas mostra "Painel sem resposta do banco — tentando de novo…" e continua. Tema escuro, legível em tela pequena.
 
 ### `fut/cli.py`
 Novo subcomando `panel [--port 8766] [--host 127.0.0.1]`. Não adquire o lock, não carrega `.env`, não cria o banco. Porta ocupada → mensagem clara e código 1.
