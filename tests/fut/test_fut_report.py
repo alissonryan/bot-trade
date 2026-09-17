@@ -18,14 +18,15 @@ def trade(store, book, t, pnl, fee=0.001, funding=0.0):
                        funding=0.0, pnl=pnl, reason="stop")
 
 
-def build(tmp_path, *, n=200, days=15, main_pnl=0.05, model="jev-1.13.0", shadow_pnl=-0.01, jev_cost=0.001):
+def build(tmp_path, *, n=200, days=15, main_pnl=0.05, model="jev-1.13.0", shadow_pnl=-0.01,
+          jev_only_pnl=None, random_pnl=None, jev_cost=0.001):
     store = FutStore(tmp_path / "fut.db")
     step = days * DAY_MS // n
     for i in range(n):
         t = T0 + i * step
         trade(store, "main", t, main_pnl + (0.001 if i % 2 else -0.001))
-        trade(store, "shadow:jev_only", t, shadow_pnl)
-        trade(store, "shadow:random", t, shadow_pnl)
+        trade(store, "shadow:jev_only", t, shadow_pnl if jev_only_pnl is None else jev_only_pnl)
+        trade(store, "shadow:random", t, shadow_pnl if random_pnl is None else random_pnl)
     for i in range(n):
         store.log_decision("jev", {"model": model, "cost_usd": jev_cost}, ts_ms=T0 + i * step)
     store.log_decision("llm", {"cost_usd": 0.002, "verdict": "ok", "elapsed_ms": 900}, ts_ms=T0 + days * DAY_MS)
@@ -67,18 +68,56 @@ def test_min_days_counts_distinct_real_jev_utc_dates_not_elapsed_span(tmp_path):
     assert evaluate(summary, FutSettings(), EdgeCriterion(min_trades=0, min_days=3))["checks"]["min_days"] is False
 
 
-@pytest.mark.parametrize("kwargs, failing", [
-    (dict(n=150), "min_trades"),
-    (dict(days=10), "min_days"),
-    (dict(model="mock"), "real_jev_only"),
-    (dict(main_pnl=-0.05), "net_positive"),
-    (dict(shadow_pnl=0.5), "beats_random"),
+def passing_summary():
+    return {
+        "main_net_usd": 1.0, "n_trades": 200, "days": 14,
+        "jev_models": ["jev-real"], "flat_net_usd": 0.0,
+        "jev_only_net_usd": -1.0, "random_net_usd": -1.0,
+        "ci95": (0.1, 0.2), "daily_net_after_models": {},
+    }
+
+
+@pytest.mark.parametrize("failing, update", [
+    ("min_trades", {"n_trades": 199}),
+    ("min_days", {"days": 13}),
+    ("real_jev_only", {"jev_models": ["mock"]}),
+    ("net_positive", {"main_net_usd": 0.0, "flat_net_usd": -1.0}),
+    ("beats_flat", {"flat_net_usd": 2.0}),
+    ("beats_jev_only", {"jev_only_net_usd": 2.0}),
+    ("beats_random", {"random_net_usd": 2.0}),
+    ("ci_lower_positive", {"ci95": (-0.1, 0.2)}),
+    ("day_loss_ok", {"daily_net_after_models": {"2026-09-17": -21.0}}),
 ])
-def test_each_check_can_fail(tmp_path, kwargs, failing):
-    store = build(tmp_path, **kwargs)
-    verdict = evaluate(summarize(store, FutSettings()), FutSettings())
+def test_each_check_can_fail_in_isolation(failing, update):
+    summary = passing_summary()
+    summary.update(update)
+    verdict = evaluate(summary, FutSettings())
     assert verdict["checks"][failing] is False
+    assert sum(not passed for passed in verdict["checks"].values()) == 1
     assert verdict["passed"] is False
+
+
+def test_ci_lower_positive_fails_with_positive_total_net(tmp_path):
+    summary = {
+        "main_net_usd": 1.0, "n_trades": 200, "days": 14,
+        "jev_models": ["jev-real"], "flat_net_usd": 0.0,
+        "jev_only_net_usd": -1.0, "random_net_usd": -1.0,
+        "ci95": (-0.1, 0.2), "daily_net_after_models": {},
+    }
+
+    verdict = evaluate(summary, FutSettings())
+
+    assert verdict["checks"]["net_positive"] is True
+    assert verdict["checks"]["ci_lower_positive"] is False
+    assert verdict["passed"] is False
+
+
+def test_jev_only_total_deducts_jev_cost(tmp_path):
+    summary = summarize(build(tmp_path, jev_cost=0.01), FutSettings())
+
+    assert summary["jev_only_net_usd"] == pytest.approx(
+        summary["books"]["shadow:jev_only"]["net"] - summary["jev_cost_usd"]
+    )
 
 
 def test_day_loss_check_uses_daily_net_after_model_cost(tmp_path):
