@@ -40,4 +40,5 @@ def test_panel_docs_describe_jev_error_translation_and_health():
     assert "Jev sem conexão" in spec and "https?://" in spec
     assert "falhas_seguidas" in spec and "jev_erro:" in spec
     assert "jev_ab" in spec and "SILENT_KINDS" in spec
+    assert "de probabilidade" in spec and "confiança" in spec
     assert "The state also exposes Jev health" in agents

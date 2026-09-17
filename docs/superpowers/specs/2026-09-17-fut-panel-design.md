@@ -50,7 +50,7 @@ Função pura `narrate(row) -> Event | None`, com `Event = {id, ts_ms, tipo, tom
 | Linha no banco | Evento |
 |---|---|
 | `jev` com `wake=None` | nenhum (só alimenta o preço; são ~1.500/h) |
-| `jev` com `wake=entry_signal` | "Jev viu chance de ALTA/QUEDA (72%)" + sufixo por `dispatch`: `dispatched` → "perguntando à LLM…"; `suppressed_inflight` → "LLM ainda ocupada"; `suppressed_cooldown` → "LLM acabou de dizer para esperar"; `suppressed_budget` → "orçamento de IA do dia acabou" |
+| `jev` com `wake=entry_signal` | Se `probabilities[up/down]` for um número finito em `[0,1]` para o lado respondido: "Jev viu chance de ALTA/QUEDA (71% de probabilidade)"; sem probabilidade válida, usa "confiança 0,55" com vírgula decimal e nunca `%` (sem confiança válida, omite os parênteses). Sufixo por `dispatch`: `dispatched` → "perguntando à LLM…"; `suppressed_inflight` → "LLM ainda ocupada"; `suppressed_cooldown` → "LLM acabou de dizer para esperar"; `suppressed_budget` → "orçamento de IA do dia acabou" |
 | `jev` com `wake=exit_signal`/`reversal_signal` | "Jev acha que é hora de sair" / "Jev virou contra a posição" |
 | `jev` com `gate` preenchido | "Sinal ignorado: spread alto" / "movimento esperado não paga o custo" |
 | `jev_ab` | Linha observacional A/B com `variant`, `model`, `error`, `latency_ms`, `input_tokens`, `cost_usd`, `answers`, `probabilities` e `snapshot`; fica em `SILENT_KINDS`, não vira evento nem alimenta preço/snapshot/streak de falhas, mas seu `cost_usd` entra nos custos de Jev. |

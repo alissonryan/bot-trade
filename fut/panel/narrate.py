@@ -5,6 +5,7 @@ Pure and total: unknown event kinds get a generic label, and malformed values ne
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -87,6 +88,13 @@ def _quote(reason: Any) -> str:
     return f" — “{reason}”" if reason else ""
 
 
+def _finite_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
 def _jev(p: dict) -> tuple[str, str] | None:
     if p.get("error"):
         return short_jev_error(p["error"]), "alerta"
@@ -102,12 +110,17 @@ def _jev(p: dict) -> tuple[str, str] | None:
     suffix = DISPATCH.get(dispatch_key, dispatch_key)
     tone = "alerta" if dispatch_key == "suppressed_budget" else "info"
     if wake == "entry_signal":
-        direction = {"up": "ALTA", "down": "QUEDA"}.get(str(answers.get("direction")), "MOVIMENTO")
-        try:
-            pct = f" ({float(answers.get('direction_conf')) * 100:.0f}%)"
-        except (TypeError, ValueError):
-            pct = ""
-        head = f"Jev viu chance de {direction}{pct}"
+        direction_key = str(answers.get("direction"))
+        direction = {"up": "ALTA", "down": "QUEDA"}.get(direction_key, "MOVIMENTO")
+        probability = _finite_number(_d(p.get("probabilities")).get(direction_key))
+        confidence = _finite_number(answers.get("direction_conf"))
+        if probability is not None and 0 <= probability <= 1:
+            qualifier = f" ({probability * 100:.0f}% de probabilidade)"
+        elif confidence is not None:
+            qualifier = f" (confiança {confidence:.2f})".replace(".", ",")
+        else:
+            qualifier = ""
+        head = f"Jev viu chance de {direction}{qualifier}"
     elif wake == "exit_signal":
         head = "Jev acha que é hora de sair"
     elif wake == "reversal_signal":

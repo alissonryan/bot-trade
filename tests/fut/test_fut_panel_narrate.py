@@ -38,9 +38,9 @@ def test_observational_jev_ab_rows_are_silent_but_unknown_kinds_stay_visible():
 
 
 @pytest.mark.parametrize("payload, tom, parts", [
-    (dict(wake="entry_signal", dispatch="dispatched"), "info", ["ALTA", "72%", "perguntando à LLM"]),
+    (dict(wake="entry_signal", dispatch="dispatched"), "info", ["ALTA", "confiança 0,72", "perguntando à LLM"]),
     (dict(wake="entry_signal", dispatch="suppressed_inflight", answers={"direction": "down", "direction_conf": 0.6}),
-     "info", ["QUEDA", "60%", "LLM ainda ocupada"]),
+     "info", ["QUEDA", "confiança 0,60", "LLM ainda ocupada"]),
     (dict(wake="entry_signal", dispatch="suppressed_cooldown"), "info", ["acabou de dizer para esperar"]),
     (dict(wake="entry_signal", dispatch="suppressed_budget"), "alerta", ["orçamento de IA"]),
     (dict(wake="exit_signal", dispatch="dispatched"), "info", ["hora de sair"]),
@@ -149,6 +149,30 @@ def test_jev_server_and_connection_error_families_are_localized(error, expected)
 ])
 def test_jev_error_numbers_in_metadata_do_not_become_server_errors(error, expected):
     assert narrate(jev(error=error))["texto"] == expected
+
+
+def test_entry_signal_labels_the_answered_side_probability():
+    event = narrate(jev(wake="entry_signal", answers={"direction": "down", "direction_conf": 0.55},
+                        probabilities={"down": 0.71, "up": 0.27, "flat": 0.02}))
+    assert event["texto"] == "Jev viu chance de QUEDA (71% de probabilidade)"
+
+
+def test_entry_signal_uses_confidence_without_percent_when_probability_is_missing():
+    event = narrate(jev(wake="entry_signal", answers={"direction": "up", "direction_conf": 0.55}))
+    assert event["texto"] == "Jev viu chance de ALTA (confiança 0,55)"
+    assert "%" not in event["texto"]
+
+
+@pytest.mark.parametrize("probabilities", ["0.71", [0.71], {"down": float("nan")}, {"down": 7}])
+def test_entry_signal_malformed_probability_falls_back_to_confidence(probabilities):
+    event = narrate(jev(wake="entry_signal", answers={"direction": "down", "direction_conf": 0.55},
+                        probabilities=probabilities))
+    assert event["texto"] == "Jev viu chance de QUEDA (confiança 0,55)"
+
+
+def test_entry_signal_omits_confidence_parentheses_when_confidence_is_not_finite():
+    event = narrate(jev(wake="entry_signal", answers={"direction": "up", "direction_conf": float("nan")}))
+    assert event["texto"] == "Jev viu chance de ALTA"
 
 
 def test_only_sdk_status_after_a_colon_is_a_generic_server_error():
