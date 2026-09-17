@@ -107,6 +107,13 @@ class FutStore(Store):
         keys = ("id", "ts_ms", "day", "kind", "side", "contracts", "price", "fee", "funding", "pnl", "reason")
         return [dict(zip(keys, row)) for row in rows]
 
+    def count_opens(self, book: str, since_ms: int) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM fut_fills WHERE book=? AND kind='open' AND ts_ms >= ?",
+            (book, since_ms),
+        ).fetchone()
+        return int(row[0])
+
     def day_net(self, book: str, day: str) -> float:
         row = self._conn.execute(
             "SELECT COALESCE(SUM(pnl),0) - COALESCE(SUM(fee),0) - COALESCE(SUM(funding),0) "

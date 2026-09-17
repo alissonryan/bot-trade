@@ -16,8 +16,22 @@ from kcex.fapi import ContractSpec
 ACTIONS = {"LONG", "SHORT", "CLOSE", "HOLD"}
 
 
+def cost_gate(snap: FutSnapshot, *, spec: ContractSpec, settings: FutSettings) -> str | None:
+    if settings.max_spread_bps > 0 and snap.spread_bps >= settings.max_spread_bps:
+        return "spread_too_wide"
+    atr = snap.atr_1m
+    mid = snap.mid
+    if settings.min_move_mult > 0 and atr is not None and math.isfinite(atr) and atr > 0 \
+            and math.isfinite(mid) and mid > 0:
+        expected_move_bps = atr / mid * 10_000 * math.sqrt(settings.max_hold_s / 60)
+        round_trip_cost_bps = 2 * (spec.taker_fee * 10_000 + settings.slippage_bps) + snap.spread_bps
+        if math.isfinite(expected_move_bps) and expected_move_bps < settings.min_move_mult * round_trip_cost_bps:
+            return "move_lt_cost"
+    return None
+
+
 def check(intent: FutIntent, snap: FutSnapshot, *, position: FutPosition, balance: float,
-          day_pnl_usdt: float, spec: ContractSpec, settings: FutSettings) -> FutGate:
+          day_pnl_usdt: float, spec: ContractSpec, settings: FutSettings, recent_entries: int = 0) -> FutGate:
     action = intent.action
     if action not in ACTIONS:
         return FutGate(False, "action", str(action))
@@ -38,6 +52,11 @@ def check(intent: FutIntent, snap: FutSnapshot, *, position: FutPosition, balanc
         return FutGate(False, "already_open", action)
     if day_pnl_usdt <= -abs(settings.max_day_loss_usdt):
         return FutGate(False, "day_loss", action)
+    rule = cost_gate(snap, spec=spec, settings=settings)
+    if rule is not None:
+        return FutGate(False, rule, action)
+    if settings.max_entries_per_hour > 0 and recent_entries >= settings.max_entries_per_hour:
+        return FutGate(False, "entry_rate", action)
     if not math.isfinite(intent.confidence) or intent.confidence < settings.min_confidence:
         return FutGate(False, "confidence", action)
     if snap.atr_1m is None or not math.isfinite(snap.atr_1m) or snap.atr_1m <= 0:

@@ -1,6 +1,6 @@
 import pytest
 
-from fut.collar import check
+from fut.collar import check, cost_gate
 from fut.settings import FutSettings
 from fut.types import FutIntent, FutPosition
 from tests.fut.helpers import SPEC, make_snap
@@ -9,9 +9,10 @@ FLAT = FutPosition()
 OPEN = FutPosition(side="long", contracts=2, entry=76000.0, stop=75900.0, liq=380.0, margin=15.2)
 
 
-def gate(action, snap=None, *, position=FLAT, balance=450.0, day_pnl=0.0, spec=SPEC, confidence=0.8, **settings):
+def gate(action, snap=None, *, position=FLAT, balance=450.0, day_pnl=0.0, spec=SPEC, confidence=0.8,
+         recent_entries=0, **settings):
     return check(FutIntent(action, confidence, "r"), snap or make_snap(), position=position, balance=balance,
-                 day_pnl_usdt=day_pnl, spec=spec, settings=FutSettings(**settings))
+                 day_pnl_usdt=day_pnl, spec=spec, settings=FutSettings(**settings), recent_entries=recent_entries)
 
 
 def test_long_sizes_off_ask_plus_slippage_with_atr_stop_below():
@@ -78,3 +79,28 @@ def test_min_confidence_is_enforced():
 def test_leverage_above_contract_max_is_refused():
     small = SPEC.__class__(**{**SPEC.__dict__, "max_leverage": 2})
     assert gate("LONG", spec=small, leverage=3).rule == "leverage"
+
+
+def test_cost_gate_rejects_spread_at_configured_boundary():
+    assert cost_gate(make_snap(spread_bps=3.0), spec=SPEC, settings=FutSettings(max_spread_bps=3.0)) == "spread_too_wide"
+    assert cost_gate(make_snap(spread_bps=2.999), spec=SPEC, settings=FutSettings(max_spread_bps=3.0)) is None
+
+
+def test_cost_gate_rejects_expected_move_below_round_trip_cost():
+    settings = FutSettings(min_move_mult=1.0, max_hold_s=60.0, slippage_bps=2.0)
+    assert cost_gate(make_snap(atr_1m=30.0, spread_bps=0.1), spec=SPEC, settings=settings) == "move_lt_cost"
+    assert cost_gate(make_snap(atr_1m=100.0, spread_bps=0.1), spec=SPEC, settings=settings) is None
+
+
+def test_invalid_atr_is_left_to_the_existing_atr_rule():
+    settings = FutSettings(max_spread_bps=0.0, min_move_mult=2.0)
+    assert cost_gate(make_snap(atr_1m=None), spec=SPEC, settings=settings) is None
+    assert gate("LONG", make_snap(atr_1m=None), min_move_mult=2.0).rule == "atr"
+
+
+def test_entry_rate_gate_applies_after_existing_entry_checks_but_not_close_or_hold():
+    assert gate("LONG", max_entries_per_hour=2, recent_entries=2).rule == "entry_rate"
+    assert gate("SHORT", max_entries_per_hour=2, recent_entries=1).ok
+    assert gate("CLOSE", position=OPEN, max_spread_bps=0.001, max_entries_per_hour=1,
+                recent_entries=99).ok
+    assert gate("HOLD", max_spread_bps=0.001, max_entries_per_hour=1, recent_entries=99).rule == "hold"

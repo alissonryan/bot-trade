@@ -12,6 +12,8 @@ def test_defaults_match_the_spec():
     assert (s.stale_price_bps, s.wake_threshold, s.move_cost_bps) == (5.0, 0.6, 3.0)
     assert s.ws_url == DEFAULT_FUT_WS_URL
     assert s.min_hold_s == 0.0
+    assert (s.max_spread_bps, s.min_move_mult, s.max_entries_per_hour) == (0.0, 0.0, 0)
+    assert (s.wake_streak, s.wake_regimes) == (1, ())
     assert MAX_LEVERAGE == 3
 
 
@@ -22,9 +24,16 @@ def test_from_env_reads_overrides(monkeypatch):
     monkeypatch.setenv("FUT_WS_URL", "-")
     monkeypatch.setenv("FUT_LLM_REASONING", "1")
     monkeypatch.setenv("FUT_MIN_HOLD_SECONDS", "60")
+    monkeypatch.setenv("FUT_MAX_SPREAD_BPS", "2.5")
+    monkeypatch.setenv("FUT_MIN_MOVE_MULT", "2")
+    monkeypatch.setenv("FUT_MAX_ENTRIES_PER_HOUR", "3")
+    monkeypatch.setenv("FUT_WAKE_STREAK", "4")
+    monkeypatch.setenv("FUT_WAKE_REGIMES", " Trend, VOLATILE ")
     s = FutSettings.from_env()
     assert s.min_hold_s == 60.0
     assert (s.leverage, s.margin_usdt, s.max_hold_s, s.ws_url, s.llm_reasoning) == (3, 15.0, 120.0, "", True)
+    assert (s.max_spread_bps, s.min_move_mult, s.max_entries_per_hour) == (2.5, 2.0, 3)
+    assert (s.wake_streak, s.wake_regimes) == (4, ("trend", "volatile"))
 
 
 @pytest.mark.parametrize("leverage", [0, 4, 125])
@@ -40,6 +49,16 @@ def test_other_invalid_values_are_refused():
         FutSettings(min_stop_pct=0.02, max_stop_pct=0.01)
     with pytest.raises(ValueError):
         FutSettings(symbol="ETH_USDT")
+    with pytest.raises(ValueError):
+        FutSettings(max_spread_bps=-1)
+    with pytest.raises(ValueError):
+        FutSettings(min_move_mult=float("inf"))
+    with pytest.raises(ValueError):
+        FutSettings(max_entries_per_hour=-1)
+    with pytest.raises(ValueError):
+        FutSettings(wake_streak=0)
+    with pytest.raises(ValueError):
+        FutSettings(wake_regimes=("range", "unknown"))
 
 
 def test_mock_jev_without_key_or_with_mock_model():

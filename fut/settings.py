@@ -27,6 +27,11 @@ def _b(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _regimes(name: str) -> tuple[str, ...]:
+    raw = os.getenv(name, "")
+    return tuple(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
 @dataclass(frozen=True)
 class FutSettings:
     symbol: str = "BTC_USDT"
@@ -43,6 +48,9 @@ class FutSettings:
     liq_stop_ratio: float = 0.5
     max_hold_s: float = 300.0
     min_hold_s: float = 0.0
+    max_spread_bps: float = 0.0
+    min_move_mult: float = 0.0
+    max_entries_per_hour: int = 0
     min_confidence: float = 0.0
     jev_every_s: float = 2.0
     jev_model: str = "jev-latest"
@@ -50,6 +58,8 @@ class FutSettings:
     jev_usd_per_mtok: float = 0.042
     jev_timeout_s: float = 2.0
     wake_threshold: float = 0.6
+    wake_streak: int = 1
+    wake_regimes: tuple[str, ...] = ()
     move_cost_bps: float = 3.0
     llm_cooldown_s: float = 10.0
     llm_timeout_s: float = 8.0
@@ -74,13 +84,21 @@ class FutSettings:
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and > 0")
         non_negative = ("max_day_loss_usdt", "slippage_bps", "min_confidence", "jev_usd_per_mtok",
-                        "move_cost_bps", "llm_cooldown_s", "stale_price_bps", "min_hold_s")
+                        "move_cost_bps", "llm_cooldown_s", "stale_price_bps", "min_hold_s",
+                        "max_spread_bps", "min_move_mult")
         for name in non_negative:
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and >= 0")
         if self.min_hold_s >= self.max_hold_s:
             raise ValueError("min_hold_s must be < max_hold_s")
+        if isinstance(self.max_entries_per_hour, bool) or not isinstance(self.max_entries_per_hour, int) or self.max_entries_per_hour < 0:
+            raise ValueError("max_entries_per_hour must be an integer >= 0")
+        if isinstance(self.wake_streak, bool) or not isinstance(self.wake_streak, int) or self.wake_streak < 1:
+            raise ValueError("wake_streak must be an integer >= 1")
+        allowed_regimes = {"trend", "range", "volatile"}
+        if any(regime not in allowed_regimes for regime in self.wake_regimes):
+            raise ValueError("wake_regimes must contain only trend, range, or volatile")
         if not 0 < self.max_balance_pct <= 1:
             raise ValueError("max_balance_pct must be in (0, 1]")
         if self.min_stop_pct > self.max_stop_pct:
@@ -115,6 +133,9 @@ class FutSettings:
             liq_stop_ratio=_f("FUT_LIQ_STOP_RATIO", 0.5),
             max_hold_s=_f("FUT_MAX_HOLD_SECONDS", 300.0),
             min_hold_s=_f("FUT_MIN_HOLD_SECONDS", 0.0),
+            max_spread_bps=_f("FUT_MAX_SPREAD_BPS", 0.0),
+            min_move_mult=_f("FUT_MIN_MOVE_MULT", 0.0),
+            max_entries_per_hour=_i("FUT_MAX_ENTRIES_PER_HOUR", 0),
             min_confidence=_f("FUT_MIN_CONFIDENCE", 0.0),
             jev_every_s=_f("FUT_JEV_EVERY_SECONDS", 2.0),
             jev_model=os.getenv("FUT_JEV_MODEL", "jev-latest").strip() or "jev-latest",
@@ -122,6 +143,8 @@ class FutSettings:
             jev_usd_per_mtok=_f("FUT_JEV_USD_PER_MTOK", 0.042),
             jev_timeout_s=_f("FUT_JEV_TIMEOUT_SECONDS", 2.0),
             wake_threshold=_f("FUT_WAKE_THRESHOLD", 0.6),
+            wake_streak=_i("FUT_WAKE_STREAK", 1),
+            wake_regimes=_regimes("FUT_WAKE_REGIMES"),
             move_cost_bps=_f("FUT_MOVE_COST_BPS", 3.0),
             llm_cooldown_s=_f("FUT_LLM_COOLDOWN_SECONDS", 10.0),
             llm_timeout_s=_f("FUT_LLM_TIMEOUT_SECONDS", 8.0),
