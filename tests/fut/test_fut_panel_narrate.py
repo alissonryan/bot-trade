@@ -116,14 +116,14 @@ def test_unmonitored_and_unknown_and_malformed_rows():
     ("TypeSafeInternalServerError: POST https://api.typesafe.ai/v1/systemone: 529 We a…",
      "Jev sobrecarregado (servidor da TypeSafe com excesso de demanda)"),
     ("TypeSafeInternalServerError: POST https://api.typesafe.ai/v1/systemone: 503 The model is unavailable. "
-     "If this issue persists, please contact support. (request_id=req_01a0b0ba5c987a32965d338a6decfbbb)",
+     "If this issue persists, please contact support. (request_id=req_01a0b0936d8979969cc2b49401c72b6b)",
      "Jev fora do ar (servidor da TypeSafe indisponível)"),
     ("TypeSafeAPITimeoutError: Request timed out (timeout=2.0).", "Jev demorou demais para responder"),
     ("request timed out", "Jev demorou demais para responder"),
     ("429 rate limit request_id=req-123", "Jev recusou por limite de uso"),
-    ("403 forbidden request_id=req-123", "Jev recusou a chave de acesso"),
+    ("403 forbidden request_id=req-123", "Jev falhou (403 forbidden)"),
     ("TypeSafeThingError: POST https://api.typesafe.ai/v1/systemone: 418 unusual request_id=req_123",
-     "Jev falhou (POST 418 unusual)"),
+     "Jev falhou (POST : 418 unusual)"),
 ])
 def test_jev_errors_are_short_plain_and_grouped(error, expected):
     event = narrate(jev(error=error))
@@ -149,6 +149,16 @@ def test_jev_server_and_connection_error_families_are_localized(error, expected)
 ])
 def test_jev_error_numbers_in_metadata_do_not_become_server_errors(error, expected):
     assert narrate(jev(error=error))["texto"] == expected
+
+
+@pytest.mark.parametrize("code", ["429", "403", "529", "503"])
+def test_status_digits_in_a_timeout_request_id_do_not_change_timeout_classification(code):
+    error = f"TypeSafeAPITimeoutError: Request timed out (timeout=2.0) (request_id=req_{code})"
+    assert narrate(jev(error=error))["texto"] == "Jev demorou demais para responder"
+
+
+def test_status_digits_in_removed_technical_tokens_do_not_classify_the_error():
+    assert narrate(jev(error="metadata=503 https://x.io/529"))["texto"] == "Jev falhou"
 
 
 def test_entry_signal_labels_the_answered_side_probability():
@@ -177,6 +187,18 @@ def test_entry_signal_omits_confidence_parentheses_when_confidence_is_not_finite
 
 def test_only_sdk_status_after_a_colon_is_a_generic_server_error():
     assert narrate(jev(error="TypeSafeInternalServerError: POST https://api.typesafe.ai/v1/systemone: 502 Bad Gateway"))["texto"] == "Jev com erro no servidor da TypeSafe"
+
+
+@pytest.mark.parametrize("code, expected", [
+    ("401", "Jev recusou a chave de acesso"),
+    ("403", "Jev recusou a chave de acesso"),
+    ("429", "Jev recusou por limite de uso"),
+    ("529", "Jev sobrecarregado (servidor da TypeSafe com excesso de demanda)"),
+    ("503", "Jev fora do ar (servidor da TypeSafe indisponível)"),
+])
+def test_sdk_status_after_a_url_colon_keeps_its_http_classification(code, expected):
+    error = f"TypeSafeError: POST https://api.typesafe.ai/v1/systemone: {code} response"
+    assert narrate(jev(error=error))["texto"] == expected
 
 
 def test_fallback_keeps_safe_text_only():
