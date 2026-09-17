@@ -54,6 +54,8 @@ class _ReplaySpec:
 
 
 def _main_position_open(payload: dict[str, Any]) -> bool:
+    if payload.get("main_position") in ("long", "short"):
+        return True
     candidates = [payload.get("position")]
     state = payload.get("state")
     if isinstance(state, dict):

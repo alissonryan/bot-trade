@@ -7,7 +7,7 @@ from fut.wakegrid import load_rows, replay, render_grid
 
 
 def payload(*, direction="up", conf=0.8, beats=0.8, regime="trend", bid=99.9, ask=100.0,
-            atr=1.0, error=None, answers=True, position=None):
+            atr=1.0, error=None, answers=True, position=None, main_position=None):
     result = {
         "error": error,
         "answers": ({"direction": direction, "direction_conf": conf, "beats_cost": beats,
@@ -17,6 +17,8 @@ def payload(*, direction="up", conf=0.8, beats=0.8, regime="trend", bid=99.9, as
     }
     if position is not None:
         result["state"] = {"position": position}
+    if main_position is not None:
+        result["main_position"] = main_position
     return result
 
 
@@ -67,6 +69,14 @@ def test_flat_row_can_close_replay_position_at_first_hold_boundary():
 def test_replay_skips_entries_recorded_while_main_was_open(tmp_path):
     rows = [row(0, position={"side": "long"}), row(60_000, bid=101.0, ask=101.1,
                                                    position={"side": "long"})]
+
+    result = replay(rows, streak=1, threshold=0.5, regimes=(), gates=False)
+
+    assert result.wakes == 0 and result.trades == 0
+
+
+def test_replay_skips_entries_with_compact_main_position_marker(tmp_path):
+    rows = [row(0, main_position="long"), row(60_000, bid=101.0, ask=101.1, main_position="long")]
 
     result = replay(rows, streak=1, threshold=0.5, regimes=(), gates=False)
 
