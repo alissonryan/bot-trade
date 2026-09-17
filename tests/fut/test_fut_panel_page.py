@@ -55,3 +55,12 @@ def test_page_marks_a_busy_database_without_calling_it_stuck():
     html = PAGE.read_text(encoding="utf-8")
     assert "banco_ocupado" in html
     assert "banco ocupado — mostrando a última leitura" in html
+
+
+def test_page_dims_cards_for_panel_errors_and_restores_them_on_success():
+    html = PAGE.read_text(encoding="utf-8")
+    assert ".dados-desatualizados" in html
+    assert "ultimo_ok_ms" in html
+    assert '"dados de " + hora(s.ultimo_ok_ms)' in html
+    assert "classList.add(\"dados-desatualizados\")" in html
+    assert "classList.remove(\"dados-desatualizados\")" in html

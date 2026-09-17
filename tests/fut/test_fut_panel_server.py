@@ -187,7 +187,9 @@ def test_refresh_loop_survives_an_unexpected_error_and_recovers(tmp_path):
     thread.join(1)
     assert calls == [1, 2]
     assert not thread.is_alive()
-    assert json.loads(server.state_bytes) == {"estado": "erro_painel", "detalhe": "RuntimeError"}
+    error = json.loads(server.state_bytes)
+    assert error["estado"] == "erro_painel" and error["detalhe"] == "RuntimeError"
+    assert isinstance(error["agora_ms"], int) and error["ultimo_ok_ms"] is None
 
 
 def test_refresh_loop_catches_up_quickly_while_cache_is_loading(tmp_path):
@@ -227,3 +229,20 @@ def test_refresh_now_reads_the_clock_once(tmp_path):
                          clock_ms=lambda: clock_calls.append(T0) or T0)
     server.refresh_now()
     assert clock_calls == [T0]
+
+
+def test_panel_error_keeps_the_last_success_timestamp(tmp_path):
+    db = tmp_path / "fut.db"
+    make_db(db).close()
+    index = tmp_path / "index.html"
+    index.write_text("x", encoding="utf-8")
+    server = PanelServer(reader=PanelReader(db), index_path=index, port=0, clock_ms=lambda: T0)
+    server.refresh_now()
+    server.refresh_now = lambda: (_ for _ in ()).throw(RuntimeError("broken refresh"))
+    server.clock_ms = lambda: T0 + 1000
+    server._refresh_stop.wait = lambda timeout: (server._refresh_stop.set() or True)
+    thread = threading.Thread(target=server._refresh_loop)
+    thread.start()
+    thread.join(1)
+    assert json.loads(server.state_bytes) == {"estado": "erro_painel", "detalhe": "RuntimeError",
+                                               "agora_ms": T0 + 1000, "ultimo_ok_ms": T0}
