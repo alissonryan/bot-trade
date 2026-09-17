@@ -35,20 +35,27 @@ EXITS = {
     "funding": ("Taxa de funding cobrada/recebida", "info"),
 }
 _REQUEST_ID = re.compile(r"[\"']?request[_ -]?id[\"']?\s*[:=]\s*[\"']?[^,;\s}]+[\"']?", re.IGNORECASE)
+_URL = re.compile(r"https?://\S+", re.IGNORECASE)
+_EXCEPTION_PREFIX = re.compile(r"^[\w.]+(?:Error|Exception):\s*", re.IGNORECASE)
 
 
 def short_jev_error(error: Any) -> str:
     raw = str(error or "")
     lower = raw.lower()
-    if "503" in lower or "unavailable" in lower:
-        return "Jev fora do ar (servidor da TypeSafe indisponível)"
+    if "529" in lower or "overloaded" in lower or "high traffic" in lower:
+        return "Jev sobrecarregado (servidor da TypeSafe com excesso de demanda)"
+    if re.search(r"\b5\d{2}\b", lower):
+        return "Jev com erro no servidor da TypeSafe"
     if "imed out" in lower or "timeout" in lower:
         return "Jev demorou demais para responder"
+    if "connection" in lower or "connect" in lower:
+        return "Jev sem conexão"
     if "429" in lower or "rate" in lower:
         return "Jev recusou por limite de uso"
     if "401" in lower or "403" in lower:
         return "Jev recusou a chave de acesso"
-    clean = " ".join(_REQUEST_ID.sub("", raw).split())[:80]
+    clean = _EXCEPTION_PREFIX.sub("", _URL.sub("", raw))
+    clean = " ".join(_REQUEST_ID.sub("", clean).split())[:80]
     return f"Jev falhou ({clean})"
 
 
