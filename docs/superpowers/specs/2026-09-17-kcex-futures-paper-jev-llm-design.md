@@ -130,8 +130,8 @@ Para `LONG`/`SHORT`, na ordem:
 7. preço executável: `ask1` para LONG, `bid1` para SHORT, com fallback para `lastPrice` só se o lado estiver ausente, multiplicado (LONG) ou dividido (SHORT) pelo slippage; slippage negativo recusado;
 8. `nocional_alvo = min(FUT_MARGIN_USDT, FUT_MAX_BALANCE_PCT × saldo) × alavancagem`;
 9. `contratos = floor(nocional_alvo / (preço × contractSize))`; `< minVol` → `dust`;
-10. stop: distância `clamp(ATR_MULT × ATR, MIN_STOP_PCT × preço, MAX_STOP_PCT × preço)`, arredondado a `priceUnit` para longe da entrada no sentido que reduz o risco (LONG para baixo, SHORT para cima);
-11. liquidação estimada (ver ledger); se `distância_stop > 0,5 × distância_liquidação` → `liq_too_close`;
+10. stop: distância `clamp(ATR_MULT × ATR, MIN_STOP_PCT × preço, MAX_STOP_PCT × preço)`, arredondado a `priceUnit` (LONG para baixo, SHORT para cima, mesma convenção do spot);
+11. liquidação estimada (ver ledger); se a distância do stop **já arredondado** for `> 0,5 × distância_liquidação` → `liq_too_close`;
 12. margem requerida ≤ saldo livre.
 
 `CLOSE` passa sempre que há posição (nada no collar prende o bot numa posição).
