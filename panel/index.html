@@ -80,7 +80,11 @@ function renderState(s) {
   if (s.estado === "sem_banco") { st.className = "espera"; st.textContent = "O bot ainda não rodou: não há dados para mostrar."; return; }
   if (s.estado === "carregando") { st.className = "espera"; st.textContent = "Carregando histórico do bot…"; return; }
   if (s.estado === "banco_invalido") { st.className = "espera"; st.textContent = "Banco de dados ilegível"; return; }
-  if (s.bot.vivo) { st.className = "vivo"; st.textContent = "● BOT RODANDO — último sinal há " + s.bot.ultimo_sinal_s + " s"; }
+  if (s.estado === "erro_painel") { st.className = "espera"; st.textContent = "Erro no painel — tentando de novo…"; return; }
+  if (Math.abs(Date.now() - s.agora_ms) > 10000) {
+    st.className = "parado";
+    st.textContent = "Painel travado: dados de " + hora(s.agora_ms) + " — reinicie o python -m fut panel";
+  } else if (s.bot.vivo) { st.className = "vivo"; st.textContent = "● BOT RODANDO — último sinal há " + s.bot.ultimo_sinal_s + " s"; }
   else if (s.bot.ultimo_sinal_s === null) { st.className = "espera"; st.textContent = "Aguardando o primeiro sinal do bot…"; }
   else {
     st.className = s.bot.ultimo_sinal_s > 120 ? "parado" : "espera";

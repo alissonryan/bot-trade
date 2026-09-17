@@ -1,4 +1,5 @@
 import json
+import threading
 import urllib.error
 import urllib.request
 
@@ -137,3 +138,35 @@ def test_broken_database_is_a_calm_invalid_database_answer(tmp_path):
         assert json.loads(get(server, "/api/state")[2]) == {"estado": "banco_invalido"}
     finally:
         server.shutdown()
+
+
+def test_refresh_loop_survives_an_unexpected_error_and_recovers(tmp_path):
+    db = tmp_path / "fut.db"
+    make_db(db).close()
+    index = tmp_path / "index.html"
+    index.write_text("x", encoding="utf-8")
+    server = PanelServer(reader=PanelReader(db), index_path=index, port=0)
+    calls = []
+    first_failed = threading.Event()
+    waits = []
+
+    def refresh():
+        calls.append(len(calls) + 1)
+        if len(calls) == 1:
+            first_failed.set()
+            raise RuntimeError("transient")
+        server._refresh_stop.set()
+
+    def wait(timeout):
+        waits.append(timeout)
+        return len(waits) >= 2
+
+    server.refresh_now = refresh
+    server._refresh_stop.wait = wait
+    thread = threading.Thread(target=server._refresh_loop)
+    thread.start()
+    assert first_failed.wait(1)
+    thread.join(1)
+    assert calls == [1, 2]
+    assert not thread.is_alive()
+    assert json.loads(server.state_bytes) == {"estado": "erro_painel", "detalhe": "RuntimeError"}

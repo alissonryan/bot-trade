@@ -40,3 +40,12 @@ def test_page_handles_loading_state_without_blocking_the_feed():
     assert "carregando histórico — os totais ainda estão incompletos" in html
     assert "try { renderState(s); }" in html
     assert "try { renderEvents(e); }" in html
+
+
+def test_page_rejects_stale_state_and_handles_panel_errors():
+    html = PAGE.read_text(encoding="utf-8")
+    assert '"Painel travado: dados de " + hora(s.agora_ms)' in html
+    assert '" — reinicie o python -m fut panel"' in html
+    assert "Math.abs(Date.now() - s.agora_ms) > 10000" in html
+    assert 's.estado === "erro_painel"' in html
+    assert "Erro no painel — tentando de novo…" in html

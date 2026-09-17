@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -16,6 +17,7 @@ from fut.panel.reader import PanelDbBroken, PanelDbBusy, PanelDbMissing, PanelRe
 from fut.panel.state import build_events, build_state
 
 _LOOPBACK_HOST_PREFIXES = ("127.0.0.1", "localhost", "[::1]")
+_LOG = logging.getLogger("fut.panel")
 
 
 def _host_is_loopback(host: str | None) -> bool:
@@ -101,6 +103,7 @@ class PanelServer:
         self._refresh_thread: threading.Thread | None = None
         self._refresh_stop = threading.Event()
         self._state_lock = threading.Lock()
+        self._refresh_errors: set[str] = set()
         self.state_bytes = json.dumps({"estado": "carregando"}, ensure_ascii=False).encode("utf-8")
 
     def refresh_now(self) -> None:
@@ -120,7 +123,18 @@ class PanelServer:
 
     def _refresh_loop(self) -> None:
         while not self._refresh_stop.is_set():
-            self.refresh_now()
+            try:
+                self.refresh_now()
+            except Exception as exc:
+                message = f"{type(exc).__name__}: {exc}"
+                if message not in self._refresh_errors:
+                    self._refresh_errors.add(message)
+                    _LOG.error("panel refresh failed: %s", message)
+                with self._state_lock:
+                    self.state_bytes = json.dumps(
+                        {"estado": "erro_painel", "detalhe": type(exc).__name__},
+                        ensure_ascii=False,
+                    ).encode("utf-8")
             self._refresh_stop.wait(1.0)
 
     def _start_refresher(self) -> None:
