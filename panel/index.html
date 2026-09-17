@@ -35,6 +35,7 @@
 <main>
   <div id="status" class="espera">Conectando…</div>
   <div id="banco-nota" class="warn"></div>
+  <div id="jev-nota" class="warn"></div>
 
   <div class="row">
     <div class="card"><div class="label">Bitcoin agora (BTC/USDT futuro)</div>
@@ -80,6 +81,11 @@ function cell(tr, text, cls) { const td = document.createElement("td"); td.textC
 function renderState(s) {
   const st = $("status");
   $("banco-nota").textContent = s.banco_ocupado ? "banco ocupado — mostrando a última leitura" : "";
+  const jevNote = $("jev-nota");
+  const motivo = s.jev && s.jev.motivo || "Jev fora do ar";
+  jevNote.textContent = s.estado === "ok" && s.jev && s.jev.falhas_seguidas >= 3
+    ? motivo + " desde " + hora(s.jev.desde_ms).slice(0, 5) + " (" + s.jev.falhas_seguidas + " falhas seguidas): o bot continua protegendo posições abertas (stop e tempo máximo), mas não avalia novas entradas."
+    : "";
   if (s.estado === "sem_banco") { st.className = "espera"; st.textContent = "O bot ainda não rodou: não há dados para mostrar."; return; }
   if (s.estado === "carregando") { st.className = "espera"; st.textContent = "Carregando histórico do bot…"; return; }
   if (s.estado === "banco_invalido") { st.className = "espera"; st.textContent = "Banco de dados ilegível"; return; }
@@ -159,8 +165,25 @@ function drawChart(serie) {
 function renderEvents(page) {
   const feed = $("feed");
   for (const e of page.events) {
-    const line = document.createElement("div"); line.className = e.tom;
-    line.textContent = hora(e.ts_ms) + "  " + e.texto; feed.prepend(line);
+    const newest = feed.firstElementChild;
+    if (e.grupo && newest && newest.dataset.grupo === e.grupo) {
+      const firstMs = Number(newest.dataset.primeiroMs);
+      const count = Number(newest.dataset.contagem) + 1;
+      newest.dataset.ultimoMs = String(e.ts_ms);
+      newest.dataset.contagem = String(count);
+      newest.textContent = hora(firstMs) + "–" + hora(e.ts_ms) + "  " + e.texto + " · " + count + " vezes seguidas";
+    } else {
+      const line = document.createElement("div"); line.className = e.tom;
+      line.textContent = hora(e.ts_ms) + "  " + e.texto;
+      if (e.grupo) {
+        line.dataset.grupo = e.grupo;
+        line.dataset.primeiroMs = String(e.ts_ms);
+        line.dataset.ultimoMs = String(e.ts_ms);
+        line.dataset.contagem = "1";
+        line.setAttribute("data-grupo", e.grupo);
+      }
+      feed.prepend(line);
+    }
   }
   while (feed.childElementCount > MAX_FEED) feed.lastElementChild.remove();
   if (typeof page.last_id === "number") lastId = page.last_id;

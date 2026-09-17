@@ -5,9 +5,9 @@ import time
 from fut.panel.cache import PanelCache
 
 
-def fact(id, ts_ms, *, kind="jev", cost_usd=0.0, bid=100.0, ask=102.0, last=101.0):
+def fact(id, ts_ms, *, kind="jev", cost_usd=0.0, bid=100.0, ask=102.0, last=101.0, error=None):
     return {"id": id, "ts_ms": ts_ms, "kind": kind, "cost_usd": cost_usd,
-            "bid": bid, "ask": ask, "last": last}
+            "bid": bid, "ask": ask, "last": last, "error": error}
 
 
 class Facts(list):
@@ -89,3 +89,18 @@ def test_concurrent_refreshes_are_serialized_without_double_counting():
         thread.join()
     assert cache.lifetime_costs == {"jev": 0.3, "llm": 0.0}
     assert cache.price_series(DAY) == [[DAY, 101.0]]
+
+
+def test_jev_failure_streak_resets_on_success_across_chunks():
+    reader = CountingReader([
+        fact(1, DAY, error="503 unavailable"),
+        fact(2, DAY + 1, error="503 unavailable"),
+        fact(3, DAY + 2, error=None),
+        fact(4, DAY + 3, error="429 rate limit"),
+    ])
+    cache = PanelCache(reader, limit=2)
+    cache.refresh(now_ms=DAY + 3)
+    assert cache.jev_failures == 2 and cache.jev_failure_since_ms == DAY
+    cache.refresh(now_ms=DAY + 3)
+    assert cache.jev_failures == 1 and cache.jev_failure_since_ms == DAY + 3
+    assert cache.jev_failure_reason == "Jev recusou por limite de uso"

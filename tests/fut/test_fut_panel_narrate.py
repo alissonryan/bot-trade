@@ -41,7 +41,7 @@ def test_quiet_jev_row_is_not_an_event():
     (dict(gate="spread_too_wide"), "info", ["ignorado", "spread"]),
     (dict(gate="move_lt_cost"), "info", ["ignorado", "não paga o custo"]),
     (dict(gate="atr"), "info", ["sem medida de volatilidade"]),
-    (dict(error="TimeoutError: slow"), "alerta", ["Jev falhou", "TimeoutError"]),
+    (dict(error="TimeoutError: slow"), "alerta", ["demorou demais"]),
 ])
 def test_jev_rows(payload, tom, parts):
     event = narrate(jev(**payload))
@@ -100,9 +100,27 @@ def test_close_fill_adds_the_money_result_and_sets_the_tone():
 def test_unmonitored_and_unknown_and_malformed_rows():
     assert narrate(row("unmonitored", {"silent_ms": 61000}))["tom"] == "alerta"
     assert narrate(row("brand_new_kind", {})) == {"id": 7, "ts_ms": 1000, "tipo": "evento", "tom": "info",
-                                                    "texto": "Evento brand_new_kind"}
+                                                    "texto": "Evento brand_new_kind", "grupo": None}
     assert narrate(row("llm", {})) is not None  # empty payload: "não respondeu", never raises
     assert narrate({"id": 1, "ts_ms": 1, "kind": "jev", "payload": {"wake": "entry_signal", "answers": "oops"}})
+
+
+@pytest.mark.parametrize("error, expected", [
+    ("503 The model is unavailable request_id=req-123", "Jev fora do ar (servidor da TypeSafe indisponível)"),
+    ("request timed out", "Jev demorou demais para responder"),
+    ("429 rate limit request_id=req-123", "Jev recusou por limite de uso"),
+    ("403 forbidden request_id=req-123", "Jev recusou a chave de acesso"),
+    ("SDK exploded request_id=req-123", "Jev falhou (SDK exploded)"),
+])
+def test_jev_errors_are_short_plain_and_grouped(error, expected):
+    event = narrate(jev(error=error))
+    assert event["texto"] == expected
+    assert "request_id" not in event["texto"] and "req-123" not in event["texto"]
+    assert event["grupo"] == "jev_erro:" + expected
+
+
+def test_non_error_events_have_no_group():
+    assert narrate(jev(wake="exit_signal"))["grupo"] is None
 
 
 @pytest.mark.parametrize("bad_row, close_fill", [

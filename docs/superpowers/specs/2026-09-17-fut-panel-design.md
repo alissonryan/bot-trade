@@ -54,6 +54,7 @@ Função pura `narrate(row) -> Event | None`, com `Event = {id, ts_ms, tipo, tom
 | `jev` com `wake=exit_signal`/`reversal_signal` | "Jev acha que é hora de sair" / "Jev virou contra a posição" |
 | `jev` com `gate` preenchido | "Sinal ignorado: spread alto" / "movimento esperado não paga o custo" |
 | `jev` com `error` | "Jev falhou (timeout)" — tom alerta |
+| `jev` com `error` | Erros 503/unavailable → "Jev fora do ar", timeout → "Jev demorou demais para responder", 429/rate → "Jev recusou por limite de uso", 401/403 → "Jev recusou a chave de acesso"; demais erros são truncados em 80 caracteres. O evento recebe `grupo=jev_erro:<texto>` para o feed agrupar repetições sem expor identificadores técnicos. |
 | `llm` `outcome=opened` | "ENTROU COMPRADO/VENDIDO a 76.150 · stop 76.020" + motivo da LLM entre aspas |
 | `llm` `outcome=closed` | "LLM mandou FECHAR" + motivo |
 | `llm` ação HOLD | "LLM decidiu ESPERAR" + motivo |
@@ -69,6 +70,7 @@ Resultado em dinheiro de cada saída vem do trade pareado (pnl − taxa de abert
 Função pura `build_state(cache, now_ms, settings_view) -> dict`, lendo a visão consistente do `PanelCache`:
 
 - `bot`: `{vivo: bool, ultimo_sinal_s}` — vivo se a última linha de `fut_decisions` está dentro de `max(10 s, 5 × FUT_JEV_EVERY_SECONDS)`.
+- `jev`: `{ok, falhas_seguidas, desde_ms, motivo}` — saúde incremental das linhas `jev`; sucesso zera a sequência e o painel avisa a partir de três falhas seguidas.
 - `preco`: `{mid, bid, ask, spread_bps, ts_ms, velho: bool}` do último snapshot.
 - `posicao` (book `main`): `None` ou `{lado, entrada, stop, liq, contratos, aberto_ha_s, fecha_em_s, resultado_bps, resultado_usd}` marcado ao `mid` do último snapshot. `fecha_em_s` usa `FUT_MAX_HOLD_SECONDS` lido do ambiente do processo do painel, com padrão 300; o campo é rotulado "estimado".
 - `dia` (UTC, igual ao bot): `{bruto, taxas, funding, custo_jev, custo_llm, liquido}`.
@@ -80,7 +82,7 @@ Função pura `build_state(cache, now_ms, settings_view) -> dict`, lendo a visã
 `ThreadingHTTPServer` com `require_loopback(host)` importado de `bot/chart_server.py`. Um único refresher em background atualiza o `PanelCache` e publica bytes de estado a cada segundo (0,05 s durante o cold start); todas as abas servem os mesmos bytes cacheados em `/api/state`. Antes da primeira atualização, `/api/state` responde `{"estado": "carregando"}`. Rotas: `/`, `/api/state`, `/api/events` (`after` inteiro ≥ 0; inválido → 400). Qualquer outro caminho → 404; qualquer método além de GET → 405. `PanelDbMissing` → 200 com `{"estado": "sem_banco"}`; `PanelDbBusy` → 503 somente em `/api/events` e mantém o último estado cacheado; falha inesperada do refresher → `{"estado": "erro_painel", "detalhe": "<tipo>"}` e o loop continua; `PanelDbBroken` → 200 com `{"estado": "banco_invalido"}`. `Cache-Control: no-store`. Verificação de `Origin`/`Host` loopback nas rotas `/api/*` (anti DNS-rebinding), reaproveitando `_origin_is_loopback`.
 
 ### `panel/index.html`
-Um arquivo, HTML/CSS/JS puros, sem CDN e sem build. Blocos: faixa de status (vivo/parado), preço grande, cartão de posição, gráfico de linha em `<canvas>` com ▲ ▼ ✕, terminalzinho (feed monoespaçado, mais novo em cima, máx. 300 linhas, cores por `tom`), placar das três carteiras, tabela de operações. Polling de 1 s; `carregando` mostra o histórico incompleto, `erro_painel` mostra aviso âmbar, e dados normais com mais de 10 s mostram o painel travado em vermelho. Em cinco falhas consecutivas mostra "Painel sem resposta do banco — tentando de novo…" e continua. Tema escuro, legível em tela pequena.
+Um arquivo, HTML/CSS/JS puros, sem CDN e sem build. Blocos: faixa de status (vivo/parado), preço grande, cartão de posição, gráfico de linha em `<canvas>` com ▲ ▼ ✕, terminalzinho (feed monoespaçado, mais novo em cima, máx. 300 linhas, cores por `tom`), placar das três carteiras, tabela de operações. Polling de 1 s; `carregando` mostra o histórico incompleto, `erro_painel` mostra aviso âmbar e data da última leitura, e dados normais com mais de 10 s mostram o painel travado em vermelho. Falhas Jev repetidas são agrupadas no feed e, a partir de três, aparecem sob o status. Em cinco falhas consecutivas mostra "Painel sem resposta do banco — tentando de novo…" e continua. Tema escuro, legível em tela pequena.
 
 ### `fut/cli.py`
 Novo subcomando `panel [--port 8766] [--host 127.0.0.1]`. Não adquire o lock, não carrega `.env`, não cria o banco. Porta ocupada → mensagem clara e código 1.

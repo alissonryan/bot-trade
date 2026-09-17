@@ -9,6 +9,7 @@ import threading
 from typing import Any
 
 from fut.panel.reader import PanelReader
+from fut.panel.narrate import short_jev_error
 
 SERIES_MS = 2 * 3_600_000
 MAX_SERIES_POINTS = 600
@@ -34,6 +35,9 @@ class PanelCache:
         self.lifetime_costs = {"jev": 0.0, "llm": 0.0}
         self._day_costs: dict[str, dict[str, float]] = {}
         self._prices: deque[tuple[int, float]] = deque()
+        self.jev_failures = 0
+        self.jev_failure_since_ms: int | None = None
+        self.jev_failure_reason: str | None = None
 
     def _reset(self) -> None:
         self.last_id = 0
@@ -43,6 +47,9 @@ class PanelCache:
         self.lifetime_costs = {"jev": 0.0, "llm": 0.0}
         self._day_costs.clear()
         self._prices.clear()
+        self.jev_failures = 0
+        self.jev_failure_since_ms = None
+        self.jev_failure_reason = None
 
     def _fold(self, fact: dict[str, Any]) -> None:
         self.last_id = int(fact["id"])
@@ -57,6 +64,16 @@ class PanelCache:
 
         if kind != "jev":
             return
+        error = fact.get("error")
+        if error:
+            if self.jev_failures == 0:
+                self.jev_failure_since_ms = self.last_ts_ms
+            self.jev_failures += 1
+            self.jev_failure_reason = short_jev_error(error)
+        else:
+            self.jev_failures = 0
+            self.jev_failure_since_ms = None
+            self.jev_failure_reason = None
         bid = _number(fact.get("bid"))
         ask = _number(fact.get("ask"))
         last = _number(fact.get("last"))
@@ -116,4 +133,6 @@ class PanelCache:
                 "lifetime_costs": dict(self.lifetime_costs),
                 "day_costs": dict(self._day_costs.get(day, {"jev": 0.0, "llm": 0.0})),
                 "price_series": self._price_series(since_ms, max_points),
+                "jev": {"ok": self.jev_failures == 0, "falhas_seguidas": self.jev_failures,
+                        "desde_ms": self.jev_failure_since_ms, "motivo": self.jev_failure_reason},
             }

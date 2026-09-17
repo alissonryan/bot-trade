@@ -64,3 +64,13 @@ def test_page_dims_cards_for_panel_errors_and_restores_them_on_success():
     assert '"dados de " + hora(s.ultimo_ok_ms)' in html
     assert "classList.add(\"dados-desatualizados\")" in html
     assert "classList.remove(\"dados-desatualizados\")" in html
+
+
+def test_page_collapses_repeated_jev_errors_and_shows_health_warning():
+    html = PAGE.read_text(encoding="utf-8")
+    assert "data-grupo" in html and "vezes seguidas" in html
+    assert "firstElementChild" in html
+    assert "falhas_seguidas >= 3" in html
+    assert '" desde " + hora(s.jev.desde_ms).slice(0, 5)' in html
+    assert "Jev fora do ar" in html
+    assert "o bot continua protegendo posições abertas" in html

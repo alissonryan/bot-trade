@@ -27,3 +27,11 @@ def test_panel_docs_match_cached_state_and_error_contract():
     assert "503" in spec and "/api/events" in spec
     assert "FUT_JEV_EVERY_SECONDS" in spec and "max(10 s" in spec
     assert "carregando" in claude and "carregando" in agents
+
+
+def test_panel_docs_describe_jev_error_translation_and_health():
+    spec = (ROOT / "docs" / "superpowers" / "specs" / "2026-09-17-fut-panel-design.md").read_text(encoding="utf-8")
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    assert "Jev fora do ar" in spec and "request_id" not in spec
+    assert "falhas_seguidas" in spec and "jev_erro:" in spec
+    assert "streak" in agents or "falhas seguidas" in agents
