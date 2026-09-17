@@ -27,3 +27,15 @@ def test_panel_docs_match_cached_state_and_error_contract():
     assert "503" in spec and "/api/events" in spec
     assert "FUT_JEV_EVERY_SECONDS" in spec and "max(10 s" in spec
     assert "carregando" in claude and "carregando" in agents
+    assert "banco_ocupado_desde_ms" in spec
+    assert "mostrando a última leitura" in spec
+
+
+def test_panel_docs_describe_jev_error_translation_and_health():
+    spec = (ROOT / "docs" / "superpowers" / "specs" / "2026-09-17-fut-panel-design.md").read_text(encoding="utf-8")
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    assert "Jev com erro no servidor da TypeSafe" in spec and "request_id" not in spec
+    assert "Jev sobrecarregado" in spec and "Jev com erro no servidor da TypeSafe" in spec
+    assert "Jev sem conexão" in spec and "https?://" in spec
+    assert "falhas_seguidas" in spec and "jev_erro:" in spec
+    assert "The state also exposes Jev health" in agents

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from typing import Any
 
 from fut.panel.cache import PanelCache
@@ -19,6 +20,16 @@ EVENT_PAGE = 500
 # read ContractSpec; the position card is an estimate, the ledger fills are the record.
 CONTRACT_SIZE = 0.0001
 BOOKS = (("main", "Bot (Jev + LLM)"), ("shadow:jev_only", "Só o Jev (sem LLM)"), ("shadow:random", "Aleatório"))
+
+
+@dataclass(frozen=True)
+class StateData:
+    """Database-backed facts retained while a later read is unavailable."""
+
+    today: list[dict]
+    balances: dict[str, float]
+    fills_by_book: dict[str, list[dict]]
+    position: dict[str, Any] | None
 
 
 def alive_threshold_ms(jev_every_s: float) -> int:
@@ -82,31 +93,34 @@ def _position(pos: dict | None, price: dict | None, now_ms: int, max_hold_s: flo
     return out
 
 
-def build_state(cache: PanelCache, *, now_ms: int, max_hold_s: float = 300.0,
-                jev_every_s: float = 2.0) -> dict[str, Any]:
+def read_state_data(cache: PanelCache, *, now_ms: int) -> StateData:
     reader = cache.reader
+    day = _day_of(now_ms)
+    today = reader.fills("main", day=day)
+    balances = reader.balances()
+    fills_by_book = {book: reader.fills(book) for book, _ in BOOKS}
+    return StateData(today, balances, fills_by_book, reader.position("main"))
+
+
+def build_state_from_data(cache: PanelCache, data: StateData, *, now_ms: int, max_hold_s: float = 300.0,
+                          jev_every_s: float = 2.0) -> dict[str, Any]:
     day = _day_of(now_ms)
     since = now_ms - SERIES_MS
     view = cache.view(day=day, since_ms=since)
     last_id, last_ts = view["last_id"], view["last_ts_ms"]
     price = _price(view["snapshot"], now_ms)
-    today = reader.fills("main", day=day)
-    costs = view["day_costs"]
-    gross = sum(f["pnl"] for f in today)
-    fees = sum(f["fee"] for f in today)
-    funding = sum(f["funding"] for f in today)
-    balances = reader.balances()
-    all_costs = view["lifetime_costs"]
-    fills_by_book = {book: reader.fills(book) for book, _ in BOOKS}
+    gross = sum(f["pnl"] for f in data.today)
+    fees = sum(f["fee"] for f in data.today)
+    funding = sum(f["funding"] for f in data.today)
     board = []
     for book, name in BOOKS:
-        net = _net(fills_by_book[book])
+        net = _net(data.fills_by_book[book])
         if book == "main":
-            net -= all_costs["jev"] + all_costs["llm"]
-        board.append({"carteira": book, "nome": name, "saldo": balances.get(book),
-                      "trades": len(_pair_trades(fills_by_book[book])), "liquido": net})
+            net -= view["lifetime_costs"]["jev"] + view["lifetime_costs"]["llm"]
+        board.append({"carteira": book, "nome": name, "saldo": data.balances.get(book),
+                      "trades": len(_pair_trades(data.fills_by_book[book])), "liquido": net})
     marks = []
-    for f in fills_by_book["main"]:
+    for f in data.fills_by_book["main"]:
         if f["ts_ms"] < since or f["kind"] not in ("open", "close"):
             continue
         tipo = "saida" if f["kind"] == "close" else f"entrada_{f['side']}"
@@ -115,16 +129,24 @@ def build_state(cache: PanelCache, *, now_ms: int, max_hold_s: float = 300.0,
         "estado": "ok",
         "agora_ms": now_ms,
         "carregando": view["loading"],
+        "jev": view["jev"],
         "bot": {"vivo": bool(last_id) and now_ms - last_ts <= alive_threshold_ms(jev_every_s),
                 "ultimo_sinal_s": (now_ms - last_ts) // 1000 if last_id else None},
         "preco": price,
-        "posicao": _position(reader.position("main"), price, now_ms, max_hold_s),
-        "dia": {"bruto": gross, "taxas": fees, "funding": funding, "custo_jev": costs["jev"],
-                "custo_llm": costs["llm"], "liquido": gross - fees - funding - costs["jev"] - costs["llm"]},
+        "posicao": _position(data.position, price, now_ms, max_hold_s),
+        "dia": {"bruto": gross, "taxas": fees, "funding": funding, "custo_jev": view["day_costs"]["jev"],
+                "custo_llm": view["day_costs"]["llm"],
+                "liquido": gross - fees - funding - view["day_costs"]["jev"] - view["day_costs"]["llm"]},
         "placar": board,
-        "trades": _pair_trades(fills_by_book["main"])[-MAX_TRADES:][::-1],
+        "trades": _pair_trades(data.fills_by_book["main"])[-MAX_TRADES:][::-1],
         "serie": {"pontos": view["price_series"], "marcas": marks},
     }
+
+
+def build_state(cache: PanelCache, *, now_ms: int, max_hold_s: float = 300.0,
+                jev_every_s: float = 2.0) -> dict[str, Any]:
+    data = read_state_data(cache, now_ms=now_ms)
+    return build_state_from_data(cache, data, now_ms=now_ms, max_hold_s=max_hold_s, jev_every_s=jev_every_s)
 
 
 def build_events(reader: PanelReader, after_id: int | None) -> dict[str, Any]:

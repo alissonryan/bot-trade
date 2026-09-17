@@ -19,6 +19,7 @@
   .big { font-size:34px; font-weight:700; font-variant-numeric:tabular-nums; }
   .mid { font-size:20px; font-weight:650; }
   .dim { color:var(--dim); } .good { color:var(--good); } .bad { color:var(--bad); } .warn { color:var(--warn); }
+  .dados-desatualizados { opacity:.55; }
   canvas { width:100%; height:260px; display:block; }
   #feed { font:13px/1.5 ui-monospace, Menlo, monospace; height:320px; overflow:auto; background:#0a0d11;
           border-radius:8px; padding:10px; }
@@ -33,6 +34,8 @@
 <body>
 <main>
   <div id="status" class="espera">Conectando…</div>
+  <div id="banco-nota" class="warn"></div>
+  <div id="jev-nota" class="warn"></div>
 
   <div class="row">
     <div class="card"><div class="label">Bitcoin agora (BTC/USDT futuro)</div>
@@ -77,10 +80,38 @@ function cell(tr, text, cls) { const td = document.createElement("td"); td.textC
 
 function renderState(s) {
   const st = $("status");
+  const cards = document.querySelectorAll(".card");
+  const dimCards = s.estado === "erro_painel" || s.banco_ocupado;
+  cards.forEach((card) => {
+    if (dimCards) card.classList.add("dados-desatualizados");
+    else card.classList.remove("dados-desatualizados");
+  });
+  const bancoNota = $("banco-nota");
+  if (s.banco_ocupado) {
+    const busyTooLong = s.agora_ms - s.banco_ocupado_desde_ms > 60000;
+    bancoNota.className = busyTooLong ? "bad" : "warn";
+    bancoNota.textContent = busyTooLong
+      ? "o banco não responde há mais de 1 min — confira se o bot está rodando"
+      : "banco ocupado desde " + hora(s.banco_ocupado_desde_ms) + " — mostrando a última leitura";
+  } else {
+    bancoNota.className = "warn";
+    bancoNota.textContent = "";
+  }
+  const jevNote = $("jev-nota");
+  const motivo = s.jev && s.jev.motivo || "Jev fora do ar";
+  const jevPositionNote = s.posicao
+    ? "o bot continua protegendo posições abertas (stop e tempo máximo), mas não avalia novas entradas."
+    : "o bot não está avaliando novas entradas (não há posição aberta).";
+  jevNote.textContent = s.estado === "ok" && s.jev && s.jev.falhas_seguidas >= 3
+    ? motivo + " desde " + hora(s.jev.desde_ms).slice(0, 5) + " (" + s.jev.falhas_seguidas + " falhas seguidas): " + jevPositionNote
+    : "";
   if (s.estado === "sem_banco") { st.className = "espera"; st.textContent = "O bot ainda não rodou: não há dados para mostrar."; return; }
   if (s.estado === "carregando") { st.className = "espera"; st.textContent = "Carregando histórico do bot…"; return; }
   if (s.estado === "banco_invalido") { st.className = "espera"; st.textContent = "Banco de dados ilegível"; return; }
-  if (s.estado === "erro_painel") { st.className = "espera"; st.textContent = "Erro no painel — tentando de novo…"; return; }
+  if (s.estado === "erro_painel") {
+    const stamp = s.ultimo_ok_ms == null ? "sem leitura bem-sucedida" : "dados de " + hora(s.ultimo_ok_ms);
+    st.className = "espera"; st.textContent = "Erro no painel — tentando de novo… · " + stamp; return;
+  }
   if (Math.abs(Date.now() - s.agora_ms) > 10000) {
     st.className = "parado";
     st.textContent = "Painel travado: dados de " + hora(s.agora_ms) + " — reinicie o python -m fut panel";
@@ -150,8 +181,25 @@ function drawChart(serie) {
 function renderEvents(page) {
   const feed = $("feed");
   for (const e of page.events) {
-    const line = document.createElement("div"); line.className = e.tom;
-    line.textContent = hora(e.ts_ms) + "  " + e.texto; feed.prepend(line);
+    const newest = feed.firstElementChild;
+    if (e.grupo && newest && newest.dataset.grupo === e.grupo) {
+      const firstMs = Number(newest.dataset.primeiroMs);
+      const count = Number(newest.dataset.contagem) + 1;
+      newest.dataset.ultimoMs = String(e.ts_ms);
+      newest.dataset.contagem = String(count);
+      newest.textContent = hora(firstMs) + "–" + hora(e.ts_ms) + "  " + e.texto + " · " + count + " vezes seguidas";
+    } else {
+      const line = document.createElement("div"); line.className = e.tom;
+      line.textContent = hora(e.ts_ms) + "  " + e.texto;
+      if (e.grupo) {
+        line.dataset.grupo = e.grupo;
+        line.dataset.primeiroMs = String(e.ts_ms);
+        line.dataset.ultimoMs = String(e.ts_ms);
+        line.dataset.contagem = "1";
+        line.setAttribute("data-grupo", e.grupo);
+      }
+      feed.prepend(line);
+    }
   }
   while (feed.childElementCount > MAX_FEED) feed.lastElementChild.remove();
   if (typeof page.last_id === "number") lastId = page.last_id;

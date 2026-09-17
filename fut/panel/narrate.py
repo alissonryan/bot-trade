@@ -5,6 +5,7 @@ Pure and total: unknown event kinds get a generic label, and malformed values ne
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 DISPATCH = {
@@ -33,6 +34,29 @@ EXITS = {
     "liquidation": ("SAIU por LIQUIDAÇÃO (perdeu a margem inteira)", "alerta"),
     "funding": ("Taxa de funding cobrada/recebida", "info"),
 }
+_REQUEST_ID = re.compile(r"[\"']?request[_ -]?id[\"']?\s*[:=]\s*[\"']?[^,;\s}]+[\"']?", re.IGNORECASE)
+_URL = re.compile(r"https?://\S+", re.IGNORECASE)
+_EXCEPTION_PREFIX = re.compile(r"^[\w.]+(?:Error|Exception):\s*", re.IGNORECASE)
+
+
+def short_jev_error(error: Any) -> str:
+    raw = str(error or "")
+    lower = raw.lower()
+    if "529" in lower or "overloaded" in lower or "high traffic" in lower:
+        return "Jev sobrecarregado (servidor da TypeSafe com excesso de demanda)"
+    if re.search(r"\b5\d{2}\b", lower):
+        return "Jev com erro no servidor da TypeSafe"
+    if "imed out" in lower or "timeout" in lower:
+        return "Jev demorou demais para responder"
+    if "connection" in lower or "connect" in lower:
+        return "Jev sem conexão"
+    if "429" in lower or "rate" in lower:
+        return "Jev recusou por limite de uso"
+    if "401" in lower or "403" in lower:
+        return "Jev recusou a chave de acesso"
+    clean = _EXCEPTION_PREFIX.sub("", _URL.sub("", raw))
+    clean = " ".join(_REQUEST_ID.sub("", clean).split())[:80]
+    return f"Jev falhou ({clean})"
 
 
 def fmt_price(value: Any) -> str:
@@ -58,7 +82,7 @@ def _quote(reason: Any) -> str:
 
 def _jev(p: dict) -> tuple[str, str] | None:
     if p.get("error"):
-        return f"Jev falhou ({p['error']})", "alerta"
+        return short_jev_error(p["error"]), "alerta"
     answers = _d(p.get("answers"))
     if p.get("gate"):
         gate = str(p.get("gate"))
@@ -125,10 +149,11 @@ def narrate(row: dict, net_usd: float | None = None) -> dict | None:
         told, tipo = ("BOT PAROU: posição aberta ficou sem preço por tempo demais", "alerta"), "alerta"
     else:
         return {"id": row.get("id"), "ts_ms": row.get("ts_ms"), "tipo": "evento", "tom": "info",
-                "texto": f"Evento {str(kind)}"}
+                "texto": f"Evento {str(kind)}", "grupo": None}
     if told is None:
         return None
     text, tone = told
+    grupo = f"jev_erro:{text}" if kind == "jev" and p.get("error") else None
     if net_usd is not None:
         try:
             net = float(net_usd)
@@ -138,4 +163,5 @@ def narrate(row: dict, net_usd: float | None = None) -> dict | None:
             text = f"{text} · resultado {fmt_usd(net)}"
             if tone != "alerta":
                 tone = "bom" if net > 0 else "ruim"
-    return {"id": row.get("id"), "ts_ms": row.get("ts_ms"), "tipo": tipo, "tom": tone, "texto": text}
+    return {"id": row.get("id"), "ts_ms": row.get("ts_ms"), "tipo": tipo, "tom": tone, "texto": text,
+            "grupo": grupo}

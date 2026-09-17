@@ -41,7 +41,7 @@ def test_quiet_jev_row_is_not_an_event():
     (dict(gate="spread_too_wide"), "info", ["ignorado", "spread"]),
     (dict(gate="move_lt_cost"), "info", ["ignorado", "não paga o custo"]),
     (dict(gate="atr"), "info", ["sem medida de volatilidade"]),
-    (dict(error="TimeoutError: slow"), "alerta", ["Jev falhou", "TimeoutError"]),
+    (dict(error="TimeoutError: slow"), "alerta", ["demorou demais"]),
 ])
 def test_jev_rows(payload, tom, parts):
     event = narrate(jev(**payload))
@@ -100,9 +100,43 @@ def test_close_fill_adds_the_money_result_and_sets_the_tone():
 def test_unmonitored_and_unknown_and_malformed_rows():
     assert narrate(row("unmonitored", {"silent_ms": 61000}))["tom"] == "alerta"
     assert narrate(row("brand_new_kind", {})) == {"id": 7, "ts_ms": 1000, "tipo": "evento", "tom": "info",
-                                                    "texto": "Evento brand_new_kind"}
+                                                    "texto": "Evento brand_new_kind", "grupo": None}
     assert narrate(row("llm", {})) is not None  # empty payload: "não respondeu", never raises
     assert narrate({"id": 1, "ts_ms": 1, "kind": "jev", "payload": {"wake": "entry_signal", "answers": "oops"}})
+
+
+@pytest.mark.parametrize("error, expected", [
+    ("TypeSafeInternalServerError: POST https://api.typesafe.ai/v1/systemone: 529 We a…",
+     "Jev sobrecarregado (servidor da TypeSafe com excesso de demanda)"),
+    ("TypeSafeInternalServerError: POST https://api.typesafe.ai/v1/systemone: 503 The model is unavailable. "
+     "If this issue persists, please contact support. (request_id=req_01a0b0ba5c987a32965d338a6decfbbb)",
+     "Jev com erro no servidor da TypeSafe"),
+    ("TypeSafeAPITimeoutError: Request timed out (timeout=2.0).", "Jev demorou demais para responder"),
+    ("request timed out", "Jev demorou demais para responder"),
+    ("429 rate limit request_id=req-123", "Jev recusou por limite de uso"),
+    ("403 forbidden request_id=req-123", "Jev recusou a chave de acesso"),
+    ("TypeSafeThingError: POST https://api.typesafe.ai/v1/systemone: 418 unusual request_id=req_123",
+     "Jev falhou (POST 418 unusual)"),
+])
+def test_jev_errors_are_short_plain_and_grouped(error, expected):
+    event = narrate(jev(error=error))
+    assert event["texto"] == expected
+    assert "http" not in event["texto"] and "request_id" not in event["texto"] and "req_" not in event["texto"]
+    assert event["grupo"] == "jev_erro:" + expected
+
+
+@pytest.mark.parametrize("error, expected", [
+    ("500 Internal Server Error", "Jev com erro no servidor da TypeSafe"),
+    ("502 Bad Gateway", "Jev com erro no servidor da TypeSafe"),
+    ("504 Gateway Timeout", "Jev com erro no servidor da TypeSafe"),
+    ("TypeSafeAPIOError: connect failed", "Jev sem conexão"),
+])
+def test_jev_server_and_connection_error_families_are_localized(error, expected):
+    assert narrate(jev(error=error))["texto"] == expected
+
+
+def test_non_error_events_have_no_group():
+    assert narrate(jev(wake="exit_signal"))["grupo"] is None
 
 
 @pytest.mark.parametrize("bad_row, close_fill", [

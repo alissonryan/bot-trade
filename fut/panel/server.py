@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 from bot.chart_server import _origin_is_loopback, require_loopback
 from fut.panel.cache import PanelCache
 from fut.panel.reader import PanelDbBroken, PanelDbBusy, PanelDbMissing, PanelReader
-from fut.panel.state import build_events, build_state
+from fut.panel.state import build_events, build_state_from_data, read_state_data
 
 _LOOPBACK_HOST_PREFIXES = ("127.0.0.1", "localhost", "[::1]")
 _LOG = logging.getLogger("fut.panel")
@@ -104,19 +104,34 @@ class PanelServer:
         self._refresh_stop = threading.Event()
         self._state_lock = threading.Lock()
         self._refresh_errors: set[str] = set()
+        self._last_ok_ms: int | None = None
+        self._last_state_data = None
+        self._busy_since_ms: int | None = None
         self.state_bytes = json.dumps({"estado": "carregando"}, ensure_ascii=False).encode("utf-8")
 
     def refresh_now(self) -> None:
         now_ms = self.clock_ms()
         try:
             self.cache.refresh(now_ms=now_ms)
-            state = build_state(self.cache, now_ms=now_ms, max_hold_s=self.max_hold_s,
-                                jev_every_s=self.jev_every_s)
+            data = read_state_data(self.cache, now_ms=now_ms)
+            state = build_state_from_data(self.cache, data, now_ms=now_ms, max_hold_s=self.max_hold_s,
+                                          jev_every_s=self.jev_every_s)
             body = json.dumps(state, ensure_ascii=False).encode("utf-8")
+            self._last_state_data = data
+            self._last_ok_ms = now_ms
+            self._busy_since_ms = None
         except PanelDbMissing:
             body = json.dumps({"estado": "sem_banco"}, ensure_ascii=False).encode("utf-8")
         except PanelDbBusy:
-            return
+            if self._last_state_data is None:
+                return
+            if self._busy_since_ms is None:
+                self._busy_since_ms = now_ms
+            state = build_state_from_data(self.cache, self._last_state_data, now_ms=now_ms,
+                                          max_hold_s=self.max_hold_s, jev_every_s=self.jev_every_s)
+            state["banco_ocupado"] = True
+            state["banco_ocupado_desde_ms"] = self._busy_since_ms
+            body = json.dumps(state, ensure_ascii=False).encode("utf-8")
         except PanelDbBroken:
             body = json.dumps({"estado": "banco_invalido"}, ensure_ascii=False).encode("utf-8")
         with self._state_lock:
@@ -133,7 +148,8 @@ class PanelServer:
                     _LOG.error("panel refresh failed: %s", message)
                 with self._state_lock:
                     self.state_bytes = json.dumps(
-                        {"estado": "erro_painel", "detalhe": type(exc).__name__},
+                        {"estado": "erro_painel", "detalhe": type(exc).__name__,
+                         "agora_ms": self.clock_ms(), "ultimo_ok_ms": self._last_ok_ms},
                         ensure_ascii=False,
                     ).encode("utf-8")
             self._refresh_stop.wait(0.05 if self.cache.loading else 1.0)

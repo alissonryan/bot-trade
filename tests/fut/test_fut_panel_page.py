@@ -49,3 +49,47 @@ def test_page_rejects_stale_state_and_handles_panel_errors():
     assert "Math.abs(Date.now() - s.agora_ms) > 10000" in html
     assert 's.estado === "erro_painel"' in html
     assert "Erro no painel — tentando de novo…" in html
+
+
+def test_page_marks_a_busy_database_without_calling_it_stuck():
+    html = PAGE.read_text(encoding="utf-8")
+    assert "banco_ocupado" in html
+    assert 'banco ocupado desde " + hora(s.banco_ocupado_desde_ms)' in html
+    assert "mostrando a última leitura" in html
+    assert "o banco não responde há mais de 1 min — confira se o bot está rodando" in html
+    assert "s.agora_ms - s.banco_ocupado_desde_ms > 60000" in html
+
+
+def test_page_dims_cards_for_panel_errors_and_restores_them_on_success():
+    html = PAGE.read_text(encoding="utf-8")
+    assert ".dados-desatualizados" in html
+    assert "ultimo_ok_ms" in html
+    assert '"dados de " + hora(s.ultimo_ok_ms)' in html
+    assert "classList.add(\"dados-desatualizados\")" in html
+    assert "classList.remove(\"dados-desatualizados\")" in html
+
+
+def test_page_collapses_repeated_jev_errors_and_shows_health_warning():
+    html = PAGE.read_text(encoding="utf-8")
+    assert "data-grupo" in html and "vezes seguidas" in html
+    assert "firstElementChild" in html
+    assert "falhas_seguidas >= 3" in html
+    assert '" desde " + hora(s.jev.desde_ms).slice(0, 5)' in html
+    assert "Jev fora do ar" in html
+    assert "o bot continua protegendo posições abertas" in html
+
+
+def test_page_makes_the_jev_health_warning_position_agnostic():
+    html = PAGE.read_text(encoding="utf-8")
+    assert "o bot não está avaliando novas entradas (não há posição aberta)." in html
+    assert "const jevPositionNote = s.posicao" in html
+    assert "o bot continua protegendo posições abertas (stop e tempo máximo)" in html
+
+
+def test_page_clears_card_dimming_before_any_state_early_return():
+    html = PAGE.read_text(encoding="utf-8")
+    cards_at = html.index("const cards")
+    first_return_at = html.index('if (s.estado === "sem_banco")')
+    assert cards_at < first_return_at
+    assert 's.estado === "erro_painel" || s.banco_ocupado' in html
+    assert "card.classList.remove(\"dados-desatualizados\")" in html

@@ -5,8 +5,7 @@ import urllib.request
 
 import pytest
 
-from fut.panel.reader import PanelReader
-from fut.panel.reader import PanelDbBroken
+from fut.panel.reader import PanelDbBroken, PanelDbBusy, PanelReader
 from fut.panel.server import PanelServer
 from tests.fut.panel_db import add_decision, make_db
 
@@ -125,6 +124,43 @@ def test_missing_state_is_calm_and_busy_keeps_last_cached_state(tmp_path):
         server.shutdown()
 
 
+def test_busy_refresh_recomputes_clock_fields_until_the_next_success(tmp_path):
+    db = tmp_path / "fut.db"
+    conn = make_db(db)
+    add_decision(conn, T0, "jev", {"snapshot": {"last": 100.0, "bid": 99.0, "ask": 101.0}})
+    conn.close()
+    index = tmp_path / "index.html"
+    index.write_text("x", encoding="utf-8")
+    now = iter((T0 + 1000, T0 + 17_000, T0 + 20_000, T0 + 21_000))
+    server = PanelServer(reader=PanelReader(db), index_path=index, port=0, clock_ms=lambda: next(now))
+    server.refresh_now()
+    before = json.loads(server.state_bytes)
+    original_refresh = server.cache.refresh
+    server.cache.refresh = lambda **kwargs: (_ for _ in ()).throw(PanelDbBusy("locked"))
+    server.refresh_now()
+    first_busy = json.loads(server.state_bytes)
+    server.refresh_now()
+    second_busy = json.loads(server.state_bytes)
+    assert before["bot"] == {"vivo": True, "ultimo_sinal_s": 1}
+    assert first_busy["estado"] == "ok" and first_busy["agora_ms"] == T0 + 17_000
+    assert first_busy["bot"] == {"vivo": False, "ultimo_sinal_s": 17}
+    assert first_busy["preco"]["velho"] is True
+    assert first_busy["banco_ocupado"] is True
+    assert first_busy["banco_ocupado_desde_ms"] == T0 + 17_000
+    assert second_busy["bot"] == {"vivo": False, "ultimo_sinal_s": 20}
+    assert second_busy["preco"]["velho"] is True
+    assert second_busy["banco_ocupado_desde_ms"] == T0 + 17_000
+
+    server.cache.refresh = original_refresh
+    server.refresh_now()
+    recovered = json.loads(server.state_bytes)
+    assert recovered["agora_ms"] == T0 + 21_000
+    assert recovered["bot"] == {"vivo": False, "ultimo_sinal_s": 21}
+    assert recovered["preco"]["velho"] is True
+    assert "banco_ocupado" not in recovered
+    assert "banco_ocupado_desde_ms" not in recovered
+
+
 def test_broken_database_is_a_calm_invalid_database_answer(tmp_path):
     db = tmp_path / "fut.db"
     make_db(db).close()
@@ -169,7 +205,9 @@ def test_refresh_loop_survives_an_unexpected_error_and_recovers(tmp_path):
     thread.join(1)
     assert calls == [1, 2]
     assert not thread.is_alive()
-    assert json.loads(server.state_bytes) == {"estado": "erro_painel", "detalhe": "RuntimeError"}
+    error = json.loads(server.state_bytes)
+    assert error["estado"] == "erro_painel" and error["detalhe"] == "RuntimeError"
+    assert isinstance(error["agora_ms"], int) and error["ultimo_ok_ms"] is None
 
 
 def test_refresh_loop_catches_up_quickly_while_cache_is_loading(tmp_path):
@@ -209,3 +247,20 @@ def test_refresh_now_reads_the_clock_once(tmp_path):
                          clock_ms=lambda: clock_calls.append(T0) or T0)
     server.refresh_now()
     assert clock_calls == [T0]
+
+
+def test_panel_error_keeps_the_last_success_timestamp(tmp_path):
+    db = tmp_path / "fut.db"
+    make_db(db).close()
+    index = tmp_path / "index.html"
+    index.write_text("x", encoding="utf-8")
+    server = PanelServer(reader=PanelReader(db), index_path=index, port=0, clock_ms=lambda: T0)
+    server.refresh_now()
+    server.refresh_now = lambda: (_ for _ in ()).throw(RuntimeError("broken refresh"))
+    server.clock_ms = lambda: T0 + 1000
+    server._refresh_stop.wait = lambda timeout: (server._refresh_stop.set() or True)
+    thread = threading.Thread(target=server._refresh_loop)
+    thread.start()
+    thread.join(1)
+    assert json.loads(server.state_bytes) == {"estado": "erro_painel", "detalhe": "RuntimeError",
+                                               "agora_ms": T0 + 1000, "ultimo_ok_ms": T0}

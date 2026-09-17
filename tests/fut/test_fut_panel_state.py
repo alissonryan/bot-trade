@@ -72,6 +72,21 @@ def test_fresh_snapshot_preserves_stored_stale_and_spread_fields(tmp_path):
     assert state["preco"]["spread_bps"] == pytest.approx(8.75)
 
 
+def test_state_exposes_jev_health_from_incremental_cache(tmp_path):
+    db = tmp_path / "fut.db"
+    conn = make_db(db)
+    add_decision(conn, T0, "jev", {"error": "503 unavailable", "snapshot": SNAP(ts_ms=T0)})
+    add_decision(conn, T0 + 1000, "jev", {"error": "503 unavailable", "snapshot": SNAP(ts_ms=T0 + 1000)})
+    add_decision(conn, T0 + 2000, "jev", {"error": None, "snapshot": SNAP(ts_ms=T0 + 2000)})
+    add_decision(conn, T0 + 3000, "jev", {"error": "429 rate limit", "snapshot": SNAP(ts_ms=T0 + 3000)})
+    cache = PanelCache(PanelReader(db), limit=2)
+    cache.refresh(now_ms=T0 + 3000)
+    cache.refresh(now_ms=T0 + 3000)
+    state = build_state(cache, now_ms=T0 + 3000)
+    assert state["jev"] == {"ok": False, "falhas_seguidas": 1, "desde_ms": T0 + 3000,
+                             "motivo": "Jev recusou por limite de uso"}
+
+
 def test_day_result_separates_model_costs_and_ignores_yesterday(tmp_path):
     db = tmp_path / "fut.db"
     conn = make_db(db)
