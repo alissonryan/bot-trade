@@ -26,8 +26,10 @@ def test_questions_without_and_with_position():
 
 
 def test_jev_state_flat_and_open():
-    snap = make_snap()
-    assert jev_state(snap, FutPosition(), now_ms=0)["position"] == "flat"
+    snap = make_snap(returns_bps={"60s": None})
+    flat_state = jev_state(snap, FutPosition(), now_ms=0)
+    assert flat_state["position"] == "flat"
+    assert flat_state["returns_bps"]["60s"] is None
     state = jev_state(snap, LONG, now_ms=30_000)
     pos = state["position"]
     assert pos["side"] == "long" and pos["seconds_open"] == 30

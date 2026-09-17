@@ -33,7 +33,7 @@ class FutSnapshot:
     spread_bps: float
     imbalance: float
     depth_bps: dict[str, dict[str, float]]
-    returns_bps: dict[str, float]
+    returns_bps: dict[str, float | None]
     flow: dict[str, dict[str, Any]]
     atr_1m: float | None
     stale: bool

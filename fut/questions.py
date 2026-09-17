@@ -11,7 +11,7 @@ from fut.types import FutPosition, FutSnapshot, JevVerdict
 
 
 def _r(value, digits=2):
-    return round(float(value), digits)
+    return None if value is None else round(float(value), digits)
 
 
 def build_questions(*, has_position: bool, move_cost_bps: float) -> dict:

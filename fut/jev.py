@@ -55,11 +55,11 @@ class MockJev:
         f30 = snap.flow.get("30s", {})
         volume = (f30.get("buy") or 0) + (f30.get("sell") or 0)
         flow = (f30.get("cvd") or 0) / volume if volume else 0.0
-        r10 = snap.returns_bps.get("10s", 0.0)
+        r10 = snap.returns_bps.get("10s") or 0.0
         signal = max(-50.0, min(50.0, r10 / 2 + snap.imbalance * 1.5 + flow * 2))
         p_up = 1 / (1 + math.exp(-signal))
         direction = "up" if p_up >= 0.6 else "down" if p_up <= 0.4 else "flat"
-        beats = min(1.0, abs(snap.returns_bps.get("60s", 0.0)) / max(self.settings.move_cost_bps, 1e-9))
+        beats = min(1.0, abs(snap.returns_bps.get("60s") or 0.0) / max(self.settings.move_cost_bps, 1e-9))
         aligned = 1.0 if (flow > 0) == (r10 > 0) else 0.0
         exit_now = None
         if position.is_open():

@@ -110,10 +110,10 @@ class MarketState:
         total = wide["bid"] + wide["ask"]
         imbalance = (wide["bid"] - wide["ask"]) / total if total else 0.0
 
-        returns: dict[str, float] = {}
+        returns: dict[str, float | None] = {}
         for label, seconds in RETURN_WINDOWS:
             past = self._mid_at(now_ms - seconds * 1000)
-            returns[label] = (mid - past) / past * 10_000 if past and mid > 0 else 0.0
+            returns[label] = (mid - past) / past * 10_000 if past and mid > 0 else None
 
         flow: dict[str, dict] = {}
         for label, seconds in FLOW_WINDOWS:

@@ -65,7 +65,7 @@ def test_returns_use_mid_history():
     m.apply(ticker(101.0, 101.0), now_ms=10_000)
     s = m.snapshot(10_000)
     assert s.returns_bps["10s"] == pytest.approx(100.0)
-    assert s.returns_bps["60s"] == 0.0
+    assert s.returns_bps["60s"] is None
 
 
 def test_flow_windows_split_aggressor_volume():
