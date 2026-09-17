@@ -31,3 +31,12 @@ def test_page_handles_null_position_levels_and_sustained_database_failures():
     assert "stateFailures >= 5" in html
     assert "Painel sem resposta do banco — tentando de novo…" in html
     assert "stateFailures = 0" in html
+
+
+def test_page_handles_loading_state_without_blocking_the_feed():
+    html = PAGE.read_text(encoding="utf-8")
+    assert 's.estado === "carregando"' in html
+    assert "Carregando histórico do bot…" in html
+    assert "carregando histórico — os totais ainda estão incompletos" in html
+    assert "try { renderState(s); }" in html
+    assert "try { renderEvents(e); }" in html

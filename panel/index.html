@@ -52,6 +52,7 @@
     <div class="card"><div class="label">Placar (dinheiro de mentira, mesmos preços)</div>
       <div class="scroll"><table><thead><tr><th>Quem</th><th>Saldo</th><th>Operações</th><th>Resultado</th></tr></thead>
       <tbody id="placar"></tbody></table></div>
+      <div id="placar-nota" class="warn" style="margin-top:6px;font-size:12px"></div>
       <div class="dim" style="margin-top:6px;font-size:12px">O resultado do bot já desconta o custo das IAs; os outros dois não usam LLM.</div></div>
     <div class="card"><div class="label">Últimas operações do bot</div>
       <div class="scroll"><table><thead><tr><th>Hora</th><th>Lado</th><th>Entrou</th><th>Saiu</th><th>Durou</th><th>Por quê</th><th>Resultado</th></tr></thead>
@@ -77,6 +78,7 @@ function cell(tr, text, cls) { const td = document.createElement("td"); td.textC
 function renderState(s) {
   const st = $("status");
   if (s.estado === "sem_banco") { st.className = "espera"; st.textContent = "O bot ainda não rodou: não há dados para mostrar."; return; }
+  if (s.estado === "carregando") { st.className = "espera"; st.textContent = "Carregando histórico do bot…"; return; }
   if (s.estado === "banco_invalido") { st.className = "espera"; st.textContent = "Banco de dados ilegível"; return; }
   if (s.bot.vivo) { st.className = "vivo"; st.textContent = "● BOT RODANDO — último sinal há " + s.bot.ultimo_sinal_s + " s"; }
   else if (s.bot.ultimo_sinal_s === null) { st.className = "espera"; st.textContent = "Aguardando o primeiro sinal do bot…"; }
@@ -104,10 +106,13 @@ function renderState(s) {
   $("dia").textContent = usd(s.dia.liquido); $("dia").className = "big " + tone(s.dia.liquido);
   $("dia-detalhe").textContent = "operações " + usd(s.dia.bruto) + " · taxas −" + num(s.dia.taxas + s.dia.funding, 4) +
     " · IA −" + num(s.dia.custo_jev + s.dia.custo_llm, 4);
+  $("dia-detalhe").className = s.carregando ? "warn" : "dim";
+  $("dia-detalhe").textContent += s.carregando ? " · carregando histórico — os totais ainda estão incompletos" : "";
 
   const placar = $("placar"); placar.replaceChildren();
   for (const b of s.placar) { const tr = document.createElement("tr");
     cell(tr, b.nome); cell(tr, b.saldo === null ? "—" : num(b.saldo, 2)); cell(tr, String(b.trades)); cell(tr, usd(b.liquido), tone(b.liquido)); placar.appendChild(tr); }
+  $("placar-nota").textContent = s.carregando ? "carregando histórico — os totais ainda estão incompletos" : "";
   const trades = $("trades"); trades.replaceChildren();
   for (const t of s.trades) { const tr = document.createElement("tr");
     cell(tr, hora(t.entrada_ms)); cell(tr, t.lado === "long" ? "comprou" : "vendeu"); cell(tr, num(t.entrada, 1)); cell(tr, num(t.saida, 1));
@@ -154,12 +159,17 @@ async function tick() {
       fetch("/api/state").then((r) => (r.ok ? r.json() : null)),
       fetch("/api/events" + (lastId === null ? "" : "?after=" + lastId)).then((r) => (r.ok ? r.json() : null)),
     ]);
-    if (s) { stateFailures = 0; renderState(s); }           // a 503 (banco ocupado) keeps the last good screen
+    if (s) {
+      stateFailures = 0;
+      try { renderState(s); } catch (err) { /* keep the feed running */ }
+    }           // a 503 (banco ocupado) keeps the last good screen
     else {
       stateFailures += 1;
       if (stateFailures >= 5) { $("status").className = "espera"; $("status").textContent = "Painel sem resposta do banco — tentando de novo…"; }
     }
-    if (e && e.events) renderEvents(e);
+    if (e && e.events) {
+      try { renderEvents(e); } catch (err) { /* a bad event cannot stop polling */ }
+    }
   } catch (err) {
     stateFailures += 1;
     if (stateFailures >= 5) { $("status").className = "espera"; $("status").textContent = "Painel sem resposta do banco — tentando de novo…"; }
