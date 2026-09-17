@@ -80,7 +80,17 @@ function cell(tr, text, cls) { const td = document.createElement("td"); td.textC
 
 function renderState(s) {
   const st = $("status");
-  $("banco-nota").textContent = s.banco_ocupado ? "banco ocupado — mostrando a última leitura" : "";
+  const bancoNota = $("banco-nota");
+  if (s.banco_ocupado) {
+    const busyTooLong = s.agora_ms - s.banco_ocupado_desde_ms > 60000;
+    bancoNota.className = busyTooLong ? "bad" : "warn";
+    bancoNota.textContent = busyTooLong
+      ? "o banco não responde há mais de 1 min — confira se o bot está rodando"
+      : "banco ocupado desde " + hora(s.banco_ocupado_desde_ms) + " — mostrando a última leitura";
+  } else {
+    bancoNota.className = "warn";
+    bancoNota.textContent = "";
+  }
   const jevNote = $("jev-nota");
   const motivo = s.jev && s.jev.motivo || "Jev fora do ar";
   jevNote.textContent = s.estado === "ok" && s.jev && s.jev.falhas_seguidas >= 3
@@ -95,7 +105,10 @@ function renderState(s) {
     const stamp = s.ultimo_ok_ms == null ? "sem leitura bem-sucedida" : "dados de " + hora(s.ultimo_ok_ms);
     st.className = "espera"; st.textContent = "Erro no painel — tentando de novo… · " + stamp; return;
   }
-  if (s.estado === "ok") cards.forEach((card) => card.classList.remove("dados-desatualizados"));
+  if (s.estado === "ok") cards.forEach((card) => {
+    if (s.banco_ocupado) card.classList.add("dados-desatualizados");
+    else card.classList.remove("dados-desatualizados");
+  });
   if (Math.abs(Date.now() - s.agora_ms) > 10000) {
     st.className = "parado";
     st.textContent = "Painel travado: dados de " + hora(s.agora_ms) + " — reinicie o python -m fut panel";

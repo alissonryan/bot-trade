@@ -124,23 +124,41 @@ def test_missing_state_is_calm_and_busy_keeps_last_cached_state(tmp_path):
         server.shutdown()
 
 
-def test_busy_refresh_republishes_last_normal_state_with_fresh_timestamp(tmp_path):
+def test_busy_refresh_recomputes_clock_fields_until_the_next_success(tmp_path):
     db = tmp_path / "fut.db"
     conn = make_db(db)
     add_decision(conn, T0, "jev", {"snapshot": {"last": 100.0, "bid": 99.0, "ask": 101.0}})
     conn.close()
     index = tmp_path / "index.html"
     index.write_text("x", encoding="utf-8")
-    now = iter((T0 + 1000, T0 + 2000))
+    now = iter((T0 + 1000, T0 + 17_000, T0 + 20_000, T0 + 21_000))
     server = PanelServer(reader=PanelReader(db), index_path=index, port=0, clock_ms=lambda: next(now))
     server.refresh_now()
     before = json.loads(server.state_bytes)
+    original_refresh = server.cache.refresh
     server.cache.refresh = lambda **kwargs: (_ for _ in ()).throw(PanelDbBusy("locked"))
     server.refresh_now()
-    after = json.loads(server.state_bytes)
-    assert after["estado"] == "ok" and after["agora_ms"] == T0 + 2000
-    assert after["banco_ocupado"] is True
-    assert after["bot"] == before["bot"] and after["preco"] == before["preco"]
+    first_busy = json.loads(server.state_bytes)
+    server.refresh_now()
+    second_busy = json.loads(server.state_bytes)
+    assert before["bot"] == {"vivo": True, "ultimo_sinal_s": 1}
+    assert first_busy["estado"] == "ok" and first_busy["agora_ms"] == T0 + 17_000
+    assert first_busy["bot"] == {"vivo": False, "ultimo_sinal_s": 17}
+    assert first_busy["preco"]["velho"] is True
+    assert first_busy["banco_ocupado"] is True
+    assert first_busy["banco_ocupado_desde_ms"] == T0 + 17_000
+    assert second_busy["bot"] == {"vivo": False, "ultimo_sinal_s": 20}
+    assert second_busy["preco"]["velho"] is True
+    assert second_busy["banco_ocupado_desde_ms"] == T0 + 17_000
+
+    server.cache.refresh = original_refresh
+    server.refresh_now()
+    recovered = json.loads(server.state_bytes)
+    assert recovered["agora_ms"] == T0 + 21_000
+    assert recovered["bot"] == {"vivo": False, "ultimo_sinal_s": 21}
+    assert recovered["preco"]["velho"] is True
+    assert "banco_ocupado" not in recovered
+    assert "banco_ocupado_desde_ms" not in recovered
 
 
 def test_broken_database_is_a_calm_invalid_database_answer(tmp_path):

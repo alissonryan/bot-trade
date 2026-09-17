@@ -54,7 +54,10 @@ def test_page_rejects_stale_state_and_handles_panel_errors():
 def test_page_marks_a_busy_database_without_calling_it_stuck():
     html = PAGE.read_text(encoding="utf-8")
     assert "banco_ocupado" in html
-    assert "banco ocupado — mostrando a última leitura" in html
+    assert 'banco ocupado desde " + hora(s.banco_ocupado_desde_ms)' in html
+    assert "mostrando a última leitura" in html
+    assert "o banco não responde há mais de 1 min — confira se o bot está rodando" in html
+    assert "s.agora_ms - s.banco_ocupado_desde_ms > 60000" in html
 
 
 def test_page_dims_cards_for_panel_errors_and_restores_them_on_success():
