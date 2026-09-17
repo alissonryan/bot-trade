@@ -49,3 +49,9 @@ def test_page_rejects_stale_state_and_handles_panel_errors():
     assert "Math.abs(Date.now() - s.agora_ms) > 10000" in html
     assert 's.estado === "erro_painel"' in html
     assert "Erro no painel — tentando de novo…" in html
+
+
+def test_page_marks_a_busy_database_without_calling_it_stuck():
+    html = PAGE.read_text(encoding="utf-8")
+    assert "banco_ocupado" in html
+    assert "banco ocupado — mostrando a última leitura" in html

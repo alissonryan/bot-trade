@@ -116,7 +116,13 @@ class PanelServer:
         except PanelDbMissing:
             body = json.dumps({"estado": "sem_banco"}, ensure_ascii=False).encode("utf-8")
         except PanelDbBusy:
-            return
+            with self._state_lock:
+                previous = json.loads(self.state_bytes)
+            if previous.get("estado") != "ok":
+                return
+            previous["agora_ms"] = now_ms
+            previous["banco_ocupado"] = True
+            body = json.dumps(previous, ensure_ascii=False).encode("utf-8")
         except PanelDbBroken:
             body = json.dumps({"estado": "banco_invalido"}, ensure_ascii=False).encode("utf-8")
         with self._state_lock:

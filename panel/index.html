@@ -33,6 +33,7 @@
 <body>
 <main>
   <div id="status" class="espera">Conectando…</div>
+  <div id="banco-nota" class="warn"></div>
 
   <div class="row">
     <div class="card"><div class="label">Bitcoin agora (BTC/USDT futuro)</div>
@@ -77,6 +78,7 @@ function cell(tr, text, cls) { const td = document.createElement("td"); td.textC
 
 function renderState(s) {
   const st = $("status");
+  $("banco-nota").textContent = s.banco_ocupado ? "banco ocupado — mostrando a última leitura" : "";
   if (s.estado === "sem_banco") { st.className = "espera"; st.textContent = "O bot ainda não rodou: não há dados para mostrar."; return; }
   if (s.estado === "carregando") { st.className = "espera"; st.textContent = "Carregando histórico do bot…"; return; }
   if (s.estado === "banco_invalido") { st.className = "espera"; st.textContent = "Banco de dados ilegível"; return; }

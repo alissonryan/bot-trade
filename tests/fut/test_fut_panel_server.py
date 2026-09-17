@@ -5,8 +5,7 @@ import urllib.request
 
 import pytest
 
-from fut.panel.reader import PanelReader
-from fut.panel.reader import PanelDbBroken
+from fut.panel.reader import PanelDbBroken, PanelDbBusy, PanelReader
 from fut.panel.server import PanelServer
 from tests.fut.panel_db import add_decision, make_db
 
@@ -123,6 +122,25 @@ def test_missing_state_is_calm_and_busy_keeps_last_cached_state(tmp_path):
     finally:
         conn.rollback()
         server.shutdown()
+
+
+def test_busy_refresh_republishes_last_normal_state_with_fresh_timestamp(tmp_path):
+    db = tmp_path / "fut.db"
+    conn = make_db(db)
+    add_decision(conn, T0, "jev", {"snapshot": {"last": 100.0, "bid": 99.0, "ask": 101.0}})
+    conn.close()
+    index = tmp_path / "index.html"
+    index.write_text("x", encoding="utf-8")
+    now = iter((T0 + 1000, T0 + 2000))
+    server = PanelServer(reader=PanelReader(db), index_path=index, port=0, clock_ms=lambda: next(now))
+    server.refresh_now()
+    before = json.loads(server.state_bytes)
+    server.cache.refresh = lambda **kwargs: (_ for _ in ()).throw(PanelDbBusy("locked"))
+    server.refresh_now()
+    after = json.loads(server.state_bytes)
+    assert after["estado"] == "ok" and after["agora_ms"] == T0 + 2000
+    assert after["banco_ocupado"] is True
+    assert after["bot"] == before["bot"] and after["preco"] == before["preco"]
 
 
 def test_broken_database_is_a_calm_invalid_database_answer(tmp_path):
