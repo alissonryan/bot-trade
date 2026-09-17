@@ -81,6 +81,7 @@ class ReadOnlyReportStore:
 class EdgeCriterion:
     min_trades: int = 200
     min_days: float = 14.0
+    min_jev_rows_per_day: int = 10_000
 
 
 def book_totals(store, book: str) -> dict:
@@ -121,14 +122,14 @@ def _percentile(sorted_values, q):
     return sorted_values[min(len(sorted_values) - 1, int(q * (len(sorted_values) - 1)))]
 
 
-def summarize(store, settings: FutSettings) -> dict:
+def summarize(store, settings: FutSettings, criterion: EdgeCriterion = EdgeCriterion()) -> dict:
     decisions = store.decisions()
     jev = [d for d in decisions if d["kind"] == "jev"]
     llm = [d for d in decisions if d["kind"] == "llm"]
     jev_cost = sum(float(d["payload"].get("cost_usd") or 0.0) for d in jev)
     llm_cost = sum(float(d["payload"].get("cost_usd") or 0.0) for d in llm)
-    real_jev_days = {day_of(d["ts_ms"]) for d in jev if d["payload"].get("model") != "mock"}
-    days = len(real_jev_days)
+    real_jev_rows_by_day = Counter(day_of(d["ts_ms"]) for d in jev if d["payload"].get("model") != "mock")
+    days = sum(rows >= criterion.min_jev_rows_per_day for rows in real_jev_rows_by_day.values())
 
     totals = {book: book_totals(store, book) for book in BOOKS}
     main_trades = totals["main"]["trades"]
@@ -147,6 +148,7 @@ def summarize(store, settings: FutSettings) -> dict:
     latencies = sorted(int(d["payload"].get("elapsed_ms") or 0) for d in llm)
     return {
         "days": days,
+        "real_jev_rows_by_day": dict(real_jev_rows_by_day),
         "since_ms": getattr(store, "since_ms", None),
         "jev_models": sorted({str(d["payload"].get("model")) for d in jev}),
         "jev_cost_usd": jev_cost,

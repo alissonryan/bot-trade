@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from fut.report import EdgeCriterion, book_totals, bootstrap_ci, evaluate, render, summarize
@@ -49,8 +51,9 @@ def test_bootstrap_ci_of_a_constant_is_that_constant():
 
 def test_strong_synthetic_run_passes_every_check(tmp_path):
     store = build(tmp_path)
-    summary = summarize(store, FutSettings())
-    verdict = evaluate(summary, FutSettings())
+    criterion = EdgeCriterion(min_jev_rows_per_day=1)
+    summary = summarize(store, FutSettings(), criterion)
+    verdict = evaluate(summary, FutSettings(), criterion)
     assert verdict["checks"] == {k: True for k in verdict["checks"]}
     assert verdict["passed"] is True
     assert summary["n_trades"] == 200 and summary["days"] >= 14
@@ -64,8 +67,37 @@ def test_min_days_counts_distinct_real_jev_utc_dates_not_elapsed_span(tmp_path):
 
     summary = summarize(store, FutSettings())
 
-    assert summary["days"] == 2
-    assert evaluate(summary, FutSettings(), EdgeCriterion(min_trades=0, min_days=3))["checks"]["min_days"] is False
+    assert summary["days"] == 0
+    assert evaluate(summary, FutSettings(), EdgeCriterion(min_trades=0, min_days=1))["checks"]["min_days"] is False
+
+
+def test_min_days_requires_real_jev_coverage_per_utc_day(tmp_path):
+    store = FutStore(tmp_path / "fut.db")
+    rows = [(T0 + day * DAY_MS, "jev", json.dumps({"model": "jev-real", "cost_usd": 0.0}))
+            for day in range(14)]
+    store._conn.executemany("INSERT INTO fut_decisions(ts_ms, kind, payload) VALUES (?,?,?)", rows)
+    store.commit()
+
+    summary = summarize(store, FutSettings())
+
+    assert summary["days"] == 0
+    assert evaluate(summary, FutSettings(), EdgeCriterion(min_trades=0, min_days=14))["checks"]["min_days"] is False
+
+
+def test_min_days_accepts_fourteen_utc_days_with_minimum_real_jev_coverage(tmp_path):
+    store = FutStore(tmp_path / "fut.db")
+    rows = []
+    for day in range(14):
+        for row_number in range(10_000):
+            rows.append((T0 + day * DAY_MS + row_number, "jev",
+                         json.dumps({"model": "jev-real", "cost_usd": 0.0})))
+    store._conn.executemany("INSERT INTO fut_decisions(ts_ms, kind, payload) VALUES (?,?,?)", rows)
+    store.commit()
+
+    summary = summarize(store, FutSettings())
+
+    assert summary["days"] == 14
+    assert evaluate(summary, FutSettings(), EdgeCriterion(min_trades=0, min_days=14))["checks"]["min_days"] is True
 
 
 def passing_summary():
