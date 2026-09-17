@@ -151,6 +151,15 @@ def test_entry_streak_resets_on_nonqualifying_error_side_change_open_and_stale(t
     assert len(store.decisions("jev")) == 6
 
 
+def test_jev_audit_keeps_main_position_state_for_replay(tmp_path):
+    loop, store, _, _, _ = build(tmp_path)
+    open_long(loop)
+
+    loop._jev(make_snap(ts_ms=T0), T0)
+
+    assert store.decisions("jev")[0]["payload"]["state"]["position"]["side"] == "long"
+
+
 def test_cost_gate_blocks_flat_entry_wake_before_llm_and_is_logged(tmp_path):
     settings = FutSettings(max_spread_bps=0.01)
     loop, store, _, _, calls = build(tmp_path, settings=settings)

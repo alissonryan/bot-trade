@@ -266,6 +266,7 @@ class FutLoop:
         self.store.log_decision("jev", {
             "model": verdict.model, "error": verdict.error, "latency_ms": verdict.latency_ms,
             "input_tokens": verdict.input_tokens, "cost_usd": cost, "answers": verdict.answers(),
+            "state": verdict.state,
             "wake": wake, "dispatch": dispatch, "shadow": shadow, "snapshot": snap.compact(),
             "streak": self._entry_streak, "gate": wake_gate,
         }, ts_ms=now)

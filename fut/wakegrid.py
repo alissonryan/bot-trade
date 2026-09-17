@@ -16,7 +16,6 @@ STREAKS = (1, 2, 3, 4, 6)
 THRESHOLDS = (0.50, 0.55, 0.60, 0.65, 0.70)
 REGIME_SETS = ((), ("trend", "volatile"))
 TAKER_FEE_BPS = 1.0
-SLIPPAGE_BPS = 2.0
 HOLD_MS = 60_000
 
 
@@ -52,6 +51,17 @@ class ReplayResult:
 @dataclass(frozen=True)
 class _ReplaySpec:
     taker_fee: float = TAKER_FEE_BPS / 10_000
+
+
+def _main_position_open(payload: dict[str, Any]) -> bool:
+    candidates = [payload.get("position")]
+    state = payload.get("state")
+    if isinstance(state, dict):
+        candidates.append(state.get("position"))
+    for position in candidates:
+        if isinstance(position, dict) and position.get("side") in ("long", "short"):
+            return True
+    return False
 
 
 def load_rows(path: Path, *, since_ms: int | None = None) -> list[dict[str, Any]]:
@@ -106,7 +116,7 @@ def _answer(payload: dict[str, Any]) -> tuple[str, float, float, str] | None:
         regime = str(answers["regime"]).lower()
     except (KeyError, TypeError, ValueError):
         return None
-    if direction not in ("up", "down") or not all(math.isfinite(value) for value in (confidence, beats_cost)):
+    if direction not in ("up", "down", "flat") or not all(math.isfinite(value) for value in (confidence, beats_cost)):
         return None
     return direction, confidence, beats_cost, regime
 
@@ -119,12 +129,13 @@ def _side(answer: tuple[str, float, float, str], threshold: float, regimes: tupl
 
 
 def replay(rows: Iterable[dict[str, Any]], *, streak: int, threshold: float,
-           regimes: tuple[str, ...], gates: bool) -> ReplayResult:
-    settings = FutSettings(max_hold_s=60.0, slippage_bps=SLIPPAGE_BPS,
-                           max_spread_bps=3.0 if gates else 0.0,
-                           min_move_mult=2.0 if gates else 0.0)
+           regimes: tuple[str, ...], gates: bool, settings: FutSettings | None = None) -> ReplayResult:
+    source_settings = settings or FutSettings.from_env()
+    settings = FutSettings(max_hold_s=60.0, slippage_bps=source_settings.slippage_bps,
+                           max_spread_bps=(source_settings.max_spread_bps or 3.0) if gates else 0.0,
+                           min_move_mult=(source_settings.min_move_mult or 2.0) if gates else 0.0)
     spec = _ReplaySpec()
-    cost_bps = 2 * (TAKER_FEE_BPS + SLIPPAGE_BPS)
+    cost_bps = 2 * (spec.taker_fee * 10_000 + settings.slippage_bps)
     current: tuple[str, int, float] | None = None
     current_side: str | None = None
     current_streak = 0
@@ -135,9 +146,8 @@ def replay(rows: Iterable[dict[str, Any]], *, streak: int, threshold: float,
         payload = row.get("payload")
         if not isinstance(payload, dict):
             continue
-        answer = _answer(payload)
         snap = _snapshot(payload)
-        if answer is None or snap is None:
+        if snap is None:
             continue
         ts_ms = int(row["ts_ms"])
         if current is not None:
@@ -152,6 +162,18 @@ def replay(rows: Iterable[dict[str, Any]], *, streak: int, threshold: float,
                 current_side = None
                 current_streak = 0
                 continue
+            current_side = None
+            current_streak = 0
+            continue
+
+        answer = _answer(payload)
+        if answer is None:
+            current_side = None
+            current_streak = 0
+            continue
+        if _main_position_open(payload):
+            current_side = None
+            current_streak = 0
             continue
 
         side = _side(answer, threshold, regimes)
@@ -193,6 +215,7 @@ def grid_results(rows: Iterable[dict[str, Any]]) -> list[ReplayResult]:
 def render_grid(results: Iterable[ReplayResult]) -> str:
     lines = [
         "WARNING: in-sample over the supplied rows; check the selected settings on new data.",
+        "Replay uses a fixed 60s hold and no stop; gaps from restarts or stale data lengthen holds; wakes = entries.",
         "streak threshold regime gates wakes trades mean_net_bps sum_net_bps win_rate",
     ]
     for result in sorted(results, key=lambda item: item.sum_net_bps, reverse=True):

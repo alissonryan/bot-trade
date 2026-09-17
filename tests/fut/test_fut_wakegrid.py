@@ -7,14 +7,17 @@ from fut.wakegrid import load_rows, replay, render_grid
 
 
 def payload(*, direction="up", conf=0.8, beats=0.8, regime="trend", bid=99.9, ask=100.0,
-            atr=1.0, error=None, answers=True):
-    return {
+            atr=1.0, error=None, answers=True, position=None):
+    result = {
         "error": error,
         "answers": ({"direction": direction, "direction_conf": conf, "beats_cost": beats,
                      "regime": regime} if answers else None),
         "snapshot": {"bid": bid, "ask": ask, "last": bid, "spread_bps": (ask - bid) / ((ask + bid) / 2) * 10_000,
                       "atr_1m": atr},
     }
+    if position is not None:
+        result["state"] = {"position": position}
+    return result
 
 
 def row(ts_ms, **kwargs):
@@ -41,6 +44,33 @@ def test_replay_supports_short_entries_streak_and_regime_filter():
     assert result.trades == 1
     assert result.sum_net_bps == pytest.approx(84.0, abs=0.1)
     assert replay(rows, streak=1, threshold=0.5, regimes=("range",), gates=False).trades == 0
+
+
+def test_flat_row_resets_entry_streak():
+    rows = [row(0, direction="up"), row(1_000, direction="flat"), row(2_000, direction="up")]
+
+    result = replay(rows, streak=2, threshold=0.5, regimes=(), gates=False)
+
+    assert result.wakes == 0 and result.trades == 0
+
+
+def test_flat_row_can_close_replay_position_at_first_hold_boundary():
+    rows = [row(0), row(60_000, direction="flat", bid=101.0, ask=101.1),
+            row(120_000, bid=99.0, ask=99.1)]
+
+    result = replay(rows, streak=1, threshold=0.5, regimes=(), gates=False)
+
+    assert result.trades == 1
+    assert result.sum_net_bps == pytest.approx(94.0)
+
+
+def test_replay_skips_entries_recorded_while_main_was_open(tmp_path):
+    rows = [row(0, position={"side": "long"}), row(60_000, bid=101.0, ask=101.1,
+                                                   position={"side": "long"})]
+
+    result = replay(rows, streak=1, threshold=0.5, regimes=(), gates=False)
+
+    assert result.wakes == 0 and result.trades == 0
 
 
 def test_replay_cost_gates_block_wide_spread_and_quiet_atr():
@@ -79,3 +109,5 @@ def test_render_grid_sorts_by_sum_net_bps_and_warns_in_sample():
     assert "WARNING: in-sample" in rendered
     assert rendered.index("94.00") < rendered.index("4.00")
     assert "wakes" in rendered and "win_rate" in rendered
+    assert "fixed 60s hold" in rendered
+    assert "wakes = entries" in rendered
