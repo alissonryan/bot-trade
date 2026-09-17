@@ -78,7 +78,10 @@ function renderState(s) {
   if (s.estado === "sem_banco") { st.className = "espera"; st.textContent = "O bot ainda não rodou: não há dados para mostrar."; return; }
   if (s.bot.vivo) { st.className = "vivo"; st.textContent = "● BOT RODANDO — último sinal há " + s.bot.ultimo_sinal_s + " s"; }
   else if (s.bot.ultimo_sinal_s === null) { st.className = "espera"; st.textContent = "Aguardando o primeiro sinal do bot…"; }
-  else { st.className = "parado"; st.textContent = "■ BOT PARADO há " + mmss(s.bot.ultimo_sinal_s) + " — o histórico abaixo continua valendo"; }
+  else {
+    st.className = s.bot.ultimo_sinal_s > 120 ? "parado" : "espera";
+    st.textContent = "SEM SINAL DO BOT há " + mmss(s.bot.ultimo_sinal_s) + " — se o mercado estiver parado isso é normal; se passar de alguns minutos, confira o terminal";
+  }
 
   if (s.preco) {
     $("preco").textContent = num(s.preco.mid, 1);

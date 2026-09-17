@@ -2,11 +2,16 @@ import pytest
 
 from fut.panel.reader import PanelReader
 from fut.panel.cache import PanelCache
-from fut.panel.state import build_events, build_state
+from fut.panel.state import alive_threshold_ms, build_events, build_state
 from tests.fut.panel_db import SNAP, add_decision, add_fill, make_db, set_balance, set_position
 
 DAY = 86_400_000
 T0 = 20_000 * DAY  # a UTC midnight
+
+
+@pytest.mark.parametrize("jev_every_s, expected_ms", [(1.0, 10_000), (2.0, 10_000), (3.0, 15_000), (2.5, 12_500)])
+def test_alive_threshold_tracks_jev_cadence(jev_every_s, expected_ms):
+    assert alive_threshold_ms(jev_every_s) == expected_ms
 
 
 def jev_row(conn, ts, bid, ask, **extra):

@@ -9,7 +9,7 @@ from fut.panel.cache import PanelCache
 from fut.panel.narrate import narrate
 from fut.panel.reader import PanelReader
 
-ALIVE_MS = 10_000        # the bot logs a Jev row every ~2.5 s; 10 s of silence means it stopped
+MIN_ALIVE_MS = 10_000
 OLD_PRICE_MS = 15_000
 SERIES_MS = 2 * 3_600_000
 MAX_TRADES = 50
@@ -18,6 +18,10 @@ FIRST_PAGE = 200
 # read ContractSpec; the position card is an estimate, the ledger fills are the record.
 CONTRACT_SIZE = 0.0001
 BOOKS = (("main", "Bot (Jev + LLM)"), ("shadow:jev_only", "Só o Jev (sem LLM)"), ("shadow:random", "Aleatório"))
+
+
+def alive_threshold_ms(jev_every_s: float) -> int:
+    return int(max(MIN_ALIVE_MS, 5 * float(jev_every_s) * 1000))
 
 
 def _day_of(ts_ms: int) -> str:
@@ -77,7 +81,8 @@ def _position(pos: dict | None, price: dict | None, now_ms: int, max_hold_s: flo
     return out
 
 
-def build_state(cache: PanelCache, *, now_ms: int, max_hold_s: float = 300.0) -> dict[str, Any]:
+def build_state(cache: PanelCache, *, now_ms: int, max_hold_s: float = 300.0,
+                jev_every_s: float = 2.0) -> dict[str, Any]:
     reader = cache.reader
     last_id, last_ts = cache.last_id, cache.last_ts_ms
     price = _price(cache.snapshot, now_ms)
@@ -108,7 +113,7 @@ def build_state(cache: PanelCache, *, now_ms: int, max_hold_s: float = 300.0) ->
         "estado": "ok",
         "agora_ms": now_ms,
         "carregando": cache.loading,
-        "bot": {"vivo": bool(last_id) and now_ms - last_ts <= ALIVE_MS,
+        "bot": {"vivo": bool(last_id) and now_ms - last_ts <= alive_threshold_ms(jev_every_s),
                 "ultimo_sinal_s": (now_ms - last_ts) // 1000 if last_id else None},
         "preco": price,
         "posicao": _position(reader.position("main"), price, now_ms, max_hold_s),

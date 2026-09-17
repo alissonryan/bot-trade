@@ -83,13 +83,14 @@ class _Handler(BaseHTTPRequestHandler):
 
 class PanelServer:
     def __init__(self, *, reader: PanelReader, index_path: Path, host: str = "127.0.0.1", port: int = 8766,
-                 clock_ms: Callable[[], int] | None = None, max_hold_s: float = 300.0):
+                 clock_ms: Callable[[], int] | None = None, max_hold_s: float = 300.0, jev_every_s: float = 2.0):
         self.host = require_loopback(host)
         self.reader = reader
         self.cache = PanelCache(reader)
         self.index_path = Path(index_path)
         self.clock_ms = clock_ms or (lambda: int(time.time() * 1000))
         self.max_hold_s = max_hold_s
+        self.jev_every_s = jev_every_s
         self.requested_port = port
         self.port: int | None = None
         self._httpd: ThreadingHTTPServer | None = None
@@ -102,7 +103,8 @@ class PanelServer:
     def refresh_now(self) -> None:
         try:
             self.cache.refresh(now_ms=self.clock_ms())
-            state = build_state(self.cache, now_ms=self.clock_ms(), max_hold_s=self.max_hold_s)
+            state = build_state(self.cache, now_ms=self.clock_ms(), max_hold_s=self.max_hold_s,
+                                jev_every_s=self.jev_every_s)
             body = json.dumps(state, ensure_ascii=False).encode("utf-8")
         except PanelDbMissing:
             body = json.dumps({"estado": "sem_banco"}, ensure_ascii=False).encode("utf-8")

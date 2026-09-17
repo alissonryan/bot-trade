@@ -114,8 +114,12 @@ def panel(host: str, port: int) -> int:
     except ValueError:
         max_hold_s = 300.0
     try:
+        jev_every_s = float(os.getenv("FUT_JEV_EVERY_SECONDS", "2.0"))
+    except ValueError:
+        jev_every_s = 2.0
+    try:
         server = PanelServer(reader=PanelReader(DB_PATH), index_path=PANEL_INDEX, host=host, port=port,
-                             max_hold_s=max_hold_s)
+                             max_hold_s=max_hold_s, jev_every_s=jev_every_s)
     except ValueError as exc:
         print(f"panel is loopback only: {exc}")
         return 1
