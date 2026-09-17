@@ -10,10 +10,12 @@ def test_panel_docs_describe_incremental_shared_refresh_and_possible_contention(
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     panel_docs = claude + "\n" + agents
     assert "bounded incremental" in reader_doc
+    assert "20,000 ids" in reader_doc and "45 h" in reader_doc and "10 s cadence" in reader_doc
     assert "one refresher" in panel_docs and "all browser tabs" in panel_docs
     assert "can still contend" in panel_docs
     assert "lock-free" not in panel_docs
     assert "Evento <kind>" in agents
+    assert "SILENT_KINDS" in agents
     assert "shows raw" not in agents
 
 
@@ -36,6 +38,12 @@ def test_panel_docs_describe_jev_error_translation_and_health():
     agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     assert "Jev com erro no servidor da TypeSafe" in spec and "request_id" not in spec
     assert "Jev sobrecarregado" in spec and "Jev com erro no servidor da TypeSafe" in spec
-    assert "Jev sem conexão" in spec and "https?://" in spec
+    assert "Jev sem conexão" in spec and "allowlist" in spec
+    assert "https?://" not in spec
+    assert "Jev fora do ar" in spec
+    assert "500 Internal Server Error" in spec and "prefixo SDK" in spec
+    assert spec.count("| `jev` com `error` |") == 1
     assert "falhas_seguidas" in spec and "jev_erro:" in spec
+    assert "jev_ab" in spec and "SILENT_KINDS" in spec
+    assert "de probabilidade" in spec and "confiança" in spec
     assert "The state also exposes Jev health" in agents

@@ -5,9 +5,11 @@ Pure and total: unknown event kinds get a generic label, and malformed values ne
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
+SILENT_KINDS = {"jev_ab"}
 DISPATCH = {
     "dispatched": "perguntando à LLM…",
     "suppressed_inflight": "LLM ainda ocupada com a pergunta anterior",
@@ -35,28 +37,37 @@ EXITS = {
     "funding": ("Taxa de funding cobrada/recebida", "info"),
 }
 _REQUEST_ID = re.compile(r"[\"']?request[_ -]?id[\"']?\s*[:=]\s*[\"']?[^,;\s}]+[\"']?", re.IGNORECASE)
-_URL = re.compile(r"https?://\S+", re.IGNORECASE)
+_URL = re.compile(r"https?://\S*?(?=:\s*[45]\d{2}\b|\s|$)", re.IGNORECASE)
 _EXCEPTION_PREFIX = re.compile(r"^[\w.]+(?:Error|Exception):\s*", re.IGNORECASE)
+_SDK_SERVER_STATUS = re.compile(r":\s*5\d{2}\b", re.IGNORECASE)
+_SAFE_PUNCTUATION = frozenset(".,;:!?()[]{}'\"/_-")
 
 
 def short_jev_error(error: Any) -> str:
     raw = str(error or "")
-    lower = raw.lower()
-    if "529" in lower or "overloaded" in lower or "high traffic" in lower:
-        return "Jev sobrecarregado (servidor da TypeSafe com excesso de demanda)"
-    if re.search(r"\b5\d{2}\b", lower):
-        return "Jev com erro no servidor da TypeSafe"
+    clean = _REQUEST_ID.sub("", raw)
+    clean = _URL.sub("", clean)
+    clean = " ".join(token for token in clean.split() if "=" not in token and "://" not in token)
+    lower = clean.lower()
     if "imed out" in lower or "timeout" in lower:
         return "Jev demorou demais para responder"
     if "connection" in lower or "connect" in lower:
         return "Jev sem conexão"
-    if "429" in lower or "rate" in lower:
+    if re.search(r":\s*429\b", lower) or "rate limit" in lower:
         return "Jev recusou por limite de uso"
-    if "401" in lower or "403" in lower:
+    if re.search(r":\s*(?:401|403)\b", lower):
         return "Jev recusou a chave de acesso"
-    clean = _EXCEPTION_PREFIX.sub("", _URL.sub("", raw))
-    clean = " ".join(_REQUEST_ID.sub("", clean).split())[:80]
-    return f"Jev falhou ({clean})"
+    if re.search(r":\s*529\b", lower) or "overloaded" in lower or "high traffic" in lower:
+        return "Jev sobrecarregado (servidor da TypeSafe com excesso de demanda)"
+    if re.search(r":\s*503\b", lower) or "unavailable" in lower:
+        return "Jev fora do ar (servidor da TypeSafe indisponível)"
+    if _SDK_SERVER_STATUS.search(lower):
+        return "Jev com erro no servidor da TypeSafe"
+    clean = _EXCEPTION_PREFIX.sub("", clean)
+    clean = "".join(char for char in clean
+                     if char.isalnum() or char.isspace() or char in _SAFE_PUNCTUATION)
+    clean = " ".join(clean.split())[:80]
+    return f"Jev falhou ({clean})" if clean else "Jev falhou"
 
 
 def fmt_price(value: Any) -> str:
@@ -80,6 +91,13 @@ def _quote(reason: Any) -> str:
     return f" — “{reason}”" if reason else ""
 
 
+def _finite_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
 def _jev(p: dict) -> tuple[str, str] | None:
     if p.get("error"):
         return short_jev_error(p["error"]), "alerta"
@@ -95,12 +113,17 @@ def _jev(p: dict) -> tuple[str, str] | None:
     suffix = DISPATCH.get(dispatch_key, dispatch_key)
     tone = "alerta" if dispatch_key == "suppressed_budget" else "info"
     if wake == "entry_signal":
-        direction = {"up": "ALTA", "down": "QUEDA"}.get(str(answers.get("direction")), "MOVIMENTO")
-        try:
-            pct = f" ({float(answers.get('direction_conf')) * 100:.0f}%)"
-        except (TypeError, ValueError):
-            pct = ""
-        head = f"Jev viu chance de {direction}{pct}"
+        direction_key = str(answers.get("direction"))
+        direction = {"up": "ALTA", "down": "QUEDA"}.get(direction_key, "MOVIMENTO")
+        probability = _finite_number(_d(p.get("probabilities")).get(direction_key))
+        confidence = _finite_number(answers.get("direction_conf"))
+        if probability is not None and 0 <= probability <= 1:
+            qualifier = f" ({probability * 100:.0f}% de probabilidade)"
+        elif confidence is not None:
+            qualifier = f" (confiança {confidence:.2f})".replace(".", ",")
+        else:
+            qualifier = ""
+        head = f"Jev viu chance de {direction}{qualifier}"
     elif wake == "exit_signal":
         head = "Jev acha que é hora de sair"
     elif wake == "reversal_signal":
@@ -137,6 +160,8 @@ def _llm(p: dict) -> tuple[str, str]:
 
 def narrate(row: dict, net_usd: float | None = None) -> dict | None:
     kind, p = row.get("kind"), _d(row.get("payload"))
+    if kind in SILENT_KINDS:
+        return None
     if kind == "jev":
         told, tipo = _jev(p), "jev"
     elif kind == "llm":
