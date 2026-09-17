@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime, timezone
+import statistics
 import time
 import threading
 from typing import Any
@@ -38,6 +39,8 @@ class PanelCache:
         self.jev_failures = 0
         self.jev_failure_since_ms: int | None = None
         self.jev_failure_reason: str | None = None
+        self._jev_gaps: deque[int] = deque(maxlen=20)
+        self._last_jev_ts_ms: int | None = None
 
     def _reset(self) -> None:
         self.last_id = 0
@@ -50,6 +53,8 @@ class PanelCache:
         self.jev_failures = 0
         self.jev_failure_since_ms = None
         self.jev_failure_reason = None
+        self._jev_gaps.clear()
+        self._last_jev_ts_ms = None
 
     def _fold(self, fact: dict[str, Any]) -> None:
         self.last_id = int(fact["id"])
@@ -65,6 +70,11 @@ class PanelCache:
 
         if kind != "jev":
             return
+        if self._last_jev_ts_ms is not None:
+            gap = self.last_ts_ms - self._last_jev_ts_ms
+            if gap > 0:
+                self._jev_gaps.append(gap)
+        self._last_jev_ts_ms = self.last_ts_ms
         error = fact.get("error")
         if error:
             if self.jev_failures == 0:
@@ -136,4 +146,5 @@ class PanelCache:
                 "price_series": self._price_series(since_ms, max_points),
                 "jev": {"ok": self.jev_failures == 0, "falhas_seguidas": self.jev_failures,
                         "desde_ms": self.jev_failure_since_ms, "motivo": self.jev_failure_reason},
+                "jev_gap_ms": (statistics.median(self._jev_gaps) if len(self._jev_gaps) >= 5 else None),
             }

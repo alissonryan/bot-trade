@@ -141,13 +141,13 @@ def test_busy_refresh_recomputes_clock_fields_until_the_next_success(tmp_path):
     first_busy = json.loads(server.state_bytes)
     server.refresh_now()
     second_busy = json.loads(server.state_bytes)
-    assert before["bot"] == {"vivo": True, "ultimo_sinal_s": 1}
+    assert before["bot"] == {"vivo": True, "ultimo_sinal_s": 1, "cadencia_s": None}
     assert first_busy["estado"] == "ok" and first_busy["agora_ms"] == T0 + 17_000
-    assert first_busy["bot"] == {"vivo": False, "ultimo_sinal_s": 17}
+    assert first_busy["bot"] == {"vivo": False, "ultimo_sinal_s": 17, "cadencia_s": None}
     assert first_busy["preco"]["velho"] is True
     assert first_busy["banco_ocupado"] is True
     assert first_busy["banco_ocupado_desde_ms"] == T0 + 17_000
-    assert second_busy["bot"] == {"vivo": False, "ultimo_sinal_s": 20}
+    assert second_busy["bot"] == {"vivo": False, "ultimo_sinal_s": 20, "cadencia_s": None}
     assert second_busy["preco"]["velho"] is True
     assert second_busy["banco_ocupado_desde_ms"] == T0 + 17_000
 
@@ -155,10 +155,37 @@ def test_busy_refresh_recomputes_clock_fields_until_the_next_success(tmp_path):
     server.refresh_now()
     recovered = json.loads(server.state_bytes)
     assert recovered["agora_ms"] == T0 + 21_000
-    assert recovered["bot"] == {"vivo": False, "ultimo_sinal_s": 21}
+    assert recovered["bot"] == {"vivo": False, "ultimo_sinal_s": 21, "cadencia_s": None}
     assert recovered["preco"]["velho"] is True
     assert "banco_ocupado" not in recovered
     assert "banco_ocupado_desde_ms" not in recovered
+
+
+def test_busy_refresh_recomputes_vivo_from_the_observed_cadence(tmp_path):
+    db = tmp_path / "fut.db"
+    conn = make_db(db)
+    last = T0
+    for i in range(6):
+        add_decision(conn, last - (5 - i) * 10_000, "jev",
+                     {"snapshot": {"last": 100.0, "bid": 99.0, "ask": 101.0}})
+    conn.close()
+    index = tmp_path / "index.html"
+    index.write_text("x", encoding="utf-8")
+    now = iter((last + 12_000, last + 12_000, last + 31_000))
+    server = PanelServer(reader=PanelReader(db), index_path=index, port=0, clock_ms=lambda: next(now))
+    server.refresh_now()
+    before = json.loads(server.state_bytes)
+    assert before["bot"] == {"vivo": True, "ultimo_sinal_s": 12, "cadencia_s": 10}
+    original_refresh = server.cache.refresh
+    server.cache.refresh = lambda **kwargs: (_ for _ in ()).throw(PanelDbBusy("locked"))
+    server.refresh_now()
+    still_alive = json.loads(server.state_bytes)
+    assert still_alive["bot"] == {"vivo": True, "ultimo_sinal_s": 12, "cadencia_s": 10}
+    assert still_alive["banco_ocupado"] is True
+    server.refresh_now()
+    timed_out = json.loads(server.state_bytes)
+    assert timed_out["bot"] == {"vivo": False, "ultimo_sinal_s": 31, "cadencia_s": 10}
+    server.cache.refresh = original_refresh
 
 
 def test_broken_database_is_a_calm_invalid_database_answer(tmp_path):

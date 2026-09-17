@@ -9,9 +9,18 @@ DAY = 86_400_000
 T0 = 20_000 * DAY  # a UTC midnight
 
 
-@pytest.mark.parametrize("jev_every_s, expected_ms", [(1.0, 10_000), (2.0, 10_000), (3.0, 15_000), (2.5, 12_500)])
-def test_alive_threshold_tracks_jev_cadence(jev_every_s, expected_ms):
-    assert alive_threshold_ms(jev_every_s) == expected_ms
+@pytest.mark.parametrize(
+    "jev_every_s, jev_gap_ms, expected_ms",
+    [
+        (1.0, None, 10_000),
+        (2.0, None, 10_000),
+        (4.0, None, 12_000),
+        (2.0, 10_000, 30_000),
+        (2.0, 2_000, 10_000),
+    ],
+)
+def test_alive_threshold_uses_observed_gap_or_env_fallback(jev_every_s, jev_gap_ms, expected_ms):
+    assert alive_threshold_ms(jev_every_s, jev_gap_ms) == expected_ms
 
 
 def jev_row(conn, ts, bid, ask, **extra):
@@ -39,7 +48,7 @@ def test_alive_price_and_long_position_marked_to_mid(tmp_path):
     cache = PanelCache(PanelReader(db))
     cache.refresh(now_ms=T0 + 104_000)
     state = build_state(cache, now_ms=T0 + 104_000, max_hold_s=300.0)
-    assert state["bot"] == {"vivo": True, "ultimo_sinal_s": 4}
+    assert state["bot"] == {"vivo": True, "ultimo_sinal_s": 4, "cadencia_s": None}
     assert state["preco"]["mid"] == pytest.approx(76100.1) and state["preco"]["velho"] is False
     pos = state["posicao"]
     assert pos["lado"] == "long" and pos["aberto_ha_s"] == 64 and pos["fecha_em_s"] == 236
@@ -57,6 +66,47 @@ def test_short_position_profits_when_price_falls_and_stale_bot_is_flagged(tmp_pa
     state = build_state(cache, now_ms=T0 + 400_000)
     assert state["bot"]["vivo"] is False and state["preco"]["velho"] is True
     assert state["posicao"]["resultado_usd"] > 0 and state["posicao"]["fecha_em_s"] == 0
+
+
+def _cadence_rows(conn, start_ms, n, gap_ms):
+    for i in range(n):
+        jev_row(conn, start_ms + i * gap_ms, 76100.0, 76100.2)
+
+
+def test_observed_10s_cadence_keeps_bot_alive_past_the_env_fallback(tmp_path):
+    db = tmp_path / "fut.db"
+    conn = make_db(db)
+    last = T0 + 50_000
+    _cadence_rows(conn, T0, 6, 10_000)
+    cache = PanelCache(PanelReader(db))
+    cache.refresh(now_ms=last + 12_000)
+    fresh = build_state(cache, now_ms=last + 12_000)
+    assert fresh["bot"] == {"vivo": True, "ultimo_sinal_s": 12, "cadencia_s": 10}
+    stale = build_state(cache, now_ms=last + 31_000)
+    assert stale["bot"]["vivo"] is False and stale["bot"]["ultimo_sinal_s"] == 31
+    assert stale["bot"]["cadencia_s"] == 10
+
+
+def test_observed_2s_cadence_is_dead_after_the_10s_floor(tmp_path):
+    db = tmp_path / "fut.db"
+    conn = make_db(db)
+    last = T0 + 10_000
+    _cadence_rows(conn, T0, 6, 2_000)
+    cache = PanelCache(PanelReader(db))
+    cache.refresh(now_ms=last + 11_000)
+    state = build_state(cache, now_ms=last + 11_000)
+    assert state["bot"] == {"vivo": False, "ultimo_sinal_s": 11, "cadencia_s": 2}
+
+
+def test_fewer_than_five_gaps_uses_the_env_fallback(tmp_path):
+    db = tmp_path / "fut.db"
+    conn = make_db(db)
+    last = T0 + 40_000
+    _cadence_rows(conn, T0, 5, 10_000)
+    cache = PanelCache(PanelReader(db))
+    cache.refresh(now_ms=last + 12_000)
+    state = build_state(cache, now_ms=last + 12_000, jev_every_s=2.0)
+    assert state["bot"] == {"vivo": False, "ultimo_sinal_s": 12, "cadencia_s": None}
 
 
 def test_fresh_snapshot_preserves_stored_stale_and_spread_fields(tmp_path):
