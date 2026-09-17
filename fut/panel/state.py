@@ -11,6 +11,7 @@ from fut.panel.narrate import narrate
 from fut.panel.reader import PanelReader
 
 MIN_ALIVE_MS = 10_000
+MAX_ALIVE_MS = 120_000
 OLD_PRICE_MS = 15_000
 SERIES_MS = 2 * 3_600_000
 MAX_TRADES = 50
@@ -34,7 +35,7 @@ class StateData:
 
 def alive_threshold_ms(jev_every_s: float, jev_gap_ms: float | None = None) -> int:
     base_s = (jev_gap_ms / 1000 if jev_gap_ms is not None else jev_every_s)
-    return max(MIN_ALIVE_MS, int(3 * base_s * 1000))
+    return min(MAX_ALIVE_MS, max(MIN_ALIVE_MS, int(3 * base_s * 1000)))
 
 
 def _day_of(ts_ms: int) -> str:

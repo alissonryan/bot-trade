@@ -69,7 +69,7 @@ Resultado em dinheiro de cada saída vem do trade pareado (pnl − taxa de abert
 ### `fut/panel/state.py`
 Função pura `build_state(cache, now_ms, settings_view) -> dict`, lendo a visão consistente do `PanelCache`:
 
-- `bot`: `{vivo: bool, ultimo_sinal_s, cadencia_s}` — vivo se a última linha de `fut_decisions` está dentro de `max(10 s, 3 × cadência)`. A cadência é a mediana dos últimos até 20 intervalos entre linhas consecutivas `kind=jev` (mínimo 5 intervalos; `jev_ab`/`llm`/`exit` não entram), para um restart longo não distorcer. Sem amostra suficiente, cai no `FUT_JEV_EVERY_SECONDS` do ambiente do painel. `cadencia_s` é essa mediana arredondada em segundos, ou `null`.
+- `bot`: `{vivo: bool, ultimo_sinal_s, cadencia_s}` — vivo se a última linha de `fut_decisions` está dentro de `max(10 s, 3 × cadência)` capped at 120 s. A cadência é a mediana dos últimos até 20 intervalos entre linhas consecutivas `kind=jev` (mínimo 5 intervalos; `jev_ab`/`llm`/`exit` não entram), para um restart longo não distorcer. Sem amostra suficiente, cai no `FUT_JEV_EVERY_SECONDS` do ambiente do painel. `cadencia_s` é essa mediana arredondada em segundos, ou `null`.
 - `jev`: `{ok, falhas_seguidas, desde_ms, motivo}` — saúde incremental das linhas `jev`; sucesso zera a sequência e o painel avisa a partir de três falhas seguidas.
 - `preco`: `{mid, bid, ask, spread_bps, ts_ms, velho: bool}` do último snapshot.
 - `posicao` (book `main`): `None` ou `{lado, entrada, stop, liq, contratos, aberto_ha_s, fecha_em_s, resultado_bps, resultado_usd}` marcado ao `mid` do último snapshot. `fecha_em_s` usa `FUT_MAX_HOLD_SECONDS` lido do ambiente do processo do painel, com padrão 300; o campo é rotulado "estimado".

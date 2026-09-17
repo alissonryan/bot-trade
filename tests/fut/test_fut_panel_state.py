@@ -17,6 +17,8 @@ T0 = 20_000 * DAY  # a UTC midnight
         (4.0, None, 12_000),
         (2.0, 10_000, 30_000),
         (2.0, 2_000, 10_000),
+        (2.0, 600_000, 120_000),
+        (60.0, None, 120_000),
     ],
 )
 def test_alive_threshold_uses_observed_gap_or_env_fallback(jev_every_s, jev_gap_ms, expected_ms):
@@ -96,6 +98,17 @@ def test_observed_2s_cadence_is_dead_after_the_10s_floor(tmp_path):
     cache.refresh(now_ms=last + 11_000)
     state = build_state(cache, now_ms=last + 11_000)
     assert state["bot"] == {"vivo": False, "ultimo_sinal_s": 11, "cadencia_s": 2}
+
+
+def test_observed_600s_cadence_is_capped_so_a_dead_bot_is_flagged(tmp_path):
+    db = tmp_path / "fut.db"
+    conn = make_db(db)
+    last = T0 + 5 * 600_000
+    _cadence_rows(conn, T0, 6, 600_000)
+    cache = PanelCache(PanelReader(db))
+    cache.refresh(now_ms=last + 121_000)
+    state = build_state(cache, now_ms=last + 121_000)
+    assert state["bot"] == {"vivo": False, "ultimo_sinal_s": 121, "cadencia_s": 600}
 
 
 def test_fewer_than_five_gaps_uses_the_env_fallback(tmp_path):
