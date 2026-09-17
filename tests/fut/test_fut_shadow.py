@@ -8,8 +8,8 @@ from fut.types import JevVerdict
 from tests.fut.helpers import SPEC, make_snap
 
 
-def verdict(direction="up"):
-    return JevVerdict(direction, 0.9, 0.9, 0.5, "trend", None, 100, 1000, "jev-1")
+def verdict(direction="up", exit_now=None):
+    return JevVerdict(direction, 0.9, 0.9, 0.5, "trend", exit_now, 100, 1000, "jev-1")
 
 
 def books(tmp_path, seed=7):
@@ -27,10 +27,47 @@ def test_jev_only_opens_on_entry_signal_and_closes_on_exit_signal(tmp_path):
     assert [f["kind"] for f in store.fut_fills("shadow:jev_only")] == ["open", "close"]
 
 
+def test_jev_only_uses_its_own_reversal_when_main_is_flat(tmp_path):
+    _, shadow = books(tmp_path)
+    shadow.on_jev(verdict("up"), make_snap(), now_ms=1000, wake=None, entry_rate=0.0)
+
+    out = shadow.on_jev(verdict("down"), make_snap(), now_ms=2000, wake=None, entry_rate=0.0)
+
+    assert out["jev_only"] == "closed"
+
+
+def test_jev_only_ignores_main_reversal_wake_when_its_direction_still_holds(tmp_path):
+    _, shadow = books(tmp_path)
+    shadow.on_jev(verdict("up"), make_snap(), now_ms=1000, wake=None, entry_rate=0.0)
+
+    out = shadow.on_jev(verdict("up", exit_now=0.1), make_snap(), now_ms=2000,
+                        wake="reversal_signal", entry_rate=0.0)
+
+    assert "jev_only" not in out
+    assert shadow.ledgers["jev_only"].position.is_open()
+
+
+def test_jev_only_min_hold_uses_its_own_open_timestamp(tmp_path):
+    store = FutStore(tmp_path / "fut.db")
+    shadow = ShadowBooks(store, FutSettings(min_hold_s=60.0), SPEC, rng=random.Random(7))
+    shadow.on_jev(verdict("up"), make_snap(), now_ms=1000, wake=None, entry_rate=0.0)
+
+    assert shadow.on_jev(verdict("down"), make_snap(), now_ms=30_000, wake=None, entry_rate=0.0) == {}
+    assert shadow.on_jev(verdict("down"), make_snap(), now_ms=61_000, wake=None, entry_rate=0.0)["jev_only"] == "closed"
+
+
+def test_jev_only_can_enter_while_main_is_open(tmp_path):
+    _, shadow = books(tmp_path)
+
+    out = shadow.on_jev(verdict("up"), make_snap(), now_ms=1000, wake=None, entry_rate=0.0)
+
+    assert out["jev_only"] == "opened"
+
+
 def test_jev_only_reports_collar_refusals(tmp_path):
     _, shadow = books(tmp_path)
     out = shadow.on_jev(verdict(), make_snap(stale=True), now_ms=1000, wake="entry_signal", entry_rate=0.0)
-    assert out["jev_only"] == "stale"
+    assert out == {}
 
 
 def test_random_book_follows_entry_rate(tmp_path):

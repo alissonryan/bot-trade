@@ -226,6 +226,7 @@ class FutLoop:
         if snap.stale and not position.is_open():
             self._entry_side = None
             self._entry_streak = 0
+            self.shadow.reset_entry_streak()
             return
         verdict = self.jev.evaluate(snap, position, now_ms=now)
         self.jev_evals += 1
