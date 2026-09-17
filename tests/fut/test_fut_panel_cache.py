@@ -2,6 +2,8 @@ from datetime import datetime, timezone
 import threading
 import time
 
+import pytest
+
 from fut.panel.cache import PanelCache
 
 
@@ -104,3 +106,21 @@ def test_jev_failure_streak_resets_on_success_across_chunks():
     cache.refresh(now_ms=DAY + 3)
     assert cache.jev_failures == 1 and cache.jev_failure_since_ms == DAY + 3
     assert cache.jev_failure_reason == "Jev recusou por limite de uso"
+
+
+def test_jev_ab_costs_are_jev_costs_but_never_market_or_health_facts():
+    reader = CountingReader([
+        fact(1, DAY, cost_usd=0.1, bid=100.0, ask=102.0, error="503 unavailable"),
+        fact(2, 2 * DAY, kind="jev_ab", cost_usd=0.25, bid=900.0, ask=902.0, error=None),
+        fact(3, 2 * DAY + 1, kind="jev_ab", cost_usd=0.5, bid=901.0, ask=903.0, error="529 overloaded"),
+    ])
+    cache = PanelCache(reader)
+    cache.refresh(now_ms=DAY + 3)
+    assert cache.last_id == 3 and cache.last_ts_ms == 2 * DAY + 1
+    assert cache.lifetime_costs == {"jev": 0.85, "llm": 0.0}
+    assert cache.costs_for_day("1970-01-02") == {"jev": 0.1, "llm": 0.0}
+    assert cache.costs_for_day("1970-01-03") == {"jev": 0.75, "llm": 0.0}
+    assert cache.jev_failures == 1 and cache.jev_failure_since_ms == DAY
+    assert cache.snapshot == {"ts_ms": DAY, "last": 101.0, "bid": 100.0, "ask": 102.0,
+                              "spread_bps": pytest.approx(198.019801980198), "stale": False}
+    assert cache.price_series(DAY) == [[DAY, 101.0]]

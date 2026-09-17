@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+SILENT_KINDS = {"jev_ab"}
 DISPATCH = {
     "dispatched": "perguntando à LLM…",
     "suppressed_inflight": "LLM ainda ocupada com a pergunta anterior",
@@ -137,6 +138,8 @@ def _llm(p: dict) -> tuple[str, str]:
 
 def narrate(row: dict, net_usd: float | None = None) -> dict | None:
     kind, p = row.get("kind"), _d(row.get("payload"))
+    if kind in SILENT_KINDS:
+        return None
     if kind == "jev":
         told, tipo = _jev(p), "jev"
     elif kind == "llm":

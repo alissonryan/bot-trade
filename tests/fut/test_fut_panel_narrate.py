@@ -1,5 +1,6 @@
 import pytest
 
+import fut.panel.narrate as narrate_module
 from fut.panel.narrate import fmt_price, fmt_usd, narrate
 
 
@@ -28,6 +29,12 @@ def test_formatters_use_brazilian_separators():
 
 def test_quiet_jev_row_is_not_an_event():
     assert narrate(jev()) is None
+
+
+def test_observational_jev_ab_rows_are_silent_but_unknown_kinds_stay_visible():
+    assert narrate_module.SILENT_KINDS == {"jev_ab"}
+    assert narrate(row("jev_ab", {"variant": "label-a", "cost_usd": 0.1})) is None
+    assert narrate(row("brand_new_kind", {}))["texto"] == "Evento brand_new_kind"
 
 
 @pytest.mark.parametrize("payload, tom, parts", [

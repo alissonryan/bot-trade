@@ -56,11 +56,12 @@ class PanelCache:
         self.last_ts_ms = int(fact["ts_ms"])
         kind = str(fact.get("kind") or "")
         cost = _number(fact.get("cost_usd")) or 0.0
-        if kind in self.lifetime_costs:
-            self.lifetime_costs[kind] += cost
+        cost_kind = "jev" if kind == "jev_ab" else kind
+        if cost_kind in self.lifetime_costs:
+            self.lifetime_costs[cost_kind] += cost
             day = datetime.fromtimestamp(self.last_ts_ms / 1000, tz=timezone.utc).date().isoformat()
             totals = self._day_costs.setdefault(day, {"jev": 0.0, "llm": 0.0})
-            totals[kind] += cost
+            totals[cost_kind] += cost
 
         if kind != "jev":
             return

@@ -14,6 +14,7 @@ def test_panel_docs_describe_incremental_shared_refresh_and_possible_contention(
     assert "can still contend" in panel_docs
     assert "lock-free" not in panel_docs
     assert "Evento <kind>" in agents
+    assert "SILENT_KINDS" in agents
     assert "shows raw" not in agents
 
 
@@ -38,4 +39,5 @@ def test_panel_docs_describe_jev_error_translation_and_health():
     assert "Jev sobrecarregado" in spec and "Jev com erro no servidor da TypeSafe" in spec
     assert "Jev sem conexão" in spec and "https?://" in spec
     assert "falhas_seguidas" in spec and "jev_erro:" in spec
+    assert "jev_ab" in spec and "SILENT_KINDS" in spec
     assert "The state also exposes Jev health" in agents

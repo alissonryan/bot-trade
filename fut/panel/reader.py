@@ -13,10 +13,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from fut.panel.narrate import SILENT_KINDS
+
 # Jev rows that woke nothing are ~1,500/hour and only feed the price; they are not events.
-_EVENT_FILTER = ("(kind != 'jev' OR json_extract(payload, '$.wake') IS NOT NULL "
+_SILENT_KIND_SQL = ", ".join("'" + kind.replace("'", "''") + "'" for kind in sorted(SILENT_KINDS))
+_EVENT_FILTER = (f"(kind NOT IN ({_SILENT_KIND_SQL}) AND (kind != 'jev' OR json_extract(payload, '$.wake') IS NOT NULL "
                  "OR json_extract(payload, '$.error') IS NOT NULL "
-                 "OR json_extract(payload, '$.gate') IS NOT NULL)")
+                 "OR json_extract(payload, '$.gate') IS NOT NULL))")
 # The first page reaches roughly 13 hours at the current ~1,500 quiet Jev rows/hour.
 EVENT_HISTORY_ROWS = 20_000
 _FILL_KEYS = ("id", "ts_ms", "day", "kind", "side", "contracts", "price", "fee", "funding", "pnl", "reason")

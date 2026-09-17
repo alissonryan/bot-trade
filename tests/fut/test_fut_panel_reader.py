@@ -53,6 +53,17 @@ def test_event_rows_skip_quiet_jev_rows_and_page_by_id(tmp_path):
     assert quiet not in [x["id"] for x in r.event_rows(0, late)]
 
 
+def test_event_rows_skip_jev_ab_rows_without_spending_first_page_slots(tmp_path):
+    db = tmp_path / "fut.db"
+    conn = make_db(db)
+    first = add_decision(conn, 1000, "exit", {"reason": "stop"})
+    for i in range(300):
+        add_decision(conn, 2000 + i, "jev_ab", {"variant": "label-a", "cost_usd": 0.001})
+    last = add_decision(conn, 3000, "exit", {"reason": "time_limit"})
+    r = PanelReader(db)
+    assert [x["id"] for x in r.event_rows(None, last, limit=2)] == [first, last]
+
+
 def test_bad_json_payload_becomes_an_empty_dict(tmp_path):
     db = tmp_path / "fut.db"
     conn = make_db(db)
