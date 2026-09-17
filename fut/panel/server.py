@@ -135,7 +135,7 @@ class PanelServer:
                         {"estado": "erro_painel", "detalhe": type(exc).__name__},
                         ensure_ascii=False,
                     ).encode("utf-8")
-            self._refresh_stop.wait(1.0)
+            self._refresh_stop.wait(0.05 if self.cache.loading else 1.0)
 
     def _start_refresher(self) -> None:
         if self._refresh_thread is None:

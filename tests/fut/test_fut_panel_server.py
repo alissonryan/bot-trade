@@ -170,3 +170,30 @@ def test_refresh_loop_survives_an_unexpected_error_and_recovers(tmp_path):
     assert calls == [1, 2]
     assert not thread.is_alive()
     assert json.loads(server.state_bytes) == {"estado": "erro_painel", "detalhe": "RuntimeError"}
+
+
+def test_refresh_loop_catches_up_quickly_while_cache_is_loading(tmp_path):
+    db = tmp_path / "fut.db"
+    make_db(db).close()
+    index = tmp_path / "index.html"
+    index.write_text("x", encoding="utf-8")
+    server = PanelServer(reader=PanelReader(db), index_path=index, port=0)
+    waits = []
+    calls = []
+
+    def refresh():
+        calls.append(len(calls) + 1)
+        server.cache.loading = len(calls) == 1
+        if len(calls) == 2:
+            server._refresh_stop.set()
+
+    def wait(timeout):
+        waits.append(timeout)
+        return len(waits) == 2
+
+    server.refresh_now = refresh
+    server._refresh_stop.wait = wait
+    thread = threading.Thread(target=server._refresh_loop)
+    thread.start()
+    thread.join(1)
+    assert calls == [1, 2] and waits == [0.05, 1.0]
