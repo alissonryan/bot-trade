@@ -72,7 +72,7 @@ def sync_submit(fn, *args):
     return future
 
 
-def build(tmp_path, *, action="LONG", rest=None, verdict=UP):
+def build(tmp_path, *, action="LONG", rest=None, verdict=UP, settings=None):
     store = FutStore(tmp_path / "fut.db")
     events, clock, calls = queue.SimpleQueue(), Clock(), []
 
@@ -80,7 +80,7 @@ def build(tmp_path, *, action="LONG", rest=None, verdict=UP):
         calls.append(has_position)
         return LlmDecision(intent=FutIntent(action, 0.8, "flow"), reason="ok", cost_usd=0.001)
 
-    loop = FutLoop(settings=FutSettings(), store=store, spec=SPEC, rest=rest or FakeRest(), jev=FakeJev(verdict),
+    loop = FutLoop(settings=settings or FutSettings(), store=store, spec=SPEC, rest=rest or FakeRest(), jev=FakeJev(verdict),
                    budget=Budget(0.0, 1.0, "2026-09-17"), events=events, clock_ms=clock, llm_decide=decide,
                    submit=sync_submit, store_factory=lambda: store)
     return loop, store, events, clock, calls
@@ -130,6 +130,20 @@ def test_llm_close_on_exit_signal(tmp_path):
     assert not loop.ledger.position.is_open()
     assert calls == [True]
     assert store.decisions("llm")[0]["payload"]["outcome"] == "closed"
+
+
+def test_exit_signal_inside_min_hold_does_not_wake_llm(tmp_path):
+    exit_verdict = replace(UP, direction="flat", exit_now=0.9)
+    loop, store, events, clock, calls = build(tmp_path, action="CLOSE", verdict=exit_verdict,
+                                              settings=FutSettings(min_hold_s=60.0))
+    open_long(loop)
+    clock.now = T0 + 30_000
+    ws_tick(events)
+    loop.step()
+    loop.step()
+    assert loop.ledger.position.is_open()
+    assert calls == []
+    assert store.decisions("jev")[0]["payload"]["wake"] is None
 
 
 def test_entry_after_price_moved_is_logged_not_traded(tmp_path):

@@ -91,13 +91,18 @@ def jev_side(verdict: JevVerdict) -> str | None:
     return {"up": "long", "down": "short"}.get(verdict.direction)
 
 
-def should_wake(verdict: JevVerdict, position: FutPosition, *, threshold: float) -> str | None:
+def should_wake(verdict: JevVerdict, position: FutPosition, *, threshold: float,
+                now_ms: int = 0, min_hold_s: float = 0.0) -> str | None:
     if verdict.error:
         return None
     side = jev_side(verdict)
     if not position.is_open():
         if side and verdict.direction_conf >= threshold and verdict.beats_cost >= threshold:
             return "entry_signal"
+        return None
+    # Exit/reversal wakes wait out the minimum hold; stop, liquidation and max hold
+    # are enforced by the ledger every step and are not affected.
+    if now_ms - position.opened_ms < min_hold_s * 1000:
         return None
     if verdict.exit_now is not None and verdict.exit_now >= threshold:
         return "exit_signal"

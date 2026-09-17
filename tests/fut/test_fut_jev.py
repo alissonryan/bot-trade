@@ -51,6 +51,15 @@ def test_should_wake_with_position():
     assert jev_side(verdict(direction="down")) == "short"
 
 
+def test_should_wake_ignores_exits_until_min_hold_elapses():
+    exit_v, rev_v = verdict(exit_now=0.9), verdict(direction="down", exit_now=0.1)
+    assert should_wake(exit_v, LONG, threshold=0.6, now_ms=59_999, min_hold_s=60) is None
+    assert should_wake(rev_v, LONG, threshold=0.6, now_ms=59_999, min_hold_s=60) is None
+    assert should_wake(exit_v, LONG, threshold=0.6, now_ms=60_000, min_hold_s=60) == "exit_signal"
+    assert should_wake(rev_v, LONG, threshold=0.6, now_ms=60_000, min_hold_s=60) == "reversal_signal"
+    assert should_wake(verdict(), FutPosition(), threshold=0.6, now_ms=0, min_hold_s=60) == "entry_signal"
+
+
 class FakeClient:
     def __init__(self, response=None, exc=None):
         self.response, self.exc, self.calls = response, exc, []

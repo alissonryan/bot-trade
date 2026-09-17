@@ -182,6 +182,7 @@ Audit: `sqlite3 data/bot.db "select ts, action, rule, json_extract(payload,'$.ll
 - Flow per step: drain WS queue → REST refresh (depth resync on gap, 1m klines, funding, ticker fallback when WS is silent) → ledger mark (liquidation, stop, time limit, funding) → shadow mark → resolve LLM → Jev every 2 s.
 - REST fallback prices never make the market fresh for entries (`MarketState.ws_last_ms`).
 - `fut/collar.py` sizes off the same `fut/pricing.fill_price` the ledger fills at. CLOSE is never blocked.
+- `FUT_MIN_HOLD_SECONDS` (default 0, must be < `FUT_MAX_HOLD_SECONDS`) suppresses Jev exit/reversal wakes for that long after entry, so the LLM is not asked to CLOSE a position seconds old. Stop, liquidation and max hold still run every step; the shadow `jev_only` book shares the same wake and therefore the same delay.
 - The LLM worker thread opens its own `FutStore` connection (sqlite connections are thread-bound) for the durable budget reservation.
 - Baselines `shadow:jev_only` and `shadow:random` share ticks, collar and ledger; `flat` is 0.
 - Edge criterion (fixed): ≥ 200 trades, ≥ 14 days, no mock Jev, net > 0 after fees/funding/slippage/Jev/LLM, beats all three baselines, bootstrap CI95 lower bound of per-trade net > 0, no day below `FUT_MAX_DAY_LOSS_USDT`.

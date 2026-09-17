@@ -225,7 +225,8 @@ class FutLoop:
         verdict = self.jev.evaluate(snap, position, now_ms=now)
         self.jev_evals += 1
         cost = verdict.input_tokens / 1e6 * self.settings.jev_usd_per_mtok
-        wake = should_wake(verdict, position, threshold=self.settings.wake_threshold)
+        wake = should_wake(verdict, position, threshold=self.settings.wake_threshold,
+                           now_ms=now, min_hold_s=self.settings.min_hold_s)
         shadow = self.shadow.on_jev(verdict, snap, now_ms=now, wake=wake,
                                     entry_rate=self.llm_entries / self.jev_evals)
         dispatch = None

@@ -11,6 +11,7 @@ def test_defaults_match_the_spec():
     assert (s.max_hold_s, s.jev_every_s, s.llm_cooldown_s, s.llm_timeout_s) == (300.0, 2.0, 10.0, 8.0)
     assert (s.stale_price_bps, s.wake_threshold, s.move_cost_bps) == (5.0, 0.6, 3.0)
     assert s.ws_url == DEFAULT_FUT_WS_URL
+    assert s.min_hold_s == 0.0
     assert MAX_LEVERAGE == 3
 
 
@@ -20,7 +21,9 @@ def test_from_env_reads_overrides(monkeypatch):
     monkeypatch.setenv("FUT_MAX_HOLD_SECONDS", "120")
     monkeypatch.setenv("FUT_WS_URL", "-")
     monkeypatch.setenv("FUT_LLM_REASONING", "1")
+    monkeypatch.setenv("FUT_MIN_HOLD_SECONDS", "60")
     s = FutSettings.from_env()
+    assert s.min_hold_s == 60.0
     assert (s.leverage, s.margin_usdt, s.max_hold_s, s.ws_url, s.llm_reasoning) == (3, 15.0, 120.0, "", True)
 
 
@@ -58,3 +61,10 @@ def test_failed_verdict_carries_error():
     v = JevVerdict.failed("boom", latency_ms=5, model="jev-latest", state={"a": 1})
     assert v.error == "boom" and v.direction == "flat" and v.state == {"a": 1}
     assert set(v.answers()) == {"direction", "direction_conf", "beats_cost", "flow_aligned", "regime", "exit_now"}
+
+
+def test_min_hold_must_be_non_negative_and_below_max_hold():
+    with pytest.raises(ValueError):
+        FutSettings(min_hold_s=-1.0)
+    with pytest.raises(ValueError):
+        FutSettings(min_hold_s=300.0, max_hold_s=300.0)

@@ -42,6 +42,7 @@ class FutSettings:
     max_stop_pct: float = 0.01
     liq_stop_ratio: float = 0.5
     max_hold_s: float = 300.0
+    min_hold_s: float = 0.0
     min_confidence: float = 0.0
     jev_every_s: float = 2.0
     jev_model: str = "jev-latest"
@@ -73,11 +74,13 @@ class FutSettings:
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and > 0")
         non_negative = ("max_day_loss_usdt", "slippage_bps", "min_confidence", "jev_usd_per_mtok",
-                        "move_cost_bps", "llm_cooldown_s", "stale_price_bps")
+                        "move_cost_bps", "llm_cooldown_s", "stale_price_bps", "min_hold_s")
         for name in non_negative:
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and >= 0")
+        if self.min_hold_s >= self.max_hold_s:
+            raise ValueError("min_hold_s must be < max_hold_s")
         if not 0 < self.max_balance_pct <= 1:
             raise ValueError("max_balance_pct must be in (0, 1]")
         if self.min_stop_pct > self.max_stop_pct:
@@ -111,6 +114,7 @@ class FutSettings:
             max_stop_pct=_f("FUT_MAX_STOP_PCT", 0.01),
             liq_stop_ratio=_f("FUT_LIQ_STOP_RATIO", 0.5),
             max_hold_s=_f("FUT_MAX_HOLD_SECONDS", 300.0),
+            min_hold_s=_f("FUT_MIN_HOLD_SECONDS", 0.0),
             min_confidence=_f("FUT_MIN_CONFIDENCE", 0.0),
             jev_every_s=_f("FUT_JEV_EVERY_SECONDS", 2.0),
             jev_model=os.getenv("FUT_JEV_MODEL", "jev-latest").strip() or "jev-latest",
