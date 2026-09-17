@@ -61,6 +61,7 @@ PYTHONPATH=. python -m bot run --chart         # paper loop + local chart at htt
 PYTHONPATH=. python -m kcex.cli login          # human captcha + 2FA
 PYTHONPATH=. python -m fut run                  # futures paper loop (Jev every 2 s, LLM on wake)
 PYTHONPATH=. python -m fut report [--since-ms N] # edge criterion vs flat/jev_only/random baselines
+PYTHONPATH=. python -m fut panel                # read-only local panel at http://127.0.0.1:8766/
 ```
 
 Paper without KCEX login uses `PAPER_STARTING_USDT` (default 450) once, then its own ledger. Prices come from the confirmed public KCEX WS by default, with REST as fallback when WS is down or stale (`KCEX_WS_URL=-` forces REST-only). `--chart` serves a read-only local candlestick chart; it never binds off loopback and never opens a second KCEX connection.
@@ -85,6 +86,8 @@ Each mode gets its own database (`bot/cli.py::db_path_for_mode`): paper keeps `d
 
 Paper only, BTC_USDT perpetual, leverage 1x default and 3x hard cap, isolated margin, market orders at book ± slippage with the venue taker fee. Jev (`typesafe-sdk`, `FUT_JEV_MODEL`, `TYPESAFE_API_KEY`) evaluates every 2 s; `fut/questions.py` holds every question and threshold. A wake calls the LLM immediately, one call at a time, 10 s cooldown after HOLD or an LLM failure/non-decision; late or price-moved LONG/SHORT are discarded, CLOSE never is. Stop, 5 min max hold and liquidation (by `fairPrice`) are enforced every step; opt-in `FUT_MIN_HOLD_SECONDS` (default 0) only suppresses Jev exit/reversal wakes right after entry. Own DB `data/futures-paper.db` (mode `futures-paper`), own lock `data/futures.lock`. Exit codes: 3 already running, 8 unmonitored position, 9 DB of another mode. Sessions with the mock Jev never count toward the edge criterion; passing the criterion only allows writing a live spec.
 FUT_WAKE_THRESHOLD is a first guess to be tuned from paper data, never from the edge-criterion window. The opt-in `FUT_MAX_SPREAD_BPS`, `FUT_MIN_MOVE_MULT`, `FUT_MAX_ENTRIES_PER_HOUR`, `FUT_WAKE_STREAK`, and `FUT_WAKE_REGIMES` settings apply to the main and shadow wake/collar paths, and `python -m fut wakegrid [--since-ms N]` is a read-only, in-sample replay only. Run the fixed edge criterion with `python -m fut report --since-ms N` at the start of a pre-registered window with fixed settings; tuning windows never count toward the criterion.
+
+`python -m fut panel` serves a read-only page (plain Portuguese: price, position, narrated decisions, day result, trades, shadow scoreboard) for whoever is watching. It is a separate process: `mode=ro` SQLite connections opened and closed per read, never `FutStore`, no `futures.lock`, no `.env`, no KCEX/Jev/LLM call, GET only, and it hard-rejects any host but `127.0.0.1`/`localhost`/`::1`. The price is the snapshot the bot already logs (~2.5 s), not a second exchange connection; the position card is an estimate, the ledger fills are the record.
 
 ## Resume (2026-09-04, safety revision)
 
