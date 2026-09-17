@@ -9,10 +9,10 @@ from bot.brain import REASON_BUDGET_STATE, Budget
 from bot.settings import Settings
 from fut.llm import LlmDecision
 from fut.loop import FutLoop, Unmonitored, seed_budget
-from fut.questions import jev_state
+from fut.questions import jev_state, jev_state_labels
 from fut.settings import FutSettings
 from fut.store import FutStore
-from fut.types import FutGate, FutIntent, JevVerdict
+from fut.types import FutGate, FutIntent, FutPosition, JevVerdict
 from kcex.client import KcexError
 from kcex.fws import FutDepth, FutTicker
 from tests.fut.helpers import SPEC, make_snap
@@ -66,6 +66,9 @@ class FakeJev:
     def evaluate(self, snap, position, *, now_ms):
         self.calls += 1
         return replace(self.verdict, state=jev_state(snap, position, now_ms=now_ms))
+
+    def evaluate_labels(self, snap, position, *, now_ms):
+        return replace(self.verdict, state=jev_state_labels(snap, position, now_ms=now_ms))
 
 
 def sync_submit(fn, *args):
@@ -160,6 +163,20 @@ def test_jev_audit_keeps_main_position_marker_for_replay_without_snapshot_duplic
     payload = store.decisions("jev")[0]["payload"]
     assert payload["main_position"] == "long"
     assert "state" not in payload
+
+
+def test_jev_ab_logs_a_second_observational_call_without_wake_or_shadow_effect(tmp_path):
+    verdict = replace(UP, probabilities={"up": 0.9, "down": 0.05, "flat": 0.05})
+    loop, store, _, _, _ = build(tmp_path, settings=FutSettings(jev_ab=True), verdict=verdict)
+    loop._jev(make_snap(ts_ms=T0), T0)
+
+    normal, ab = store.decisions()
+    assert normal["kind"] == "jev" and ab["kind"] == "jev_ab"
+    assert normal["payload"]["probabilities"] == verdict.probabilities
+    assert ab["payload"]["variant"] == "labels"
+    assert ab["payload"]["answers"]["direction"] == "up"
+    assert ab["payload"]["probabilities"] == verdict.probabilities
+    assert "labels" in loop.jev.evaluate_labels(make_snap(), FutPosition(), now_ms=T0).state
 
 
 def test_random_entry_rate_is_cached_for_sixty_seconds(tmp_path, monkeypatch):

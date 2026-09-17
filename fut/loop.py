@@ -287,4 +287,28 @@ class FutLoop:
             "main_position": position.side if position.is_open() else None,
             "wake": wake, "dispatch": dispatch, "shadow": shadow, "snapshot": snap.compact(),
             "streak": self._entry_streak, "gate": wake_gate, "random_seed": self.shadow.effective_seed,
+            **({"probabilities": verdict.probabilities} if verdict.probabilities is not None else {}),
+        }, ts_ms=now)
+        if self.settings.jev_ab:
+            self._jev_ab(snap, position, now)
+
+    def _jev_ab(self, snap, position, now: int) -> None:
+        started = time.monotonic()
+        try:
+            verdict = self.jev.evaluate_labels(snap, position, now_ms=now)
+        except Exception as exc:  # noqa: BLE001 - observational failures never affect the paper path
+            self.store.log_decision("jev_ab", {
+                "variant": "labels", "model": getattr(self.jev, "name", "unknown"),
+                "error": f"{type(exc).__name__}: {exc}"[:200],
+                "latency_ms": int((time.monotonic() - started) * 1000), "input_tokens": 0,
+                "cost_usd": 0.0, "answers": None, "probabilities": None,
+                "snapshot": snap.compact(),
+            }, ts_ms=now)
+            return
+        cost = verdict.input_tokens / 1e6 * self.settings.jev_usd_per_mtok
+        self.store.log_decision("jev_ab", {
+            "variant": "labels", "model": verdict.model, "error": verdict.error,
+            "latency_ms": verdict.latency_ms, "input_tokens": verdict.input_tokens, "cost_usd": cost,
+            "answers": verdict.answers(), "probabilities": verdict.probabilities,
+            "snapshot": snap.compact(),
         }, ts_ms=now)

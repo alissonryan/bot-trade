@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typesafe_sdk import Choice, Noul, NoulCriteria
 
+from fut.labels import label_state
+from fut.settings import FutSettings
 from fut.types import FutPosition, FutSnapshot, JevVerdict
 
 
@@ -59,6 +61,44 @@ def build_questions(*, has_position: bool, move_cost_bps: float) -> dict:
     return questions
 
 
+def build_questions_labels(*, has_position: bool) -> dict:
+    """Questions for the observational A/B arm, whose inputs are semantic buckets."""
+    questions = {
+        "direction_60s": Choice(
+            instructions={
+                "question": "Which direction is the BTC_USDT perpetual mid more likely to take over the next minute?",
+                "goal": "Make a directional judgment from the semantic market labels; do not calculate a price target.",
+                "inputs": "Use the flow, price path, book, spread, volatility, funding, and position labels as context.",
+            },
+            criteria={
+                "up": "The next minute is more likely to continue upward than not",
+                "down": "The next minute is more likely to continue downward than not",
+                "flat": "Neither upward nor downward continuation is more likely than the other",
+            },
+        ),
+        "flow_aligned": Noul(
+            instructions="Do the flow and price-path labels point in the same direction?",
+            criteria=NoulCriteria(true="The flow and price labels reinforce the same directional story",
+                                  false="The flow and price labels conflict or provide no directional confirmation"),
+        ),
+        "regime": Choice(
+            instructions="Which market regime best matches the semantic labels?",
+            criteria={
+                "trend": "The market is persistently moving one way with reinforcing flow",
+                "range": "The market is balanced or oscillating without follow-through",
+                "volatile": "The market is moving sharply or conditions are changing abruptly",
+            },
+        ),
+    }
+    if has_position:
+        questions["exit_now"] = Noul(
+            instructions="Given the position labels, has the case for keeping this position weakened enough that closing now is better?",
+            criteria=NoulCriteria(true="The position is near its stop, losing, old, or facing labels against its side",
+                                  false="The position is fresh or supported by labels, or nothing materially changed"),
+        )
+    return questions
+
+
 def jev_state(snap: FutSnapshot, position: FutPosition, *, now_ms: int) -> dict:
     mid = snap.mid
     state = {
@@ -87,6 +127,23 @@ def jev_state(snap: FutSnapshot, position: FutPosition, *, now_ms: int) -> dict:
     return state
 
 
+def jev_state_labels(snap: FutSnapshot, position: FutPosition, *, now_ms: int,
+                     settings: FutSettings | None = None) -> dict:
+    """Build the compact semantic state used only by the A/B Jev call."""
+    settings = settings or FutSettings()
+    labels = label_state(snap, position, now_ms=now_ms, settings=settings)
+    state = {"market": "BTC_USDT perpetual (KCEX)", "labels": labels}
+    if position.is_open():
+        state["position"] = {
+            "side": labels.pop("position_side", "unknown"),
+            "age": labels.pop("age", "unknown"),
+            "unrealized": labels.pop("unrealized", "unknown"),
+        }
+    else:
+        state["position"] = "flat"
+    return state
+
+
 def jev_side(verdict: JevVerdict) -> str | None:
     return {"up": "long", "down": "short"}.get(verdict.direction)
 
@@ -95,7 +152,7 @@ def entry_qualifies(verdict: JevVerdict, *, threshold: float, regimes: tuple[str
     if verdict.error:
         return None
     side = jev_side(verdict)
-    if not side or verdict.direction_conf < threshold or verdict.beats_cost < threshold:
+    if not side or verdict.direction_conf < threshold or verdict.beats_cost is None or verdict.beats_cost < threshold:
         return None
     if regimes and verdict.regime not in regimes:
         return None

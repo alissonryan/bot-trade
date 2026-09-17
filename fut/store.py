@@ -145,5 +145,5 @@ class FutStore(Store):
     def model_cost_between(self, start_ms: int, end_ms: int) -> float:
         row = self._conn.execute(
             "SELECT COALESCE(SUM(json_extract(payload, '$.cost_usd')), 0) FROM fut_decisions "
-            "WHERE kind IN ('jev', 'llm') AND ts_ms >= ? AND ts_ms < ?", (start_ms, end_ms)).fetchone()
+            "WHERE kind IN ('jev', 'jev_ab', 'llm') AND ts_ms >= ? AND ts_ms < ?", (start_ms, end_ms)).fetchone()
         return float(row[0] or 0.0)

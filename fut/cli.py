@@ -28,6 +28,7 @@ from fut.panel.server import PanelServer
 from fut.report import ReadOnlyReportStore, evaluate, render, summarize
 from fut.settings import FutSettings
 from fut.store import FutStore, day_of
+from fut.jevscore import render as render_jevscore, score_database
 from fut.wakegrid import grid_results, load_rows, render_grid
 from kcex.fapi import FuturesPublic
 
@@ -58,6 +59,8 @@ def main(argv: list[str] | None = None) -> int:
     report_parser.add_argument("--since-ms", type=int, default=None)
     wakegrid = sub.add_parser("wakegrid", help="replay stored Jev wakes in read-only mode")
     wakegrid.add_argument("--since-ms", type=int, default=None)
+    jevscore = sub.add_parser("jevscore", help="score raw and labeled Jev observations in read-only mode")
+    jevscore.add_argument("--since-ms", type=int, default=None)
     panel_cmd = sub.add_parser("panel", help="serve the read-only local panel (loopback only)")
     panel_cmd.add_argument("--host", default="127.0.0.1")
     panel_cmd.add_argument("--port", type=int, default=PANEL_PORT)
@@ -67,6 +70,8 @@ def main(argv: list[str] | None = None) -> int:
         return report(args.since_ms)
     if args.cmd == "wakegrid":
         return wakegrid_report(args.since_ms)
+    if args.cmd == "jevscore":
+        return jevscore_report(args.since_ms)
     if args.cmd == "panel":
         return panel(args.host, args.port)
     try:
@@ -103,6 +108,14 @@ def wakegrid_report(since_ms: int | None) -> int:
         print(f"no futures paper database yet at {DB_PATH}")
         return EXIT_OK
     print(render_grid(grid_results(load_rows(DB_PATH, since_ms=since_ms))))
+    return EXIT_OK
+
+
+def jevscore_report(since_ms: int | None) -> int:
+    if not DB_PATH.exists():
+        print(f"no futures paper database yet at {DB_PATH}")
+        return EXIT_OK
+    print(render_jevscore(score_database(DB_PATH, since_ms=since_ms)))
     return EXIT_OK
 
 

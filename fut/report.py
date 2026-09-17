@@ -72,7 +72,7 @@ class ReadOnlyReportStore:
         start = max(start_ms, self.since_ms) if self.since_ms is not None else start_ms
         row = self._conn.execute(
             "SELECT COALESCE(SUM(json_extract(payload, '$.cost_usd')), 0) FROM fut_decisions "
-            "WHERE kind IN ('jev', 'llm') AND ts_ms >= ? AND ts_ms < ?", (start, end_ms)
+            "WHERE kind IN ('jev', 'jev_ab', 'llm') AND ts_ms >= ? AND ts_ms < ?", (start, end_ms)
         ).fetchone()
         return float(row[0] or 0.0)
 
@@ -125,8 +125,9 @@ def _percentile(sorted_values, q):
 def summarize(store, settings: FutSettings, criterion: EdgeCriterion = EdgeCriterion()) -> dict:
     decisions = store.decisions()
     jev = [d for d in decisions if d["kind"] == "jev"]
+    jev_all = [d for d in decisions if d["kind"] in ("jev", "jev_ab")]
     llm = [d for d in decisions if d["kind"] == "llm"]
-    jev_cost = sum(float(d["payload"].get("cost_usd") or 0.0) for d in jev)
+    jev_cost = sum(float(d["payload"].get("cost_usd") or 0.0) for d in jev_all)
     llm_cost = sum(float(d["payload"].get("cost_usd") or 0.0) for d in llm)
     real_jev_rows_by_day = Counter(day_of(d["ts_ms"]) for d in jev if d["payload"].get("model") != "mock")
     days = sum(rows >= criterion.min_jev_rows_per_day for rows in real_jev_rows_by_day.values())
@@ -139,7 +140,7 @@ def summarize(store, settings: FutSettings, criterion: EdgeCriterion = EdgeCrite
         start, end = day_bounds_ms(day)
         daily_after_models[day] = net - store.model_cost_between(start, end)
     for d in decisions:
-        if d["kind"] in ("jev", "llm"):
+        if d["kind"] in ("jev", "jev_ab", "llm"):
             day = day_of(d["ts_ms"])
             if day not in daily_after_models:
                 start, end = day_bounds_ms(day)

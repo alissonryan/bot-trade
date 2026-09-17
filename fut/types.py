@@ -52,7 +52,7 @@ class FutSnapshot:
 class JevVerdict:
     direction: str  # "up" | "down" | "flat"
     direction_conf: float
-    beats_cost: float
+    beats_cost: float | None
     flow_aligned: float
     regime: str
     exit_now: float | None
@@ -61,6 +61,7 @@ class JevVerdict:
     model: str
     error: str | None = None
     state: dict[str, Any] = field(default_factory=dict)
+    probabilities: dict[str, float] | None = None
 
     def answers(self) -> dict[str, Any]:
         return {"direction": self.direction, "direction_conf": self.direction_conf,

@@ -29,11 +29,13 @@ def test_from_env_reads_overrides(monkeypatch):
     monkeypatch.setenv("FUT_MAX_ENTRIES_PER_HOUR", "3")
     monkeypatch.setenv("FUT_WAKE_STREAK", "4")
     monkeypatch.setenv("FUT_WAKE_REGIMES", " Trend, VOLATILE ")
+    monkeypatch.setenv("FUT_JEV_AB", "true")
     s = FutSettings.from_env()
     assert s.min_hold_s == 60.0
     assert (s.leverage, s.margin_usdt, s.max_hold_s, s.ws_url, s.llm_reasoning) == (3, 15.0, 120.0, "", True)
     assert (s.max_spread_bps, s.min_move_mult, s.max_entries_per_hour) == (2.5, 2.0, 3)
     assert (s.wake_streak, s.wake_regimes) == (4, ("trend", "volatile"))
+    assert s.jev_ab is True
 
 
 @pytest.mark.parametrize("leverage", [0, 4, 125])

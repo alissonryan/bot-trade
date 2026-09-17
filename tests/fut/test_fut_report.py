@@ -152,6 +152,14 @@ def test_jev_only_total_deducts_jev_cost(tmp_path):
     )
 
 
+def test_jev_ab_cost_is_counted_but_ab_rows_do_not_count_edge_coverage(tmp_path):
+    store = FutStore(tmp_path / "fut.db")
+    store.log_decision("jev_ab", {"model": "jev-real", "cost_usd": 0.25}, ts_ms=T0)
+    summary = summarize(store, FutSettings(), EdgeCriterion(min_jev_rows_per_day=1))
+    assert summary["jev_cost_usd"] == pytest.approx(0.25)
+    assert summary["days"] == 0
+
+
 def test_day_loss_check_uses_daily_net_after_model_cost(tmp_path):
     store = build(tmp_path)
     store.log_decision("llm", {"cost_usd": 25.0}, ts_ms=T0 + DAY_MS // 2)

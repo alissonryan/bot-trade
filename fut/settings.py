@@ -57,6 +57,7 @@ class FutSettings:
     typesafe_api_key: str = ""
     jev_usd_per_mtok: float = 0.042
     jev_timeout_s: float = 2.0
+    jev_ab: bool = False
     wake_threshold: float = 0.6
     wake_streak: int = 1
     wake_regimes: tuple[str, ...] = ()
@@ -142,6 +143,7 @@ class FutSettings:
             typesafe_api_key=os.getenv("TYPESAFE_API_KEY", "").strip(),
             jev_usd_per_mtok=_f("FUT_JEV_USD_PER_MTOK", 0.042),
             jev_timeout_s=_f("FUT_JEV_TIMEOUT_SECONDS", 2.0),
+            jev_ab=_b("FUT_JEV_AB", False),
             wake_threshold=_f("FUT_WAKE_THRESHOLD", 0.6),
             wake_streak=_i("FUT_WAKE_STREAK", 1),
             wake_regimes=_regimes("FUT_WAKE_REGIMES"),

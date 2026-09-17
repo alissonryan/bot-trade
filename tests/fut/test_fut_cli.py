@@ -82,6 +82,31 @@ def test_wakegrid_reads_without_futstore_mode_stamp_or_write(tmp_path, monkeypat
     assert db.stat().st_mtime_ns == before
 
 
+def test_jevscore_reads_without_futstore_mode_stamp_or_write(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "fut.db"
+    import json
+    import sqlite3
+
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE fut_decisions (id INTEGER PRIMARY KEY, ts_ms INTEGER, kind TEXT, payload TEXT)")
+    conn.execute("INSERT INTO fut_decisions VALUES (1, 0, 'jev', ?)", (json.dumps({
+        "error": None, "answers": {"direction": "up", "direction_conf": 0.8},
+        "snapshot": {"bid": 100.0, "ask": 100.0, "last": 100.0},
+    }),))
+    conn.execute("INSERT INTO fut_decisions VALUES (2, 60000, 'llm', ?)", (json.dumps({
+        "snapshot": {"bid": 101.0, "ask": 101.0, "last": 101.0},
+    }),))
+    conn.commit()
+    conn.close()
+    before = db.stat().st_mtime_ns
+    monkeypatch.setattr(cli, "DB_PATH", db)
+    monkeypatch.setattr(cli, "FutStore", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("opened FutStore")))
+    assert cli.main(["jevscore", "--since-ms", "0"]) == cli.EXIT_OK
+    output = capsys.readouterr().out
+    assert "jev_ab" in output and "WARNING: rows from different configurations" in output
+    assert db.stat().st_mtime_ns == before
+
+
 def test_panel_serves_read_only_without_lock_or_database(tmp_path, monkeypatch):
     seen = {}
 

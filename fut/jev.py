@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Mapping
 
-from fut.questions import build_questions, jev_state
+from fut.questions import build_questions, build_questions_labels, jev_state, jev_state_labels
 from fut.settings import FutSettings
 from fut.types import FutPosition, FutSnapshot, JevVerdict
 
@@ -25,8 +26,16 @@ class JevClient:
         self.client = client
 
     def evaluate(self, snap: FutSnapshot, position: FutPosition, *, now_ms: int) -> JevVerdict:
-        state = jev_state(snap, position, now_ms=now_ms)
-        questions = build_questions(has_position=position.is_open(), move_cost_bps=self.settings.move_cost_bps)
+        return self._evaluate(snap, position, now_ms=now_ms, labels=False)
+
+    def evaluate_labels(self, snap: FutSnapshot, position: FutPosition, *, now_ms: int) -> JevVerdict:
+        return self._evaluate(snap, position, now_ms=now_ms, labels=True)
+
+    def _evaluate(self, snap: FutSnapshot, position: FutPosition, *, now_ms: int, labels: bool) -> JevVerdict:
+        state = (jev_state_labels(snap, position, now_ms=now_ms, settings=self.settings) if labels
+                 else jev_state(snap, position, now_ms=now_ms))
+        questions = (build_questions_labels(has_position=position.is_open()) if labels else
+                     build_questions(has_position=position.is_open(), move_cost_bps=self.settings.move_cost_bps))
         started = time.monotonic()
         try:
             r = self.client.system_one(state, questions)
@@ -34,10 +43,12 @@ class JevClient:
             exit_now = float(r.nouls["exit_now"].noul) if "exit_now" in questions else None
             return JevVerdict(
                 direction=str(direction.choice), direction_conf=float(direction.confidence),
-                beats_cost=float(r.nouls["move_beats_cost"].noul), flow_aligned=float(r.nouls["flow_aligned"].noul),
+                beats_cost=(None if labels else float(r.nouls["move_beats_cost"].noul)),
+                flow_aligned=float(r.nouls["flow_aligned"].noul),
                 regime=str(regime.choice), exit_now=exit_now,
                 latency_ms=int((time.monotonic() - started) * 1000),
-                input_tokens=int(getattr(r.usage, "input_tokens", 0) or 0), model=str(r.model), state=state)
+                input_tokens=int(getattr(r.usage, "input_tokens", 0) or 0), model=str(r.model), state=state,
+                probabilities=_probabilities(direction))
         except Exception as exc:  # noqa: BLE001 - any failure means "do not wake the LLM", named in the audit
             return JevVerdict.failed(f"{type(exc).__name__}: {exc}"[:200],
                                      latency_ms=int((time.monotonic() - started) * 1000),
@@ -51,7 +62,14 @@ class MockJev:
         self.settings = settings
 
     def evaluate(self, snap: FutSnapshot, position: FutPosition, *, now_ms: int) -> JevVerdict:
-        state = jev_state(snap, position, now_ms=now_ms)
+        return self._evaluate(snap, position, now_ms=now_ms, labels=False)
+
+    def evaluate_labels(self, snap: FutSnapshot, position: FutPosition, *, now_ms: int) -> JevVerdict:
+        return self._evaluate(snap, position, now_ms=now_ms, labels=True)
+
+    def _evaluate(self, snap: FutSnapshot, position: FutPosition, *, now_ms: int, labels: bool) -> JevVerdict:
+        state = (jev_state_labels(snap, position, now_ms=now_ms, settings=self.settings) if labels
+                 else jev_state(snap, position, now_ms=now_ms))
         f30 = snap.flow.get("30s", {})
         volume = (f30.get("buy") or 0) + (f30.get("sell") or 0)
         flow = (f30.get("cvd") or 0) / volume if volume else 0.0
@@ -65,8 +83,24 @@ class MockJev:
         exit_now = None
         if position.is_open():
             exit_now = 1 - p_up if position.side == "long" else p_up
-        return JevVerdict(direction, min(1.0, abs(p_up - 0.5) * 2), beats, aligned, regime, exit_now,
-                          0, 0, "mock", state=state)
+        probabilities = {"up": p_up, "down": 1.0 - p_up, "flat": 0.0}
+        return JevVerdict(direction, min(1.0, abs(p_up - 0.5) * 2), None if labels else beats, aligned, regime,
+                          exit_now, 0, 0, "mock", state=state, probabilities=probabilities)
+
+
+def _probabilities(choice) -> dict[str, float] | None:
+    raw = getattr(choice, "probabilities", None)
+    if not isinstance(raw, Mapping):
+        return None
+    result = {}
+    for key, value in raw.items():
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            result[str(key)] = value
+    return result or None
 
 
 def make_jev(settings: FutSettings):
