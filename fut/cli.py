@@ -58,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
         with InstanceLock(LOCK_PATH):
             add_file_logging(LOG_PATH)
             return run_loop(args.max_seconds)
+    # Tests reload bot.cli, creating a new AlreadyRunning class; catch both identities.
     except (AlreadyRunning, bot_cli.AlreadyRunning) as exc:
         log.error("%s", exc)
         return EXIT_ALREADY_RUNNING
