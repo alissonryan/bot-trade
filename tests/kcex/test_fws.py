@@ -7,6 +7,7 @@ from kcex.fws import (
     FutFair,
     FutTicker,
     OrderBook,
+    PING_INTERVAL_S,
     PublicFuturesWs,
     parse_frame,
     parse_text,
@@ -140,3 +141,13 @@ def test_pump_subscribes_every_channel_and_emits_parsed_events():
     assert len(events) == 8  # 1 ticker, 1 fair, 2 deals, 4 depth
     assert len(errors) == 1
     assert sock.closed
+
+
+def test_pump_sends_ping_after_ten_seconds(monkeypatch):
+    assert PING_INTERVAL_S < 20
+    clock = iter((0.0, 0.0, 10.1))
+    monkeypatch.setattr("kcex.fws.time.monotonic", lambda: next(clock))
+    sock = FakeSock(["not json", "not json"])
+    ws = PublicFuturesWs("wss://example", "BTC_USDT", lambda url: sock)
+    ws.pump(on_event=lambda event: None, on_error=lambda error: None, max_messages=2)
+    assert [json.loads(s) for s in sock.sent[4:]] == [{"method": "ping"}]

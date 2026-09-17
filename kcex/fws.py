@@ -15,7 +15,9 @@ from typing import Any
 
 DEFAULT_FUT_WS_URL = "wss://www.kcex.com/fapi/edge"
 CHANNELS = ("sub.ticker", "sub.deal", "sub.depth", "sub.fair.price")
-PING_INTERVAL_S = 15.0
+# The server was measured closing idle connections after ~20 s on 2026-09-17;
+# keep the ping comfortably inside that cutoff.
+PING_INTERVAL_S = 10.0
 RECV_TIMEOUT_S = 1.0
 # Inferred, not documented by the venue: every captured T=2 printed at the ask
 # (aggressive buy) and every T=1 at the bid (aggressive sell).

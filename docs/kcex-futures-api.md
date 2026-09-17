@@ -23,6 +23,10 @@ Subscribe (one message each): `{"method":"sub.ticker","param":{"symbol":"BTC_USD
 `sub.deal`, `sub.depth`, `sub.fair.price`. Ack: `{"channel":"rs.sub.depth","data":"success"}`.
 Ping `{"method":"ping"}` → `{"channel":"pong"}`.
 
+- Live measurement on 2026-09-17: without any ping, the server closed the connection after ~20 s,
+  with or without `User-Agent`/`Origin` headers. A ping every 15 s kept it open; the client uses
+  10 s to leave margin below that cutoff.
+
 | Channel | `data` | Rate observed |
 |---|---|---|
 | `push.ticker` | same fields as REST ticker | ~0.5/s |
@@ -34,6 +38,9 @@ Ping `{"method":"ping"}` → `{"channel":"pong"}`.
   Keep a book from a REST depth snapshot (with its `version`) plus deltas `version = prev + 1`;
   on a gap, resync from REST.
 - `push.funding.rate` was subscribed but sent nothing in 12 s; funding is read from REST.
+- In a 2-minute live sample on 2026-09-17, the book stayed synchronized with 0 version gaps.
+  `T=2` printed at the ask 126 times versus 18 at the bid; `T=1` printed at the bid 61 times
+  versus 13 at the ask. The minority prints are consistent with the book moving between frames.
 - **Inferred, not documented:** deal `T=2` printed at the ask (aggressive buy) and `T=1` at the
   bid (aggressive sell) in every captured sample, WS and REST.
 - Volumes are in contracts (`× contractSize` BTC).
