@@ -24,7 +24,7 @@ Python bot: OpenRouter LLM decides **BTC/USDT spot on KCEX**; a **code collar** 
 - Bind the local chart (`--chart`) off loopback. `bot/chart_server.py` hard-rejects anything but `127.0.0.1`/`localhost`/`::1`.
 - Poll REST every second again; the socket is the price source, REST is the fallback at `POLL_SECONDS`.
 - Solve Geetest or automate Google 2FA.
-- Add a second "judge" model, extra pairs, Telegram, or futures unless asked.
+- Add a second "judge" model, extra pairs, Telegram, or **live** futures unless asked. Futures **paper** lives in `fut/` (spec `docs/superpowers/specs/2026-09-17-kcex-futures-paper-jev-llm-design.md`): public `/fapi` reads only, never a private route or `KCEX_TOKEN`.
 - Commit `.env`, `.kcex-profile/`, `data/`, or print secrets.
 - Place live orders from tests or CI.
 - Cancel or modify orders the bot did not create.
@@ -47,6 +47,9 @@ Python bot: OpenRouter LLM decides **BTC/USDT spot on KCEX**; a **code collar** 
 | `kcex/login.py` | Playwright session capture |
 | `docs/kcex-spot-api.md` | Endpoint notes + confirmed public WS |
 | `docs/superpowers/specs/2026-09-04-kcex-llm-spot-bot-design.md` | Spec (cycle line may be stale; AGENTS.md wins) |
+| `kcex/fws.py`, `kcex/fapi.py` | Public futures WS (incremental book) and REST — GET only, no auth |
+| `fut/` | Futures paper: Jev trigger → LLM decision → collar → paper ledger, shadow baselines, report |
+| `docs/kcex-futures-api.md` | Captured public futures endpoints and frames |
 
 ## Run
 
@@ -56,6 +59,8 @@ PYTHONPATH=. python -m bot run --once          # paper, one LLM cycle
 PYTHONPATH=. python -m bot run                 # paper loop
 PYTHONPATH=. python -m bot run --chart         # paper loop + local chart at http://127.0.0.1:8765/
 PYTHONPATH=. python -m kcex.cli login          # human captcha + 2FA
+PYTHONPATH=. python -m fut run                  # futures paper loop (Jev every 2 s, LLM on wake)
+PYTHONPATH=. python -m fut report               # edge criterion vs flat/jev_only/random baselines
 ```
 
 Paper without KCEX login uses `PAPER_STARTING_USDT` (default 450) once, then its own ledger. Prices come from the confirmed public KCEX WS by default, with REST as fallback when WS is down or stale (`KCEX_WS_URL=-` forces REST-only). `--chart` serves a read-only local candlestick chart; it never binds off loopback and never opens a second KCEX connection.
@@ -75,6 +80,11 @@ Each mode gets its own database (`bot/cli.py::db_path_for_mode`): paper keeps `d
 ## P4 journal
 
 `JOURNAL_ENABLED=0` is opt-out. See AGENTS.md § P4: persistent BUY/fill linkage, null-PnL non-execution, independent outcome/reflection knowledge timestamps and mandatory final prompt `as_of` filter. At most five lessons/400-char reflections; one 160-token reflection after decision AND execution shares the daily Budget with an estimated next-decision reserve. The daily Budget is durable per mode/database: `Store.reserve_budget()` commits atomically BEFORE the HTTP dispatch and `Store.settle_budget()` trues it up after, so a same-day restart resumes spend and a corrupt/unreadable row blocks new spend instead of resetting to zero; a timeout/network failure also reserves the fallback cost instead of charging $0. Not an account identity or provider-wide cap. No reflection is a judge or order controller. P0 offline skips reflection explicitly; fixed cached intents cannot measure learning, and changed lesson payloads must miss old cache keys. Anti-look-ahead, migration, budget-priority and isolated-process opt-out tests are required.
+
+## Futures paper (fut/)
+
+Paper only, BTC_USDT perpetual, leverage 1x default and 3x hard cap, isolated margin, market orders at book ± slippage with the venue taker fee. Jev (`typesafe-sdk`, `FUT_JEV_MODEL`, `TYPESAFE_API_KEY`) evaluates every 2 s; `fut/questions.py` holds every question and threshold. A wake calls the LLM immediately, one call at a time, 10 s cooldown only after HOLD; late or price-moved LONG/SHORT are discarded, CLOSE never is. Stop, 5 min max hold and liquidation (by `fairPrice`) are enforced every step. Own DB `data/futures-paper.db` (mode `futures-paper`), own lock `data/futures.lock`. Exit codes: 3 already running, 8 unmonitored position, 9 DB of another mode. Sessions with the mock Jev never count toward the edge criterion; passing the criterion only allows writing a live spec.
+FUT_WAKE_THRESHOLD is a first guess to be tuned from paper data, never from the edge-criterion window.
 
 ## Resume (2026-09-04, safety revision)
 

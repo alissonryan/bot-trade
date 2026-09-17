@@ -204,7 +204,7 @@ Trigger body (stop-market example already live on the account):
 
 Success codes: `0` or `200`. Place response `data` is the new order id.
 
-## Futures (out of scope for this bot)
+## Public WebSocket (spot) and futures note
 
 **Public URL (confirmed):** `wss://wbs.kcex.com/ws?platform=web` (`kcex.ws.DEFAULT_WS_URL`). Also reachable at `wbs.kcex.io`. The site config defines `mainSocketUrl = "wss://wbs." + domain`. This is the bot's `KCEX_WS_URL` default when the env var is unset — no longer "unconfirmed."
 
@@ -297,7 +297,7 @@ Timing, implemented in `kcex.ws.PublicSpotWs.pump`: a ping is due every `PING_IN
 - Chart candles are **still REST kline** — there is no kline-over-WS. `bot/chart_server.py`'s `GET /kline` proxies `client.kline(...)` the same way `Eye.poll_heavy()` does; only the live tick stream (`GET /ws`) is WS-driven, and it re-broadcasts our own encoded tick JSON (`bot/chart_encode.py`), never the raw KCEX frame.
 - `KCEX_WS_URL=-` forces REST-only quotes (`Settings.ws_url` resolves to `""`, `start_ws_thread` no-ops), as does `WS_ENABLED=0`. Leaving `KCEX_WS_URL` unset uses the confirmed default above.
 
-For the record: `https://www.kcex.com/fapi/v1/contract/{ping,detail,ticker,depth/BTC_USDT,kline/BTC_USDT,deals/BTC_USDT,funding_rate/BTC_USDT,...}` answer without authentication in the MEXC contract API format, private routes live under `/fapi/v1/private/...` (401 without the session), and the futures socket is `wss://www.kcex.com/fapi/edge` (`{"method":"sub.ticker","param":{"symbol":"BTC_USDT"}}`). Not used by this bot.
+For the record: `https://www.kcex.com/fapi/v1/contract/{ping,detail,ticker,depth/BTC_USDT,kline/BTC_USDT,deals/BTC_USDT,funding_rate/BTC_USDT,...}` answer without authentication in the MEXC contract API format, private routes live under `/fapi/v1/private/...` (401 without the session), and the futures socket is `wss://www.kcex.com/fapi/edge` (`{"method":"sub.ticker","param":{"symbol":"BTC_USDT"}}`). The spot bot does not use it; the futures paper bot in `fut/` does — see docs/kcex-futures-api.md.
 
 ## Snapshot of this account (read-only)
 

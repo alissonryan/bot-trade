@@ -175,6 +175,18 @@ Audit: `sqlite3 data/bot.db "select ts, action, rule, json_extract(payload,'$.ll
 - Reflection is synchronous and can further delay local paper/TP/TTL monitoring, like existing LLM/HTTP work; it does not change the resident stop. See P1 availability caveats.
 - P0 shares recording, resolution, lookup and deferred-reflection code; its default reflection callback is **offline**, recording `reflection_offline` without invented prose. Enabled prompts change cache identity; do not reuse an old no-memory response as a cache hit. Fixed intents only test plumbing/as_of, not learning. The frozen 104-decision sample has n=2 trades and mechanically identical PnL with/without journal: **no evidence about learning until a funded paired run**. Paid smoke was not used; injected-HTTP parser smoke is explicitly synthetic. Local proof/report: `data/backtest/p4-optout-equivalence.json`, `p4-report.md`.
 
+## Futures paper (fut/)
+
+- Spec: `docs/superpowers/specs/2026-09-17-kcex-futures-paper-jev-llm-design.md`. Plan: `docs/superpowers/plans/2026-09-17-kcex-futures-paper-jev-llm.md`.
+- Transport: `kcex/fws.py` (public WS `wss://www.kcex.com/fapi/edge`, incremental depth kept from a REST snapshot + contiguous `version`) and `kcex/fapi.py` (GET only, client built with `token=""`). Deal side `T=2` buy / `T=1` sell is inferred from captured prints, not documented.
+- Flow per step: drain WS queue → REST refresh (depth resync on gap, 1m klines, funding, ticker fallback when WS is silent) → ledger mark (liquidation, stop, time limit, funding) → shadow mark → resolve LLM → Jev every 2 s.
+- REST fallback prices never make the market fresh for entries (`MarketState.ws_last_ms`).
+- `fut/collar.py` sizes off the same `fut/pricing.fill_price` the ledger fills at. CLOSE is never blocked.
+- The LLM worker thread opens its own `FutStore` connection (sqlite connections are thread-bound) for the durable budget reservation.
+- Baselines `shadow:jev_only` and `shadow:random` share ticks, collar and ledger; `flat` is 0.
+- Edge criterion (fixed): ≥ 200 trades, ≥ 14 days, no mock Jev, net > 0 after fees/funding/slippage/Jev/LLM, beats all three baselines, bootstrap CI95 lower bound of per-trade net > 0, no day below `FUT_MAX_DAY_LOSS_USDT`.
+- Tests: `tests/fut/test_fut_*.py`, `tests/kcex/test_fws.py`, `tests/kcex/test_fapi.py`. No network.
+
 ## Known live risks (do not ignore)
 
 - Place-order JS used `needDolos` / `content-sign`. **No live order has ever been sent through this client.** First real order may be rejected. Probe at the venue minimum only after paper looks sane.
@@ -185,7 +197,7 @@ Audit: `sqlite3 data/bot.db "select ts, action, rule, json_extract(payload,'$.ll
 
 ## Out of scope until the owner asks
 
-Second LLM, ETH or more pairs, limit/IOC entries, Telegram, DSPy training, CCXT as transport, futures (a public futures API exists, see the API doc; not used), automating Geetest/2FA.
+Second LLM, ETH or more pairs, limit/IOC entries, Telegram, DSPy training, CCXT as transport, live futures orders (futures paper exists in `fut/`, see docs/kcex-futures-api.md and the 2026-09-17 spec), automating Geetest/2FA.
 
 ## Session snapshot (2026-09-04, safety revision)
 
