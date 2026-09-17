@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from fut.jev import JevClient, MockJev, make_jev
-from fut.questions import build_questions, jev_side, jev_state, should_wake
+from fut.questions import build_questions, entry_qualifies, jev_side, jev_state, should_wake
 from fut.settings import FutSettings
 from fut.types import FutPosition, JevVerdict
 from tests.fut.helpers import make_snap
@@ -12,8 +12,8 @@ from tests.fut.helpers import make_snap
 LONG = FutPosition(side="long", contracts=2, entry=76000.0, stop=75900.0, liq=380.0, margin=15.2, opened_ms=0)
 
 
-def verdict(direction="up", conf=0.8, beats=0.8, exit_now=None, error=None):
-    return JevVerdict(direction, conf, beats, 0.5, "trend", exit_now, 100, 1000, "jev-1", error=error)
+def verdict(direction="up", conf=0.8, beats=0.8, regime="trend", exit_now=None, error=None):
+    return JevVerdict(direction, conf, beats, 0.5, regime, exit_now, 100, 1000, "jev-1", error=error)
 
 
 def test_questions_without_and_with_position():
@@ -42,6 +42,22 @@ def test_should_wake_entry_needs_direction_and_cost():
     assert should_wake(verdict(beats=0.5), flat, threshold=0.6) is None
     assert should_wake(verdict(direction="flat"), flat, threshold=0.6) is None
     assert should_wake(verdict(error="timeout"), flat, threshold=0.6) is None
+
+
+def test_entry_qualifies_requires_side_threshold_and_allowed_regime():
+    assert entry_qualifies(verdict(), threshold=0.6, regimes=()) == "long"
+    assert entry_qualifies(verdict(direction="down"), threshold=0.6, regimes=("trend",)) == "short"
+    assert entry_qualifies(verdict(regime="range"), threshold=0.6, regimes=("trend",)) is None
+    assert entry_qualifies(verdict(conf=0.5), threshold=0.6, regimes=()) is None
+    assert entry_qualifies(verdict(beats=0.5), threshold=0.6, regimes=()) is None
+    assert entry_qualifies(verdict(direction="flat"), threshold=0.6, regimes=()) is None
+    assert entry_qualifies(verdict(error="timeout"), threshold=0.6, regimes=()) is None
+
+
+def test_should_wake_entry_requires_the_requested_streak_but_exits_ignore_it():
+    assert should_wake(verdict(), FutPosition(), threshold=0.6, streak=1) == "entry_signal"
+    assert should_wake(verdict(), FutPosition(), threshold=0.6, streak=1, wake_streak=2) is None
+    assert should_wake(verdict(exit_now=0.9), LONG, threshold=0.6, streak=0) == "exit_signal"
 
 
 def test_should_wake_with_position():

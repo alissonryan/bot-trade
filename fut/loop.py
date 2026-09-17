@@ -15,7 +15,7 @@ from fut.dispatch import Dispatcher, Trigger
 from fut.ledger import PaperLedger
 from fut.llm import decide as default_llm_decide
 from fut.market import MarketState
-from fut.questions import jev_side, should_wake
+from fut.questions import entry_qualifies, jev_side, should_wake
 from fut.settings import FutSettings
 from fut.shadow import ShadowBooks
 from fut.store import FutStore, day_bounds_ms, day_of
@@ -90,6 +90,8 @@ class FutLoop:
         self._book_dirty = True
         self.jev_evals = 0
         self.llm_entries = 0
+        self._entry_side: str | None = None
+        self._entry_streak = 0
 
     # -- worker thread -----------------------------------------------------------
 
@@ -191,7 +193,8 @@ class FutLoop:
         decision, gate, outcome = res.decision, None, res.verdict
         if res.verdict == "ok" and decision.intent is not None and decision.intent.action != "HOLD":
             gate = collar.check(decision.intent, snap, position=self.ledger.position, balance=self.ledger.balance,
-                                day_pnl_usdt=self._day_net(now), spec=self.spec, settings=self.settings)
+                                day_pnl_usdt=self._day_net(now), spec=self.spec, settings=self.settings,
+                                recent_entries=self.store.count_opens("main", now - 3_600_000))
             if gate.ok and gate.action in ("LONG", "SHORT"):
                 self.ledger.open(gate, now_ms=now)
                 self.llm_entries += 1
@@ -221,12 +224,35 @@ class FutLoop:
     def _jev(self, snap, now: int) -> None:
         position = self.ledger.position
         if snap.stale and not position.is_open():
+            self._entry_side = None
+            self._entry_streak = 0
             return
         verdict = self.jev.evaluate(snap, position, now_ms=now)
         self.jev_evals += 1
         cost = verdict.input_tokens / 1e6 * self.settings.jev_usd_per_mtok
+        if position.is_open():
+            self._entry_side = None
+            self._entry_streak = 0
+        else:
+            side = entry_qualifies(verdict, threshold=self.settings.wake_threshold,
+                                   regimes=self.settings.wake_regimes)
+            if side is None:
+                self._entry_side = None
+                self._entry_streak = 0
+            elif side == self._entry_side:
+                self._entry_streak += 1
+            else:
+                self._entry_side = side
+                self._entry_streak = 1
         wake = should_wake(verdict, position, threshold=self.settings.wake_threshold,
-                           now_ms=now, min_hold_s=self.settings.min_hold_s)
+                           now_ms=now, min_hold_s=self.settings.min_hold_s,
+                           streak=self._entry_streak, wake_streak=self.settings.wake_streak,
+                           regimes=self.settings.wake_regimes)
+        wake_gate = None
+        if wake == "entry_signal":
+            wake_gate = collar.cost_gate(snap, spec=self.spec, settings=self.settings)
+            if wake_gate is not None:
+                wake = None
         shadow = self.shadow.on_jev(verdict, snap, now_ms=now, wake=wake,
                                     entry_rate=self.llm_entries / self.jev_evals)
         dispatch = None
@@ -240,4 +266,5 @@ class FutLoop:
             "model": verdict.model, "error": verdict.error, "latency_ms": verdict.latency_ms,
             "input_tokens": verdict.input_tokens, "cost_usd": cost, "answers": verdict.answers(),
             "wake": wake, "dispatch": dispatch, "shadow": shadow, "snapshot": snap.compact(),
+            "streak": self._entry_streak, "gate": wake_gate,
         }, ts_ms=now)

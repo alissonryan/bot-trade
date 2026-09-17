@@ -55,3 +55,12 @@ def test_mark_runs_stops_on_shadow_books(tmp_path):
     shadow.on_jev(verdict(), make_snap(), now_ms=1000, wake="entry_signal", entry_rate=0.0)
     out = shadow.mark(make_snap(bid=70000.0, ask=70000.1, last=70000.0, fair=70000.0), now_ms=2000)
     assert out == {"jev_only": "stop"}
+
+
+def test_shadow_entry_rate_uses_its_own_recent_open_count(tmp_path):
+    store, shadow = books(tmp_path)
+    store.add_fut_fill("shadow:jev_only", ts_ms=500, kind="open", side="long", contracts=1, price=1.0,
+                       fee=0.0, funding=0.0, pnl=0.0, reason="entry")
+    shadow.settings = FutSettings(max_entries_per_hour=1)
+    out = shadow.on_jev(verdict(), make_snap(), now_ms=1_000, wake="entry_signal", entry_rate=0.0)
+    assert out["jev_only"] == "entry_rate"

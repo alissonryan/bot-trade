@@ -15,7 +15,7 @@ from fut.store import FutStore
 from fut.types import FutGate, FutIntent, JevVerdict
 from kcex.client import KcexError
 from kcex.fws import FutDepth, FutTicker
-from tests.fut.helpers import SPEC
+from tests.fut.helpers import SPEC, make_snap
 
 T0 = 1_789_000_000_000
 UP = JevVerdict("up", 0.9, 0.9, 0.8, "trend", None, 100, 1000, "jev-1.13.0")
@@ -109,6 +109,53 @@ def test_jev_wake_calls_llm_and_opens_long(tmp_path):
     llm = store.decisions("llm")[0]["payload"]
     assert (llm["verdict"], llm["outcome"], llm["cost_usd"]) == ("ok", "opened", 0.001)
     assert loop.llm_entries == 1
+
+
+def test_entry_wake_requires_same_side_streak_and_logs_it(tmp_path):
+    loop, store, _, _, calls = build(tmp_path, settings=FutSettings(wake_streak=2))
+    snap = make_snap(ts_ms=T0)
+    loop._jev(snap, T0)
+    assert calls == []
+    assert store.decisions("jev")[0]["payload"]["streak"] == 1
+    loop._jev(snap, T0 + 2_000)
+    assert calls == [False]
+    assert store.decisions("jev")[1]["payload"]["streak"] == 2
+    assert store.decisions("jev")[1]["payload"]["wake"] == "entry_signal"
+
+
+def test_entry_streak_resets_on_nonqualifying_error_side_change_open_and_stale(tmp_path):
+    loop, store, _, _, _ = build(tmp_path, settings=FutSettings(wake_streak=3))
+    snap = make_snap(ts_ms=T0)
+    loop._jev(snap, T0)
+    assert loop._entry_streak == 1
+    loop.jev.verdict = replace(UP, direction="flat")
+    loop._jev(snap, T0 + 2_000)
+    assert loop._entry_streak == 0
+    loop.jev.verdict = replace(UP, error="timeout")
+    loop._jev(snap, T0 + 4_000)
+    assert loop._entry_streak == 0
+    loop.jev.verdict = replace(UP, direction="down")
+    loop._jev(snap, T0 + 6_000)
+    assert (loop._entry_side, loop._entry_streak) == ("short", 1)
+    open_long(loop)
+    loop._jev(snap, T0 + 8_000)
+    assert loop._entry_streak == 0
+    loop.ledger.close(loop.ledger.market_exit_price(snap), now_ms=T0 + 9_000, reason="test")
+    loop.jev.verdict = UP
+    loop._jev(snap, T0 + 10_000)
+    assert loop._entry_streak == 1
+    loop._jev(replace(snap, stale=True), T0 + 12_000)
+    assert loop._entry_streak == 0
+    assert len(store.decisions("jev")) == 6
+
+
+def test_cost_gate_blocks_flat_entry_wake_before_llm_and_is_logged(tmp_path):
+    settings = FutSettings(max_spread_bps=0.01)
+    loop, store, _, _, calls = build(tmp_path, settings=settings)
+    loop._jev(make_snap(ts_ms=T0), T0)
+    payload = store.decisions("jev")[0]["payload"]
+    assert calls == []
+    assert payload["wake"] is None and payload["gate"] == "spread_too_wide"
 
 
 def test_hold_trades_nothing(tmp_path):

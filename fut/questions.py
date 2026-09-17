@@ -91,15 +91,28 @@ def jev_side(verdict: JevVerdict) -> str | None:
     return {"up": "long", "down": "short"}.get(verdict.direction)
 
 
-def should_wake(verdict: JevVerdict, position: FutPosition, *, threshold: float,
-                now_ms: int = 0, min_hold_s: float = 0.0) -> str | None:
+def entry_qualifies(verdict: JevVerdict, *, threshold: float, regimes: tuple[str, ...] = ()) -> str | None:
     if verdict.error:
         return None
     side = jev_side(verdict)
+    if not side or verdict.direction_conf < threshold or verdict.beats_cost < threshold:
+        return None
+    if regimes and verdict.regime not in regimes:
+        return None
+    return side
+
+
+def should_wake(verdict: JevVerdict, position: FutPosition, *, threshold: float,
+                now_ms: int = 0, min_hold_s: float = 0.0, streak: int = 1,
+                wake_streak: int = 1, regimes: tuple[str, ...] = ()) -> str | None:
+    if verdict.error:
+        return None
     if not position.is_open():
-        if side and verdict.direction_conf >= threshold and verdict.beats_cost >= threshold:
+        side = entry_qualifies(verdict, threshold=threshold, regimes=regimes)
+        if side and streak >= wake_streak:
             return "entry_signal"
         return None
+    side = jev_side(verdict)
     # Exit/reversal wakes wait out the minimum hold; stop, liquidation and max hold
     # are enforced by the ledger every step and are not affected.
     if now_ms - position.opened_ms < min_hold_s * 1000:

@@ -47,7 +47,8 @@ class ShadowBooks:
     def _open(self, ledger: PaperLedger, intent: FutIntent, snap: FutSnapshot, now_ms: int) -> str:
         gate = collar.check(intent, snap, position=ledger.position, balance=ledger.balance,
                             day_pnl_usdt=self.store.day_net(ledger.book, day_of(now_ms)),
-                            spec=self.spec, settings=self.settings)
+                            spec=self.spec, settings=self.settings,
+                            recent_entries=self.store.count_opens(ledger.book, now_ms - 3_600_000))
         if gate.ok and gate.action in ("LONG", "SHORT"):
             ledger.open(gate, now_ms=now_ms)
             return "opened"
