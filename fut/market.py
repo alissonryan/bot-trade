@@ -62,7 +62,8 @@ class MarketState:
         self.bars_1m = [Bar(t=int(r[0]), o=r[1], h=r[2], l=r[3], c=r[4], v=r[5]) for r in rows]
 
     def _book_usable(self, now_ms: int | None) -> bool:
-        return self.book.synced and (now_ms is None or now_ms - self.ws_last_ms <= self.settings.stale_market_s * 1000)
+        observed_ms = self.last_event_ms if now_ms is None else now_ms
+        return self.book.synced and observed_ms - self.ws_last_ms <= self.settings.stale_market_s * 1000
 
     def bid(self, now_ms: int | None = None) -> float:
         best = self.book.best_bid() if self._book_usable(now_ms) else None

@@ -44,6 +44,7 @@ def test_stale_ws_uses_rest_ticker_quotes_and_neutral_depth():
 
     s = m.snapshot(6_000)
 
+    assert (m.bid(), m.ask()) == (97.95, 98.05)
     assert (s.bid, s.ask, s.last) == (97.95, 98.05, 98.0)
     assert s.depth_bps == {"5": {"bid": 0, "ask": 0}, "10": {"bid": 0, "ask": 0},
                            "25": {"bid": 0, "ask": 0}}
