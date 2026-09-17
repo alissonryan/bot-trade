@@ -114,6 +114,13 @@ class FutStore(Store):
         ).fetchone()
         return int(row[0])
 
+    def count_real_jev(self) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM fut_decisions "
+            "WHERE kind='jev' AND json_extract(payload, '$.model') != 'mock'"
+        ).fetchone()
+        return int(row[0])
+
     def day_net(self, book: str, day: str) -> float:
         row = self._conn.execute(
             "SELECT COALESCE(SUM(pnl),0) - COALESCE(SUM(fee),0) - COALESCE(SUM(funding),0) "

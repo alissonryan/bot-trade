@@ -151,13 +151,40 @@ def test_entry_streak_resets_on_nonqualifying_error_side_change_open_and_stale(t
     assert len(store.decisions("jev")) == 6
 
 
-def test_jev_audit_keeps_main_position_state_for_replay(tmp_path):
+def test_jev_audit_keeps_main_position_marker_for_replay_without_snapshot_duplication(tmp_path):
     loop, store, _, _, _ = build(tmp_path)
     open_long(loop)
 
     loop._jev(make_snap(ts_ms=T0), T0)
 
-    assert store.decisions("jev")[0]["payload"]["state"]["position"]["side"] == "long"
+    payload = store.decisions("jev")[0]["payload"]
+    assert payload["main_position"] == "long"
+    assert "state" not in payload
+
+
+def test_random_entry_rate_is_cached_for_sixty_seconds(tmp_path, monkeypatch):
+    loop, _, _, clock, _ = build(tmp_path)
+    calls = []
+
+    def count_real_jev():
+        calls.append("jev")
+        return 4
+
+    def count_opens(book, since_ms):
+        calls.append(("opens", book, since_ms))
+        return 2
+
+    monkeypatch.setattr(loop.store, "count_real_jev", count_real_jev, raising=False)
+    monkeypatch.setattr(loop.store, "count_opens", count_opens)
+
+    assert loop._random_entry_rate() == 0.5
+    clock.now += 2_000
+    assert loop._random_entry_rate() == 0.5
+    assert calls == ["jev", ("opens", "main", 0)]
+
+    clock.now += 58_000
+    assert loop._random_entry_rate() == 0.5
+    assert calls == ["jev", ("opens", "main", 0), "jev", ("opens", "main", 0)]
 
 
 def test_random_entry_rate_uses_persisted_main_opens_and_real_jev_rows(tmp_path):

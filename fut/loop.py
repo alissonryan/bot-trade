@@ -28,6 +28,7 @@ BARS_EVERY_MS = 60_000
 FUNDING_EVERY_MS = 60_000
 TICKER_FALLBACK_EVERY_MS = 1_000
 SPEC_EVERY_MS = 3_600_000
+RANDOM_RATE_CACHE_MS = 60_000
 
 
 class Unmonitored(RuntimeError):
@@ -94,6 +95,8 @@ class FutLoop:
         self.llm_entries = 0
         self._entry_side: str | None = None
         self._entry_streak = 0
+        self._random_rate = 0.0
+        self._random_rate_at_ms: int | None = None
 
     # -- worker thread -----------------------------------------------------------
 
@@ -189,10 +192,14 @@ class FutLoop:
         return self.store.day_net("main", day) - self.store.model_cost_between(start, end)
 
     def _random_entry_rate(self) -> float:
-        real_jev = sum(1 for decision in self.store.decisions("jev")
-                       if decision["payload"].get("model") != "mock")
-        main_opens = sum(1 for fill in self.store.fut_fills("main") if fill["kind"] == "open")
-        return min(1.0, main_opens / real_jev) if real_jev else 0.0
+        now = self._clock()
+        if self._random_rate_at_ms is not None and now - self._random_rate_at_ms < RANDOM_RATE_CACHE_MS:
+            return self._random_rate
+        real_jev = self.store.count_real_jev()
+        main_opens = self.store.count_opens("main", 0)
+        self._random_rate = min(1.0, main_opens / real_jev) if real_jev else 0.0
+        self._random_rate_at_ms = now
+        return self._random_rate
 
     def _resolve(self, snap, now: int) -> None:
         res = self.dispatcher.poll(mid_now=snap.mid)
