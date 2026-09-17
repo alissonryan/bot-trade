@@ -1,0 +1,60 @@
+import pytest
+
+from fut.settings import MAX_LEVERAGE, FutSettings
+from fut.types import FutPosition, FutSnapshot, JevVerdict
+from kcex.fws import DEFAULT_FUT_WS_URL
+
+
+def test_defaults_match_the_spec():
+    s = FutSettings()
+    assert (s.leverage, s.margin_usdt, s.max_balance_pct, s.starting_usdt) == (1, 20.0, 0.05, 450.0)
+    assert (s.max_hold_s, s.jev_every_s, s.llm_cooldown_s, s.llm_timeout_s) == (300.0, 2.0, 10.0, 8.0)
+    assert (s.stale_price_bps, s.wake_threshold, s.move_cost_bps) == (5.0, 0.6, 3.0)
+    assert s.ws_url == DEFAULT_FUT_WS_URL
+    assert MAX_LEVERAGE == 3
+
+
+def test_from_env_reads_overrides(monkeypatch):
+    monkeypatch.setenv("FUT_LEVERAGE", "3")
+    monkeypatch.setenv("FUT_MARGIN_USDT", "15")
+    monkeypatch.setenv("FUT_MAX_HOLD_SECONDS", "120")
+    monkeypatch.setenv("FUT_WS_URL", "-")
+    monkeypatch.setenv("FUT_LLM_REASONING", "1")
+    s = FutSettings.from_env()
+    assert (s.leverage, s.margin_usdt, s.max_hold_s, s.ws_url, s.llm_reasoning) == (3, 15.0, 120.0, "", True)
+
+
+@pytest.mark.parametrize("leverage", [0, 4, 125])
+def test_leverage_outside_one_to_three_is_refused(leverage):
+    with pytest.raises(ValueError):
+        FutSettings(leverage=leverage)
+
+
+def test_other_invalid_values_are_refused():
+    with pytest.raises(ValueError):
+        FutSettings(slippage_bps=-1)
+    with pytest.raises(ValueError):
+        FutSettings(min_stop_pct=0.02, max_stop_pct=0.01)
+    with pytest.raises(ValueError):
+        FutSettings(symbol="ETH_USDT")
+
+
+def test_mock_jev_without_key_or_with_mock_model():
+    assert FutSettings().uses_mock_jev
+    assert not FutSettings(typesafe_api_key="k").uses_mock_jev
+    assert FutSettings(typesafe_api_key="k", jev_model="mock").uses_mock_jev
+
+
+def test_position_and_snapshot_helpers():
+    assert not FutPosition().is_open()
+    assert FutPosition(side="short", contracts=2, entry=1.0).is_open()
+    snap = FutSnapshot(1, 100.0, 99.0, 101.0, 100.0, 100.0, 0.0, None, 1.0, 0.0, {}, {}, {}, None, False)
+    assert snap.mid == 100.0
+    assert FutSnapshot(1, 100.0, 0.0, 101.0, 0.0, 0.0, 0.0, None, 0.0, 0.0, {}, {}, {}, None, True).mid == 100.0
+    assert snap.compact()["bid"] == 99.0
+
+
+def test_failed_verdict_carries_error():
+    v = JevVerdict.failed("boom", latency_ms=5, model="jev-latest", state={"a": 1})
+    assert v.error == "boom" and v.direction == "flat" and v.state == {"a": 1}
+    assert set(v.answers()) == {"direction", "direction_conf", "beats_cost", "flow_aligned", "regime", "exit_now"}
