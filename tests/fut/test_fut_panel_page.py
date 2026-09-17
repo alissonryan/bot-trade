@@ -77,3 +77,19 @@ def test_page_collapses_repeated_jev_errors_and_shows_health_warning():
     assert '" desde " + hora(s.jev.desde_ms).slice(0, 5)' in html
     assert "Jev fora do ar" in html
     assert "o bot continua protegendo posições abertas" in html
+
+
+def test_page_makes_the_jev_health_warning_position_agnostic():
+    html = PAGE.read_text(encoding="utf-8")
+    assert "o bot não está avaliando novas entradas (não há posição aberta)." in html
+    assert "const jevPositionNote = s.posicao" in html
+    assert "o bot continua protegendo posições abertas (stop e tempo máximo)" in html
+
+
+def test_page_clears_card_dimming_before_any_state_early_return():
+    html = PAGE.read_text(encoding="utf-8")
+    cards_at = html.index("const cards")
+    first_return_at = html.index('if (s.estado === "sem_banco")')
+    assert cards_at < first_return_at
+    assert 's.estado === "erro_painel" || s.banco_ocupado' in html
+    assert "card.classList.remove(\"dados-desatualizados\")" in html
