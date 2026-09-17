@@ -105,7 +105,7 @@ def _isolated_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
 # purpose is dotenv-loading behavior opts in with the `synthetic_dotenv`
 # fixture below -- an explicit temp file, never the ambient stack/cwd
 # search that caused the leak, and never the repo's real `.env`.
-_DOTENV_ALIAS_MODULES = ("bot.cli",)
+_DOTENV_ALIAS_MODULES = ("bot.cli", "fut.cli")
 
 
 def _blocked_load_dotenv(*_args: object, **_kwargs: object) -> bool:
